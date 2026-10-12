@@ -20,6 +20,7 @@ public sealed class AccountCredential
     public bool Paused { get; set; }
     public bool Draining { get; set; }
     public DateTimeOffset? CooldownUntil { get; set; }
+    public string AuthStatus { get; set; } = "ready";
     public DateTimeOffset ExpiresAt { get; set; }
     public DateTimeOffset? EarliestRefreshAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
@@ -27,7 +28,7 @@ public sealed class AccountCredential
     public object PublicView(bool active, string? authHealth = null) => new { id = Id, name = Name, active,
         enabled = Enabled, paused = Paused, drain = Draining, cooldownUntil = CooldownUntil,
         state = !Enabled ? "disabled" : Paused ? "paused" : Draining ? "draining" : CooldownUntil > DateTimeOffset.UtcNow ? "cooldown" : active ? "active" : "standby",
-        plan = (string?)null, auth = authHealth ?? (ExpiresAt > DateTimeOffset.UtcNow ? "ready" : "refresh_needed"), quota = (object?)null, updatedAt = UpdatedAt };
+        plan = (string?)null, auth = authHealth ?? (AuthStatus != "ready" ? AuthStatus : ExpiresAt > DateTimeOffset.UtcNow ? "ready" : "refresh_needed"), quota = (object?)null, updatedAt = UpdatedAt };
 }
 
 public sealed class VaultDocument
@@ -97,7 +98,17 @@ public sealed class Vault
             var next = CloneDocument(document); next.ActiveAccountId = id; Persist(next); document = next; return true;
         }
     }
-    public static bool IsEligible(AccountCredential account) => account.Enabled && !account.Paused && !account.Draining && !(account.CooldownUntil > DateTimeOffset.UtcNow);
+    public static bool IsEligible(AccountCredential account) => account.Enabled && !account.Paused && !account.Draining && account.AuthStatus != "reauth_required" && !(account.CooldownUntil > DateTimeOffset.UtcNow);
+    public void RequireReauthorization(string id) => SetAuthStatus(id, "reauth_required");
+    public void SetAuthStatus(string id, string status)
+    {
+        if (status is not ("ready" or "refresh_pending" or "reauth_required")) throw new ArgumentException("Invalid auth status.", nameof(status));
+        lock (gate)
+        {
+            var next = CloneDocument(document); next.Accounts.Single(x => x.Id == id).AuthStatus = status;
+            Persist(next); document = next;
+        }
+    }
     public bool Control(string id, string operation)
     {
         lock (gate)
@@ -126,6 +137,7 @@ public sealed class Vault
             target.AccessToken = tokens.AccessToken; target.RefreshToken = tokens.RefreshToken;
             if (!string.IsNullOrEmpty(tokens.IdToken)) target.IdToken = tokens.IdToken;
             target.Scope = tokens.Scope; target.ExpiresAt = DateTimeOffset.UtcNow.AddSeconds(tokens.ExpiresIn);
+            target.AuthStatus = "ready";
             target.EarliestRefreshAt = tokens.EarliestRefreshAt; target.UpdatedAt = DateTimeOffset.UtcNow;
             Persist(next); document = next;
         }

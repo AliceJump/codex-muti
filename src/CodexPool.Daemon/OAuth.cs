@@ -71,28 +71,34 @@ public sealed class OAuth(HttpClient http, Vault vault)
         try
         {
             var account = vault.Find(id) ?? throw new AuthFailure("account_not_found");
-            if (health.TryGetValue(id, out var status) && status == "reauth_required") throw new AuthFailure(status);
+            if (account.AuthStatus is "reauth_required" or "refresh_pending" || health.TryGetValue(id, out var status) && status == "reauth_required") throw new AuthFailure("reauth_required");
             if (account.ExpiresAt > DateTimeOffset.UtcNow.AddMinutes(2)) return account;
             if (refreshBackoff.TryGetValue(id, out var retryAt) && retryAt > DateTimeOffset.UtcNow) throw new AuthFailure("auth_temporarily_unavailable");
             if (account.EarliestRefreshAt > DateTimeOffset.UtcNow) throw new AuthFailure("refresh_not_yet_allowed");
             TokenResponse token;
+            // Crash between remote rotation and local replacement must not reuse the old token.
+            vault.SetAuthStatus(id, "refresh_pending");
             try { token = await ExchangeAsync(new() { ["grant_type"] = "refresh_token", ["client_id"] = account.ClientId,
                 ["refresh_token"] = account.RefreshToken, ["resource"] = Resource }, cancellationToken); }
             catch (AuthFailure ex)
             {
                 health[id] = ex.Code == "auth_temporarily_unavailable" ? ex.Code : "reauth_required";
-                if (ex.Code == "auth_temporarily_unavailable") refreshBackoff[id] = DateTimeOffset.UtcNow.AddSeconds(30);
+                if (health[id] == "reauth_required") vault.RequireReauthorization(id);
+                if (ex.Code == "auth_temporarily_unavailable")
+                { vault.SetAuthStatus(id, "ready"); refreshBackoff[id] = DateTimeOffset.UtcNow.AddSeconds(30); }
                 throw;
             }
             catch (OperationCanceledException)
             {
                 // Token endpoint may have rotated while the response was lost. Never reuse blindly.
                 health[id] = "reauth_required";
+                vault.RequireReauthorization(id);
                 throw new AuthFailure("refresh_outcome_unknown");
             }
             catch (HttpRequestException)
             {
                 health[id] = "reauth_required";
+                vault.RequireReauthorization(id);
                 throw new AuthFailure("refresh_outcome_unknown");
             }
             try
@@ -100,7 +106,7 @@ public sealed class OAuth(HttpClient http, Vault vault)
                 if (token.IdToken.Length > 0 && await ValidateIdTokenAsync(token.IdToken, account.ClientId, null, cancellationToken) != account.Subject)
                     throw new AuthFailure("account_identity_mismatch");
             }
-            catch { health[id] = "reauth_required"; throw; }
+            catch { health[id] = "reauth_required"; vault.RequireReauthorization(id); throw; }
             try { vault.ReplaceTokens(id, account.RefreshToken, token); }
             catch
             { health[id] = "reauth_required"; throw new AuthFailure("rotated_token_persistence_failed"); }

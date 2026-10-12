@@ -21,7 +21,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Permanent refresh failure suppresses subsequent refresh attempts", InvalidGrant),
     ("Tampered ciphertext never falls back to plaintext", Tamper),
     ("Local API authenticates controls, rejects Origin/Host, enforces one daemon", LocalApi),
-    ("Account controls preserve credentials and cannot activate excluded accounts", AccountControls)
+    ("Account controls preserve credentials and cannot activate excluded accounts", AccountControls),
+    ("Crash during rotation leaves durable refresh_pending and never reuses token", CrashRefresh)
 };
 var failed = 0;
 foreach (var (name, run) in tests)
@@ -111,6 +112,8 @@ async Task InvalidGrant()
     var vault = Store("invalid-grant"); vault.Add(Account("A")); using var issuer = new FakeIssuer { RejectRefresh = true }; using var http = new HttpClient(issuer); var oauth = new OAuth(http, vault);
     await Rejected(() => oauth.ReadyAsync("A", default)); await Rejected(() => oauth.ReadyAsync("A", default));
     Check(issuer.RefreshCalls == 1 && vault.Find("A")!.RefreshToken == "REFRESH-CANARY-A");
+    var restarted = new OAuth(http, Store("invalid-grant"));
+    await Rejected(() => restarted.ReadyAsync("A", default)); Check(issuer.RefreshCalls == 1);
 }
 async Task Tamper()
 {
@@ -130,6 +133,13 @@ Task AccountControls()
     Check(vault.Control("B", "enable") && vault.ActivateForProbe("B"));
     Check(vault.Find("B")!.RefreshToken == before && !vault.Control("missing", "pause"));
     Check(Store("controls").ActiveId == "B"); return Task.CompletedTask;
+}
+async Task CrashRefresh()
+{
+    var vault = Store("crash-refresh"); vault.Add(Account("A")); vault.SetAuthStatus("A", "refresh_pending");
+    using var issuer = new FakeIssuer(); using var http = new HttpClient(issuer);
+    var reopened = Store("crash-refresh");
+    await Rejected(() => new OAuth(http, reopened).ReadyAsync("A", default)); Check(issuer.RefreshCalls == 0);
 }
 async Task LocalApi()
 {
