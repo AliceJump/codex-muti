@@ -79,6 +79,9 @@ public partial class FloatingWindow : Window
     }
     private async Task WatchAsync()
     {
+        try { await ProxyStartup.EnsureRunningAsync(lifetime.Token); }
+        catch (Exception ex) when (ex is HttpRequestException or IOException or System.ComponentModel.Win32Exception or OperationCanceledException)
+        { Connection.Text = "代理启动未完成 · 正在重新连接"; }
         while (!lifetime.IsCancellationRequested)
         {
             try
@@ -98,6 +101,13 @@ public partial class FloatingWindow : Window
             { if (!lifetime.IsCancellationRequested) await Dispatcher.InvokeAsync(() => { Connection.Text = "服务离线 · 正在重新连接"; Accounts.IsEnabled = false; }); }
             if (!lifetime.IsCancellationRequested) try { await Task.Delay(1500, lifetime.Token); } catch (OperationCanceledException) { }
         }
+    }
+    internal async void ShowFromLauncher()
+    {
+        Show(); ClampPosition(); Activate();
+        try { await ProxyStartup.EnsureRunningAsync(lifetime.Token); }
+        catch (Exception ex) when (ex is HttpRequestException or IOException or System.ComponentModel.Win32Exception or OperationCanceledException)
+        { SetNotice("代理未能启动，请检查本地服务。"); }
     }
     private void Render(JsonElement state)
     {

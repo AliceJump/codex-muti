@@ -19,8 +19,7 @@ public partial class App : System.Windows.Application
         }
         var window = new FloatingWindow { ShowInTaskbar = e.Args.Contains("--review", StringComparer.Ordinal) };
         showSignal = new EventWaitHandle(false, EventResetMode.AutoReset, signalName);
-        showListener = ThreadPool.RegisterWaitForSingleObject(showSignal, (_, _) => window.Dispatcher.BeginInvoke(() =>
-        { window.Show(); window.Activate(); }), null, Timeout.Infinite, false);
+        showListener = ThreadPool.RegisterWaitForSingleObject(showSignal, (_, _) => window.Dispatcher.BeginInvoke(window.ShowFromLauncher), null, Timeout.Infinite, false);
         MainWindow = window; window.Show();
     }
     protected override void OnExit(System.Windows.ExitEventArgs e)
