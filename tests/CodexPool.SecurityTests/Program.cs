@@ -20,7 +20,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("A/B refresh rotation and concurrent single-flight are independent", Refresh),
     ("Permanent refresh failure suppresses subsequent refresh attempts", InvalidGrant),
     ("Tampered ciphertext never falls back to plaintext", Tamper),
-    ("Local API authenticates controls, rejects Origin/Host, enforces one daemon", LocalApi)
+    ("Local API authenticates controls, rejects Origin/Host, enforces one daemon", LocalApi),
+    ("Account controls preserve credentials and cannot activate excluded accounts", AccountControls)
 };
 var failed = 0;
 foreach (var (name, run) in tests)
@@ -116,6 +117,19 @@ async Task Tamper()
     var vault = Store("tamper"); vault.Add(Account("A")); var path = Path.Combine(root, "tamper", "vault.dpapi");
     var data = await File.ReadAllBytesAsync(path); data[^1] ^= 0xff; await File.WriteAllBytesAsync(path, data);
     try { Store("tamper"); throw new InvalidOperationException(); } catch (CryptographicException) { }
+}
+Task AccountControls()
+{
+    var vault = Store("controls"); vault.Add(Account("A")); vault.Add(Account("B"));
+    var before = vault.Find("B")!.RefreshToken;
+    Check(vault.Control("B", "pause") && !vault.ActivateForProbe("B"));
+    Check(vault.Control("B", "resume") && vault.ActivateForProbe("B"));
+    Check(vault.Control("B", "drain") && !vault.ActivateForProbe("B"));
+    Check(vault.Control("B", "undrain") && vault.ActivateForProbe("B"));
+    Check(vault.Control("B", "disable") && !vault.ActivateForProbe("B"));
+    Check(vault.Control("B", "enable") && vault.ActivateForProbe("B"));
+    Check(vault.Find("B")!.RefreshToken == before && !vault.Control("missing", "pause"));
+    Check(Store("controls").ActiveId == "B"); return Task.CompletedTask;
 }
 async Task LocalApi()
 {

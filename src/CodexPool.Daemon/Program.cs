@@ -40,6 +40,7 @@ try
         { Timeout = TimeSpan.FromMinutes(10) };
     var auth = new OAuth(http, vault); var relay = new ResponsesRelay(modelHttp);
     var recent = new ConcurrentQueue<object>();
+    var inFlight = new ConcurrentDictionary<string, int>();
     var boundaryProbe = args.Contains("--live-boundary-probe", StringComparer.Ordinal);
     long requestCount = 0;
     var sessionOwners = new ConcurrentDictionary<string, string>();
@@ -64,8 +65,8 @@ try
     });
     app.MapGet("/health", () => new { status = "running", stage = "phase0", automaticSwitching = false });
     app.MapGet("/status", () => new { activeAccountId = vault.ActiveId, stage = "phase0", automaticSwitching = false,
-        boundaryProbe, distinctUsers = vault.DistinctUsers, liveMigrationValidated = false, quotaSource = "unverified", accounts = vault.PublicAccounts, recentRequests = recent.ToArray() });
-    app.MapGet("/accounts", () => vault.PublicAccounts);
+        boundaryProbe, distinctUsers = vault.DistinctUsers, liveMigrationValidated = false, quotaSource = "unverified", accounts = vault.Views(auth.Health), inFlightRequests = inFlight.ToArray(), recentRequests = recent.ToArray() });
+    app.MapGet("/accounts", () => vault.Views(auth.Health));
     app.MapGet("/usage", () => new { available = false, reason = "public_quota_source_unverified", accounts = vault.PublicAccounts });
     app.MapGet("/models", async (HttpContext context) =>
     {
@@ -109,8 +110,14 @@ try
         if (vault.Find(id) is null) return Results.NotFound(new { error = new { code = "account_not_found" } });
         if (vault.ActiveId != id && Interlocked.Read(ref requestCount) > 0 && !boundaryProbe)
             return Results.Conflict(new { error = new { code = "live_migration_gate_pending" } });
-        vault.ActivateForProbe(id); return Results.Ok(new { activeAccountId = id, affects = "new_requests_only" });
+        if (auth.Health(id) == "reauth_required" || !vault.ActivateForProbe(id))
+            return Results.Conflict(new { error = new { code = "account_not_eligible" } });
+        return Results.Ok(new { activeAccountId = id, affects = "new_requests_only" });
     });
+    foreach (var operation in new[] { "pause", "resume", "drain", "undrain", "enable", "disable" })
+        app.MapPost("/accounts/{id}/" + operation, (string id) => vault.Control(id, operation)
+            ? Results.Ok(new { accountId = id, operation, affects = "new_requests_only" })
+            : Results.NotFound(new { error = new { code = "account_not_found" } }));
     app.MapPost("/v1/responses", async (HttpContext context) =>
     {
         if (context.Request.ContentType?.StartsWith("application/json", StringComparison.OrdinalIgnoreCase) != true || context.Request.Headers.ContainsKey("Content-Encoding"))
@@ -128,6 +135,7 @@ try
         { context.Response.StatusCode = 400; await context.Response.WriteAsJsonAsync(new { error = new { code = "server_continuation_unsupported" } }); return; }
         var selected = vault.Selected;
         if (selected is null) { context.Response.StatusCode = 503; await context.Response.WriteAsJsonAsync(new { error = new { code = "no_authorized_account" } }); return; }
+        if (!Vault.IsEligible(selected)) { context.Response.StatusCode = 503; await context.Response.WriteAsJsonAsync(new { error = new { code = "active_account_not_eligible" } }); return; }
         var account = await auth.ReadyAsync(selected.Id, context.RequestAborted);
         Interlocked.Increment(ref requestCount);
         var headers = context.Request.Headers.ToDictionary(x => x.Key, x => x.Value.ToString(), StringComparer.OrdinalIgnoreCase);
@@ -142,8 +150,11 @@ try
         else headers.Remove("x-codex-turn-state");
         var started = Stopwatch.GetTimestamp(); var requestId = Guid.NewGuid().ToString("N");
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted); lifetime.CancelAfter(TimeSpan.FromMinutes(10));
-        var result = await relay.ForwardAsync(body, "application/json", [new(account.Id, new("https://api.openai.com/v1/responses"), account.AccessToken)], headers,
-            new WebSink(context), lifetime.Token);
+        RelayResult result;
+        inFlight.AddOrUpdate(account.Id, 1, (_, count) => count + 1);
+        try { result = await relay.ForwardAsync(body, "application/json", [new(account.Id, new("https://api.openai.com/v1/responses"), account.AccessToken)], headers,
+            new WebSink(context), lifetime.Token); }
+        finally { inFlight.AddOrUpdate(account.Id, 0, (_, count) => Math.Max(0, count - 1)); }
         recent.Enqueue(new { timestamp = DateTimeOffset.UtcNow, requestId, account = result.AccountId, model = modelValue.GetString(),
             durationMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds, status = result.StatusCode, result.Outcome, result.Attempts,
             inputItemCount = input.GetArrayLength(), encryptedItemCount = input.EnumerateArray().Count(x => x.TryGetProperty("encrypted_content", out _)),

@@ -30,7 +30,7 @@ GPT-6 Luna's Codex request uses Responses Lite with `additional_tools`. Preserve
 
 ## Still pending — not release guarantees
 
-- Real refresh-token rotation on both grants, transient/ambiguous refresh recovery and crash-after-rotation persistence.
+- Real grants refreshed successfully after access-token expiry on 2026-10-13. B's refresh updated only B; A's saved timestamp stayed unchanged. Repeated real rotation, transient/ambiguous refresh recovery and crash-after-rotation persistence remain pending.
 - A verified machine-readable Codex 5h/weekly quota source compatible with the chosen authorization route. SIWC docs do not establish one; no unknown value is shown as 0%.
 - Remote encrypted compaction, WS continuation, large/long sessions and comprehensive adversarial failure cases.
 - Shell/Git side-effect counters: current official CLI test policy blocked even harmless shell commands. Rejection/result round-trip passed; actual command execution did not.

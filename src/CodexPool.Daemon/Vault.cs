@@ -16,12 +16,18 @@ public sealed class AccountCredential
     public required string RefreshToken { get; set; }
     public required string IdToken { get; set; }
     public required string Scope { get; set; }
+    public bool Enabled { get; set; } = true;
+    public bool Paused { get; set; }
+    public bool Draining { get; set; }
+    public DateTimeOffset? CooldownUntil { get; set; }
     public DateTimeOffset ExpiresAt { get; set; }
     public DateTimeOffset? EarliestRefreshAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
     public override string ToString() => "AccountCredential [REDACTED]";
-    public object PublicView(bool active) => new { id = Id, name = Name, active, plan = (string?)null,
-        auth = ExpiresAt > DateTimeOffset.UtcNow ? "ready" : "refresh_needed", quota = (object?)null, updatedAt = UpdatedAt };
+    public object PublicView(bool active, string? authHealth = null) => new { id = Id, name = Name, active,
+        enabled = Enabled, paused = Paused, drain = Draining, cooldownUntil = CooldownUntil,
+        state = !Enabled ? "disabled" : Paused ? "paused" : Draining ? "draining" : CooldownUntil > DateTimeOffset.UtcNow ? "cooldown" : active ? "active" : "standby",
+        plan = (string?)null, auth = authHealth ?? (ExpiresAt > DateTimeOffset.UtcNow ? "ready" : "refresh_needed"), quota = (object?)null, updatedAt = UpdatedAt };
 }
 
 public sealed class VaultDocument
@@ -58,7 +64,8 @@ public sealed class Vault
     public string HostId { get { lock (gate) return document.HostId; } }
     public string? ActiveId { get { lock (gate) return document.ActiveAccountId; } }
     public int DistinctUsers { get { lock (gate) return document.Accounts.Select(x => x.Subject).Distinct(StringComparer.Ordinal).Count(); } }
-    public object[] PublicAccounts { get { lock (gate) return document.Accounts.Select(x => x.PublicView(x.Id == document.ActiveAccountId)).ToArray(); } }
+    public object[] PublicAccounts => Views(_ => null);
+    public object[] Views(Func<string, string?> authHealth) { lock (gate) return document.Accounts.Select(x => x.PublicView(x.Id == document.ActiveAccountId, authHealth(x.Id))).ToArray(); }
     public AccountCredential? Selected { get { lock (gate) return Clone(document.Accounts.FirstOrDefault(x => x.Id == document.ActiveAccountId)); } }
     public AccountCredential? Find(string id) { lock (gate) return Clone(document.Accounts.FirstOrDefault(x => x.Id == id)); }
     public string Add(AccountCredential credential)
@@ -73,7 +80,8 @@ public sealed class Vault
                 if (existing.Subject != credential.Subject) throw new InvalidOperationException("Account identity mismatch.");
                 credential = new() { Id = existing.Id, Name = existing.Name, Subject = credential.Subject, ClientId = credential.ClientId,
                     AccessToken = credential.AccessToken, RefreshToken = credential.RefreshToken, IdToken = credential.IdToken,
-                    Scope = credential.Scope, ExpiresAt = credential.ExpiresAt, EarliestRefreshAt = credential.EarliestRefreshAt, UpdatedAt = credential.UpdatedAt };
+                    Scope = credential.Scope, ExpiresAt = credential.ExpiresAt, EarliestRefreshAt = credential.EarliestRefreshAt, UpdatedAt = credential.UpdatedAt,
+                    Enabled = existing.Enabled, Paused = existing.Paused, Draining = existing.Draining, CooldownUntil = existing.CooldownUntil };
                 next.Accounts[duplicate] = credential;
             }
             else next.Accounts.Add(credential);
@@ -85,8 +93,28 @@ public sealed class Vault
     {
         lock (gate)
         {
-            if (!document.Accounts.Any(x => x.Id == id)) return false;
+            if (!document.Accounts.Any(x => x.Id == id && IsEligible(x))) return false;
             var next = CloneDocument(document); next.ActiveAccountId = id; Persist(next); document = next; return true;
+        }
+    }
+    public static bool IsEligible(AccountCredential account) => account.Enabled && !account.Paused && !account.Draining && !(account.CooldownUntil > DateTimeOffset.UtcNow);
+    public bool Control(string id, string operation)
+    {
+        lock (gate)
+        {
+            var next = CloneDocument(document); var target = next.Accounts.FirstOrDefault(x => x.Id == id);
+            if (target is null) return false;
+            switch (operation)
+            {
+                case "pause": target.Paused = true; break;
+                case "resume": target.Paused = false; break;
+                case "drain": target.Draining = true; break;
+                case "undrain": target.Draining = false; break;
+                case "enable": target.Enabled = true; break;
+                case "disable": target.Enabled = false; break;
+                default: throw new ArgumentException("Unknown control.", nameof(operation));
+            }
+            Persist(next); document = next; return true;
         }
     }
     public void ReplaceTokens(string id, string expectedRefreshToken, TokenResponse tokens)

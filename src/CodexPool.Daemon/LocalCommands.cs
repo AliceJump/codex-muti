@@ -12,7 +12,7 @@ public static class LocalCommands
     {
         if (command == "help")
         {
-            Console.WriteLine("serve [--live-boundary-probe] | login <label> [account-id] | status | models | activate <account-id> | codex [official arguments]"); return 0;
+            Console.WriteLine("serve [--live-boundary-probe] | login <label> [account-id] | status | models | activate/pause/resume/drain/undrain/enable/disable <account-id> | codex [official arguments]"); return 0;
         }
         var key = Vault.ReadLocalKey(directory);
         if (command == "codex")
@@ -34,10 +34,10 @@ public static class LocalCommands
             using var response = await client.GetAsync("http://127.0.0.1:3210/" + command); response.EnsureSuccessStatusCode();
             Console.WriteLine(await response.Content.ReadAsStringAsync()); return 0;
         }
-        if (command == "activate" && args.Length == 1 && Guid.TryParseExact(args[0], "N", out _))
+        if (command is "activate" or "pause" or "resume" or "drain" or "undrain" or "enable" or "disable" && args.Length == 1 && Guid.TryParseExact(args[0], "N", out _))
         {
-            using var response = await client.PostAsync("http://127.0.0.1:3210/accounts/" + args[0] + "/activate", null);
-            Console.WriteLine(response.IsSuccessStatusCode ? "Active account updated for new requests." : "Activation rejected; check account and live migration gate.");
+            using var response = await client.PostAsync("http://127.0.0.1:3210/accounts/" + args[0] + "/" + command, null);
+            Console.WriteLine(response.IsSuccessStatusCode ? "Account control applied for new requests." : "Control rejected; check account and live migration gate.");
             return response.IsSuccessStatusCode ? 0 : 1;
         }
         if (command == "login" && args.Length is 1 or 2)

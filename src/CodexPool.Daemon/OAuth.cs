@@ -20,6 +20,7 @@ public sealed class OAuth(HttpClient http, Vault vault)
     private readonly ConcurrentDictionary<string, string> health = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, DateTimeOffset> refreshBackoff = new(StringComparer.Ordinal);
     private Metadata? metadata;
+    public string? Health(string accountId) => health.TryGetValue(accountId, out var value) ? value : null;
 
     public async Task<string> BeginAsync(string name, string? accountId, CancellationToken cancellationToken)
     {

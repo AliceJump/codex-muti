@@ -24,6 +24,8 @@ dotnet run --project src/CodexPool.Daemon --no-launch-profile -- models
 
 首次成功授权成为 active，其余账户保持独立登录。相同 client 注册的重新授权保留本地 ID；不同注册即使显示标签相同也不混用 token。`distinctUsers` 用于检查测试是否确有不同 ChatGPT 用户，不公开真实 subject。
 
+账户控制命令为 `activate <id>`、`pause <id>`、`resume <id>`、`drain <id>`、`undrain <id>`、`enable <id>`、`disable <id>`，ID 来自 `status`。控制状态持久保存。暂停/排空/禁用仅阻止后续请求，已接受的 streaming 请求继续使用原账户；状态中单独显示各账户正在处理的请求数量。被排除账户不能激活。尚未开放自动调度，因此 active 不可用时返回明确错误，由用户手动选择 eligible 账户。
+
 使用可选的单一 wrapper：
 
 ```powershell
