@@ -18,9 +18,23 @@ function control(args) {
   });
 }
 const initial = JSON.parse(await control(['status']));
-assert.equal(initial.distinctUsers, 2, 'Two different users are authorized'); assert(initial.boundaryProbe, 'Live boundary test mode explicitly enabled');
-const accountA = initial.accounts.find(x => x.name === 'Account A'); const accountB = initial.accounts.find(x => x.name === 'Account B');
+const profile = process.env.CODEX_POOL_TEST_PROFILE === 'native' ? 'native' : 'siwc';
+assert(initial.distinctUsers >= 2, 'Two different users are authorized'); assert(initial.boundaryProbe, 'Live boundary test mode explicitly enabled');
+if (profile === 'native') assert.equal(initial.nativeDistinctUsers, 2, 'Two distinct native ChatGPT users are authorized');
+const accountA = initial.accounts.find(x => x.provider === profile && x.name === (profile === 'native' ? 'Native Account A' : 'Account A'));
+const accountB = initial.accounts.find(x => x.provider === profile && x.name === (profile === 'native' ? 'Native Account B' : 'Account B'));
 assert(accountA && accountB);
+const autoTest = profile === 'native' && process.env.CODEX_POOL_TEST_AUTO === '1';
+const originalSettings = initial.settings;
+let autoThresholds;
+if (autoTest) {
+  const usage = JSON.parse(await control(['usage']));
+  const used = (id, kind) => usage.find(x => x.accountId === id)?.windows.find(x => x.kind === kind)?.usedPercent;
+  const aWeek = used(accountA.id, 'weekly'), bWeek = used(accountB.id, 'weekly');
+  const aFive = used(accountA.id, '5h'), bFive = used(accountB.id, '5h');
+  assert(aWeek > bWeek && bFive > aFive, 'Real windows support the controlled threshold experiment');
+  autoThresholds = { weekly: (aWeek + bWeek) / 2, five: (aFive + bFive) / 2 };
+}
 await writeFile(join(home, 'config.toml'), `approval_policy = "never"
 sandbox_mode = "read-only"
 [model_providers.codex_pool]
@@ -34,7 +48,7 @@ command = "node"
 default_tools_approval_mode = "approve"
 args = [${[join(root, 'scripts/fixture-mcp.mjs'), join(scratch, 'mcp-counter.txt'), assembly, accountB.id].map(x => JSON.stringify(x.replaceAll('\\', '/'))).join(', ')}]
 `);
-const summary = { model: 'gpt-6-luna', realAccounts: true, steps: [], evidenceDirectory: scratch };
+const summary = { model: 'gpt-6-luna', profile, autoTest, realAccounts: true, steps: [], evidenceDirectory: scratch };
 const startedAt = Date.now();
 let rpc;
 function startRpc() {
@@ -73,9 +87,11 @@ async function turn(threadId, text, label, expected, effort) {
   const from = rpc.notices.length; await rpc.call('turn/start', { threadId, input: [{ type: 'text', text }], ...(effort ? { effort } : {}) });
   const completed = await rpc.wait(x => x.method === 'turn/completed', from);
   const messages = rpc.notices.slice(from).filter(x => x.method === 'item/completed' && x.params.item.type === 'agentMessage').map(x => x.params.item.text).join('\n');
-  summary.steps.push({ label, status: completed.params.turn.status, expectedFactPresent: expected ? messages.includes(expected) : null });
+  const normalized = expected === '2770' ? messages.replace(/\b\d{1,3}(?:[, \u202f\u00a0]\d{3})+\b/g, number => number.replace(/[, \u202f\u00a0]/g, '')) : messages;
+  const retained = expected === '2770' ? /\b2770\b/.test(normalized) : expected ? normalized.includes(expected) : null;
+  summary.steps.push({ label, status: completed.params.turn.status, expectedFactPresent: retained });
   await writeFile(join(scratch, 'summary.json'), JSON.stringify(summary, null, 2));
-  assert.equal(completed.params.turn.status, 'completed', label); if (expected) assert(messages.includes(expected), `${label}: retained fact`);
+  assert.equal(completed.params.turn.status, 'completed', label); if (expected) assert(retained, `${label}: retained fact`);
   return messages;
 }
 const marker = `POOL-${Date.now().toString(36)}`; const code = '742913';
@@ -84,15 +100,23 @@ try {
   const started = await rpc.call('thread/start', { cwd: scratch, model: 'gpt-6-luna' }); const threadId = started.thread.id;
   await turn(threadId, `Remember two test facts: marker ${marker}, code ${code}. Reply exactly RECORDED. Do not use tools.`, 'A first inference', 'RECORDED');
   console.log('PASS Account A real inference');
-  await control(['activate', accountB.id]);
+  if (autoTest) await control(['settings', 'on', '100', String(autoThresholds.weekly)]);
+  else await control(['activate', accountB.id]);
   await turn(threadId, 'Return the marker and code from the preceding message as marker|code, with no other text. Do not use tools.', 'B same-thread continuation', `${marker}|${code}`);
   console.log('PASS A -> B same-thread continuation');
+  if (autoTest) assert.equal(JSON.parse(await control(['status'])).activeAccountId, accountB.id, 'Real weekly threshold selects native B');
   let from = rpc.notices.length; await rpc.call('thread/compact/start', { threadId });
   await rpc.wait(x => x.method === 'thread/compacted' || x.method === 'item/completed' && x.params.item.type === 'contextCompaction', from);
   summary.steps.push({ label: 'B official compact', status: 'completed' }); console.log('PASS Account B official compact');
-  await control(['activate', accountA.id]);
+  if (autoTest) await control(['settings', 'on', String(autoThresholds.five), '100']);
+  else await control(['activate', accountA.id]);
   await turn(threadId, 'Return the previously recorded marker and code as marker|code, with no other text. Do not use tools.', 'A after B compact', `${marker}|${code}`);
   console.log('PASS B -> A after compact');
+  if (autoTest) {
+    assert.equal(JSON.parse(await control(['status'])).activeAccountId, accountA.id, 'Real 5h threshold selects native A');
+    summary.automaticThresholdSwitches = ['weekly_threshold:A->B', '5h_threshold:B->A'];
+    await control(['settings', 'off', String(originalSettings.fiveHourThreshold), String(originalSettings.weeklyThreshold)]);
+  }
   await rpc.close('before-resume'); rpc = startRpc(); await rpc.initialize(); await rpc.call('thread/resume', { threadId });
   await control(['activate', accountB.id]);
   await turn(threadId, 'Return the recorded marker and code as marker|code, with no other text. Do not use tools.', 'B resumed thread', `${marker}|${code}`);
@@ -120,4 +144,8 @@ try {
   summary.failure = error.message; summary.requests = JSON.parse(await control(['status'])).recentRequests;
   await writeFile(join(scratch, 'summary.json'), JSON.stringify(summary, null, 2));
   console.error(`Live gate not passed: ${error.message}\nEvidence: ${scratch}`); process.exitCode = 1;
-} finally { if (rpc) await rpc.close('final'); await control(['activate', accountA.id]); }
+} finally {
+  if (rpc) await rpc.close('final');
+  if (autoTest) await control(['settings', originalSettings.autoSwitch ? 'on' : 'off', String(originalSettings.fiveHourThreshold), String(originalSettings.weeklyThreshold)]);
+  await control(['activate', accountA.id]);
+}
