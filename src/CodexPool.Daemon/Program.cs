@@ -183,10 +183,9 @@ try
         var started = Stopwatch.GetTimestamp(); var requestId = Guid.NewGuid().ToString("N");
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted); lifetime.CancelAfter(TimeSpan.FromMinutes(10));
         RelayResult result;
-        inFlight.AddOrUpdate(account.Id, 1, (_, count) => count + 1);
-        try { result = await relay.ForwardAsync(body, "application/json", candidates, headers,
-            new WebSink(context), lifetime.Token, pool.Rejected); }
-        finally { inFlight.AddOrUpdate(account.Id, 0, (_, count) => Math.Max(0, count - 1)); }
+        result = await relay.ForwardAsync(body, "application/json", candidates, headers,
+            new WebSink(context), lifetime.Token, pool.Rejected,
+            (lease, entering) => inFlight.AddOrUpdate(lease.AccountId, entering ? 1 : 0, (_, count) => Math.Max(0, count + (entering ? 1 : -1))));
         pool.Complete(selection, result);
         if (headers.TryGetValue("session_id", out var completedSession)) sessionOwners[Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(completedSession)))] = result.AccountId;
         recent.Enqueue(new { timestamp = DateTimeOffset.UtcNow, requestId, account = result.AccountId, model = modelValue.GetString(),

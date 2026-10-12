@@ -30,7 +30,7 @@ public sealed class ResponsesRelay(HttpClient http)
     public async Task<RelayResult> ForwardAsync(
         ReadOnlyMemory<byte> body, string contentType, IReadOnlyList<ModelLease> candidates,
         IReadOnlyDictionary<string, string> headers, IResponseSink sink, CancellationToken cancellationToken,
-        Action<ModelLease, string>? rejected = null)
+        Action<ModelLease, string>? rejected = null, Action<ModelLease, bool>? attempt = null)
     {
         if (candidates.Count == 0) throw new ArgumentException("No candidate accounts.", nameof(candidates));
         if (candidates.Select(x => x.AccountId).Distinct(StringComparer.Ordinal).Count() != candidates.Count)
@@ -40,6 +40,7 @@ public sealed class ResponsesRelay(HttpClient http)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var lease = candidates[index];
+            using var observation = new AttemptObservation(lease, attempt);
             using var request = new HttpRequestMessage(HttpMethod.Post, lease.Endpoint);
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", lease.AccessToken);
             request.Headers.Accept.Add(new("text/event-stream"));
@@ -111,11 +112,13 @@ public sealed class ResponsesRelay(HttpClient http)
                         HeaderNames(response), upstreamType, "not_inspected");
                 }
                 var buffer = new byte[16 * 1024];
+                var events = new RejectionEvents(lease, rejected);
                 try
                 {
                     if (initialBytes is not null)
                     {
                         sink.Start(status, "text/event-stream"); committed = true;
+                        events.Feed(initialBytes);
                         await sink.WriteAsync(initialBytes, cancellationToken);
                     }
                     while (true)
@@ -128,6 +131,7 @@ public sealed class ResponsesRelay(HttpClient http)
                             // Latch BEFORE the write; a partial write can never reopen the gate.
                             committed = true;
                         }
+                        events.Feed(buffer.AsSpan(0, count));
                         await sink.WriteAsync(buffer.AsMemory(0, count), cancellationToken);
                     }
                     // EOF is never synthesized as response.completed. Codex owns recovery.
@@ -140,6 +144,66 @@ public sealed class ResponsesRelay(HttpClient http)
             }
         }
         throw new InvalidOperationException("Candidate loop must return.");
+    }
+
+    private sealed class AttemptObservation : IDisposable
+    {
+        private readonly ModelLease lease;
+        private readonly Action<ModelLease, bool>? observer;
+        public AttemptObservation(ModelLease lease, Action<ModelLease, bool>? observer)
+        { this.lease = lease; this.observer = observer; observer?.Invoke(lease, true); }
+        public void Dispose() => observer?.Invoke(lease, false);
+    }
+    // Bounded metadata observer. Oversized frames are skipped, never retained or reconstructed.
+    // A response.failed can exclude the account for future requests; this never opens replay.
+    private sealed class RejectionEvents(ModelLease lease, Action<ModelLease, string>? observer)
+    {
+        private readonly MemoryStream line = new();
+        private readonly MemoryStream data = new();
+        private bool oversized;
+        private bool reported;
+        public void Feed(ReadOnlySpan<byte> bytes)
+        {
+            if (observer is null || reported) return;
+            foreach (var b in bytes)
+            {
+                if (b == '\r') continue;
+                if (b != '\n') { if (line.Length < 65536) line.WriteByte(b); else oversized = true; continue; }
+                if (line.Length == 0)
+                {
+                    if (!oversized && data.Length > 0) Inspect();
+                    data.SetLength(0); oversized = false;
+                }
+                else if (!oversized)
+                {
+                    var content = line.GetBuffer().AsSpan(0, (int)line.Length);
+                    if (content.StartsWith("data:"u8))
+                    {
+                        if (data.Length + content.Length > 65536) oversized = true;
+                        else { data.Write(content[5..]); data.WriteByte((byte)'\n'); }
+                    }
+                }
+                line.SetLength(0);
+            }
+        }
+        private void Inspect()
+        {
+            try
+            {
+                using var json = JsonDocument.Parse(data.GetBuffer().AsMemory(0, (int)data.Length)); var root = json.RootElement;
+                if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("type", out var type) || type.ValueKind != JsonValueKind.String
+                    || type.GetString() is not ("response.failed" or "error")) return;
+                var container = root.TryGetProperty("response", out var response) && response.ValueKind == JsonValueKind.Object ? response : root;
+                if (!container.TryGetProperty("error", out var error) || error.ValueKind != JsonValueKind.Object) return;
+                foreach (var field in new[] { "code", "type" })
+                {
+                    if (!error.TryGetProperty(field, out var code) || code.ValueKind != JsonValueKind.String) continue;
+                    var reason = QuotaCodes.Contains(code.GetString()!) ? "quota_rejected" : AuthCodes.Contains(code.GetString()!) ? "auth_rejected" : null;
+                    if (reason is not null) { reported = true; observer?.Invoke(lease, reason); return; }
+                }
+            }
+            catch (JsonException) { }
+        }
     }
 
     private static IReadOnlyList<string> HeaderNames(HttpResponseMessage response) =>

@@ -25,7 +25,9 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Missing Content-Type accepts typed SSE framing without losing bytes", MissingContentType),
     ("Missing Content-Type rejects JSON or untyped streams without retry", MissingContentTypeRejected),
     ("Sticky scheduling, recovery and stale-request epochs", Sticky),
-    ("No eligible account and auto-switch OFF never relax admission", Eligibility)
+    ("No eligible account and auto-switch OFF never relax admission", Eligibility),
+    ("Native retries use each lease account header and balance in-flight observers", NativeRouting),
+    ("Streaming quota failure excludes future routing without replay", StreamQuota)
 };
 var failed = 0;
 foreach (var (name, run) in tests)
@@ -70,6 +72,30 @@ static async Task FailureEvent()
     var handler = new FixtureHandler((_, _) => Task.FromResult(Response(200, events, "text/event-stream")));
     using var client = new HttpClient(handler); var sink = new MemorySink(); var result = await Relay(client, sink);
     Check(result.Committed && handler.Count == 1 && sink.Text == events);
+}
+static async Task NativeRouting()
+{
+    var leases = Candidates().Select(x => x with { Endpoint = new("https://chatgpt.com/backend-api/codex/responses"), BackendAccountId = "backend-" + x.AccountId }).ToArray();
+    var observations = new List<string>();
+    var handler = new FixtureHandler((index, request) =>
+    {
+        Check(request.Headers.GetValues("ChatGPT-Account-Id").Single() == (index == 1 ? "backend-A" : "backend-B"));
+        return Task.FromResult(index == 1 ? Response(429, Error("quota_exhausted")) : Response(200, "data: {}\n\n", "text/event-stream"));
+    });
+    using var client = new HttpClient(handler);
+    await new ResponsesRelay(client).ForwardAsync("{}"u8.ToArray(), "application/json", leases,
+        new Dictionary<string, string> { ["ChatGPT-Account-Id"] = "untrusted" }, new MemorySink(), default,
+        (lease, reason) => observations.Add(lease.AccountId + ":" + reason), (lease, start) => observations.Add(lease.AccountId + ":" + start));
+    Check(observations.SequenceEqual(new[] { "A:True", "A:quota_rejected", "A:False", "B:True", "B:False" }));
+}
+static async Task StreamQuota()
+{
+    const string events = "data: {\"type\":\"response.created\"}\n\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"usage_limit_reached\"}}}\n\n";
+    var handler = new FixtureHandler((_, _) => Task.FromResult(Response(200, events, "text/event-stream")));
+    using var client = new HttpClient(handler); var sink = new MemorySink(); var rejected = new List<string>();
+    var result = await new ResponsesRelay(client).ForwardAsync("{}"u8.ToArray(), "application/json", Candidates(), new Dictionary<string, string>(), sink, default,
+        (lease, reason) => rejected.Add(lease.AccountId + ":" + reason));
+    Check(result.Committed && handler.Count == 1 && sink.Text == events && rejected.SequenceEqual(new[] { "A:quota_rejected" }));
 }
 static async Task Cancel()
 {
