@@ -1,31 +1,127 @@
-# Native account acceptance results
+# 原生多账户验收报告
 
-Recorded 2026-10-13, Asia/Shanghai. Installed official Codex CLI/app-server: `0.157.1`; real model: GPT-6 Luna. Evidence remains only in the primary checkout's ignored `.research/`. This document includes no credentials or real user identifiers.
+记录日期：2026-10-13，北京时间（Asia/Shanghai）。测试使用官方 Codex CLI / app-server `0.157.1`，真实调用模型为 GPT-6 Luna。
 
-## Passed in the tested scope
+**当前结论：核心功能已通过小范围真实账户测试，但尚未完成全部发布验收。** 已验证两个原生账户登录、独立刷新与凭据轮换、真实额度读取，以及同一官方会话中的手动和阈值自动切换。长会话、部分故障恢复、Shell/Git 和完整界面验收仍待完成。
 
-- Two different ChatGPT users completed official native authorization in separate temporary profiles. Both report Plus and remain ready. The helper profile count after cleanup is zero. Existing SIWC registrations remain independently stored.
-- Both accounts returned genuine usage windows: duration 18,000 seconds identifies 5h; 604,800 identifies weekly. Initial samples were A 0%/94% used and B 61%/25% used. These are historical samples, not permanent values. Snapshots are saved per registration in DPAPI and refreshed independently.
-- Each native account refreshed twice. All four operations rotated the refresh token, changed the access token and confirmed other accounts' access/refresh credentials were unchanged. The daemon alone owns refresh; no second refreshable helper copy remains.
-- Native HTTP/SSE regression passed all eight stages: initial inference, same-thread A->B, official compact on B, return to A, official restart/resume on B, reasoning on A and continuation on B, MCP tool on A with its result continued on B.
-- The MCP result contains a fresh unpredictable proof absent from the prompt. B echoed it, and the side-effect counter is one. Responses Lite's encrypted representations are not adequately measured by plain `function_call_output` counts.
-- That run recorded ten model requests with one attempt each. Five requests carried encrypted input items. All returned successful completion; nine clients disconnected after a delivered `response.completed`, and one stream ended normally.
-- A separate eight-stage experiment used actual quota windows and placed configured thresholds between their values. The same official thread automatically moved A->B on weekly threshold, then B->A on 5h threshold, preserving controlled facts. Ten requests each had one attempt, and the MCP counter remained one. Original thresholds and auto-switch OFF were restored afterwards.
+原始证据只保存在主仓库已被 Git 忽略的 `.research/` 目录中。本报告不包含凭据或真实用户身份标识。
 
-The first native arithmetic assertion was a test false negative: the correct result used a thousands separator (`2,770`). The test now normalizes valid thousands grouping for this numeric fact, without changing marker or unpredictable proof assertions. The subsequent full run passed.
+## 已通过的真实账户测试
 
-## Implementation checks
+### 1. 两个账户独立登录
 
-25 transport/scheduler tests and 15 credential/local-API tests pass. These cover no replay after committed body, unknown/network/cancel failures, structured rejection, fixed per-attempt backend account routing, durable selection failure, epochs, native JSON refresh, optional replacement refresh token, account isolation, DPAPI, OIDC, browser sessions/CSRF and initial status SSE. Official CLI fixture has seven passing scenarios.
+两个不同的 ChatGPT 用户分别通过官方原生授权流程完成登录，各自使用独立的临时配置目录。两个账户均为 Plus，授权状态均正常（`ready`）。
 
-The native floating window was visibly rendered and its Radio A->B command changed daemon state and synchronized the window during earlier manual UI verification. The full UI matrix is not yet accepted.
+登录完成后，临时登录目录已清理，残留数量为 0。原有第三方授权（SIWC）注册仍独立保存，没有覆盖用户默认 Codex 的 `auth.json`。
 
-## Still pending
+### 2. 真实额度读取与独立保存
 
-- Natural quota exhaustion/reset and real 401/429 failure recovery. Changing a configured threshold is not evidence of quota replenishment.
-- Refresh ambiguity/crash after real remote rotation, beyond the synthetic durable `refresh_pending` tests.
-- Remote encrypted compaction, larger/longer sessions, prompt-cache measurements and Desktop provider acceptance. The verified custom-provider compact path is not a general guarantee for remote encrypted state.
-- Actual Shell/Git execution counters. The Windows fixture saw a CreateProcess rejection on a harmless read; its precise cause is unresolved. A rejected command is not an executed side effect.
-- Dashboard visual acceptance and native automatic Radio updates, modes, tray/hotkey, monitor disconnects and mixed DPI. Windows Computer Use stopped because it could not identify the current browser URL confidently; its blocked UI operation was not retried through another input mechanism.
+两个账户都成功返回真实额度窗口。接口中的窗口时长用于识别额度类型：
 
-Production auto-switch remains gated and defaults OFF. Native/SIWC profiles are kept separate for automatic selection and same-request failover. No Codex compatibility patch is currently required by the successful tested paths. Codex still owns its tools, session, context, compaction, resume and recovery.
+| 窗口时长 | 额度类型 |
+|---|---|
+| 18,000 秒 | 5h 额度 |
+| 604,800 秒 | Weekly 周额度 |
+
+首次采样的已用额度如下：
+
+| 账户 | 5h 已用 | Weekly 已用 |
+|---|---:|---:|
+| A | 0% | 94% |
+| B | 61% | 25% |
+
+收尾采样时，A 仍为 0% / 94%，B 为 72% / 27%。这些都是当时的读数，会随使用发生变化，不是固定值。
+
+额度快照按账户独立保存，并使用 Windows DPAPI 加密；每个账户分别更新。第三方 SIWC 授权的未知额度仍显示为未知，不会伪装成 0%。
+
+### 3. 刷新与 refresh token 轮换互不影响
+
+每个原生账户分别完成两轮真实刷新，共四次操作。四次均确认：
+
+- refresh token 发生轮换。
+- access token 更新。
+- 其他账户的 access token 和 refresh token 保持不变。
+- A、B 都继续保持正常授权状态。
+
+只有代理守护进程负责刷新。临时登录程序的凭据副本已移除，不会留下第二个能够同时刷新同一凭据的持有者。
+
+### 4. 原生通道的会话与工具结果续接
+
+HTTP/SSE 原生通道回归测试的八个步骤全部通过：
+
+1. A 完成首次模型调用。
+2. 同一官方会话切到 B，仍能正确返回之前记录的测试事实。
+3. 在 B 上执行官方 Compact（上下文压缩）。
+4. 压缩后切回 A，测试事实仍保留。
+5. 重启隔离测试用的官方 Codex 进程，在 B 上 Resume（恢复会话）。
+6. A 完成 reasoning 推理并记录结果。
+7. B 继续处理 A 的推理上下文，正确返回结果。
+8. A 发起 MCP 工具调用，工具返回前选中 B，由 B 接续工具结果并完成任务。
+
+MCP 工具返回一个临时生成、不可预测、未出现在提示词中的证明字符串。B 成功回显该字符串，工具副作用计数为 **1**，证明本次工具结果跨账户保留，且工具只执行了一次。
+
+Responses Lite 可能使用加密表示，因此仅统计明文 `function_call_output` 数量不能完整判断工具结果是否存在；本次验收同时使用不可预测结果和副作用计数进行验证。
+
+该轮测试记录了十个模型请求，每个请求都只有一次代理尝试，其中五个请求携带加密输入项。十个请求都成功完成：九个在代理交付 `response.completed` 完成事件后由客户端断开连接，另一个正常结束流。
+
+这九次正常完成后的断开被记为 `completed_client_disconnect`，不能误算成未完成请求失败或透明重放。
+
+### 5. 使用真实额度触发自动 A → B → A
+
+另一轮八步实验读取两个账户的真实额度，将可配置阈值临时设在两者的已用比例之间。在同一个官方会话中：
+
+- Weekly 阈值触发自动 A → B。
+- 5h 阈值触发自动 B → A。
+- 两次切换后都通过代理状态确认 active account 是预期账户。
+- 切换过程中受控测试事实保留。
+- 十个模型请求均只有一次代理尝试。
+- MCP 副作用计数仍为 1。
+
+实验结束后已恢复原阈值，并关闭自动切换，选回原生 A。
+
+**该实验验证的是配置阈值驱动的调度，不是自然额度耗尽或重置。** 它不能替代“额度用完后恢复”的真实验收。
+
+### 6. 测试断言修正
+
+第一次原生算术检查出现过一次误判：模型算出了正确答案，但输出为带千位分隔符的 `2,770`，测试只匹配 `2770`。
+
+已将该数值断言改为接受合法的千位分隔格式；会话标记和 MCP 不可预测证明字符串的断言没有放宽。随后完整回归测试通过。
+
+## 已通过的代码与接口检查
+
+共 **40 项自动测试通过**：25 项传输/调度测试，15 项凭据/本地 API 测试。覆盖：
+
+- 向 Codex 提交响应正文后，绝不跨账户透明重放。
+- 未知错误、网络错误和取消不会授权透明切换重试。
+- 仅明确的额度/授权拒绝可进入安全重试路径。
+- 每次尝试使用对应账户自己的 backend account id。
+- 账户选择持久化失败时，不发布新的 active account。
+- 手动切换推进选择代次，旧请求的晚到结果不能覆盖新选择。
+- 原生 JSON 刷新协议，以及服务端未返回替换 refresh token 的情况。
+- A/B 凭据隔离、DPAPI 加密、OIDC 身份令牌校验。
+- 浏览器会话、CSRF 防护、本地 Host/Origin 检查和初始 SSE 状态推送。
+
+官方 CLI 的本地模拟测试另有七个场景通过。这些模拟结果不用于替代真实账户验收。
+
+Windows 原生悬浮窗已实际显示。此前手动界面测试中，点击 Radio 单选控件切换 A → B，代理 active account 随之改变，窗口状态也同步更新。不过，完整界面测试仍未全部完成。
+
+## 仍待完成的验收
+
+| 待验收项目 | 当前限制 |
+|---|---|
+| 自然额度耗尽、重置和真实 401/429 恢复 | 已验证配置阈值切换，尚未验证真实额度用尽后恢复。 |
+| 真实 token 轮换后的异常恢复 | 真实正常轮换已通过；远端已轮换但本机结果不确定、崩溃等场景仍待实测。合成测试已覆盖持久化的 `refresh_pending` 状态。 |
+| 远端加密 Compact、长会话和 prompt cache | 当前小会话及自定义 provider 的官方压缩路径通过，不能外推为所有远端加密状态都可跨账户使用。 |
+| Codex Desktop 接入 | CLI / app-server 已验证，Desktop 的 provider 兼容性尚未验收。 |
+| Shell/Git 实际执行与副作用计数 | Windows 测试中，一次无害文件读取遇到 CreateProcess 拒绝，原因尚未确定。被拒绝的命令不能算作执行成功。 |
+| Dashboard 和悬浮窗完整界面 | 自动切换后的 Radio 更新、窗口模式、托盘、快捷键、显示器断开和混合 DPI 等仍需完整验证。 |
+
+Dashboard 视觉检查期间，Windows Computer Use 无法可靠确定当前浏览器 URL，因此停止了该轮界面操作。没有通过另一种输入方式重试被阻止的操作；这项视觉验收仍标记为待完成。
+
+## 当前运行状态与责任边界
+
+- 记录时选中原生 A，自动切换为 OFF。
+- 默认生产模式的自动切换仍受验收门槛限制；实验模式可显式开启。
+- 自动选择和同一次请求的安全重试都保持原生 / SIWC 授权类型分离。
+- 已通过的测试路径暂不需要修改官方 Codex，也未引入兼容性补丁。
+- Codex 继续负责工具、会话、上下文、Compact、Resume 和工作流恢复。代理只负责模型访问、账户、授权、额度和 UI 客户端。

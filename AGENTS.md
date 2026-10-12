@@ -1,5 +1,6 @@
 # Codex Pool repository rules
 
+- 用户默认使用中文。面向用户的回复、说明、验收报告和其他交付文档默认使用中文；代码标识符、协议字段及必要的技术名称保留原文。只有用户明确要求时才改用其他语言。
 - Codex owns the workflow. This repository only owns model access, accounts, authorization, quota and UI clients.
 - Never implement an agent loop, execute model tools, manipulate Codex conversations/worktrees or rotate Codex auth.json.
 - Delegate bounded evidence collection, documentation/source searches and test-result collection to GPT-6 Luna. The primary agent owns architecture, critical code, debugging and review.
