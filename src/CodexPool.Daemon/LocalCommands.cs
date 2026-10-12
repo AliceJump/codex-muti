@@ -17,6 +17,12 @@ public static class LocalCommands
             Console.WriteLine("serve [--live-boundary-probe] | login/native-login <label> | dashboard | status | usage | models | settings [on/off 5h weekly] | activate/pause/resume/drain/undrain/enable/disable/refresh <account-id> | codex [official arguments]"); return 0;
         }
         var key = Vault.ReadLocalKey(directory);
+        if (command == "model-credential")
+        {
+            // Official provider auth.command captures this private stdout pipe. Never a log or API response.
+            if (!Console.IsOutputRedirected) { Console.Error.WriteLine("此命令仅供 Codex 凭据管道调用。"); return 1; }
+            Console.Write(key); return 0;
+        }
         if (command == "codex")
         {
             var start = new ProcessStartInfo("codex") { UseShellExecute = false };

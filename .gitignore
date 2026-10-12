@@ -6,3 +6,5 @@ dist/
 .local/
 *.user
 *.log
+__pycache__/
+*.pyc
