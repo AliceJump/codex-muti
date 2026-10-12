@@ -136,13 +136,16 @@ static async Task EmptyStream()
 static async Task Headers()
 {
     const string body = "{\"input\":[{\"type\":\"function_call_output\",\"call_id\":\"c1\",\"output\":\"kept\"}],\"opaque_field\":42}";
-    var headers = new Dictionary<string, string> { ["Authorization"] = "local-only", ["Cookie"] = "local-cookie", ["session_id"] = "session", ["x-codex-turn-state"] = "A-bound", ["x-openai-internal-codex-responses-lite"] = "true" };
+    var headers = new Dictionary<string, string> { ["Authorization"] = "local-only", ["Cookie"] = "local-cookie", ["session_id"] = "session", ["x-codex-turn-state"] = "A-bound", ["x-openai-internal-codex-responses-lite"] = "true",
+        ["x-codex-beta-features"] = "compact", ["x-codex-turn-metadata"] = "{\"turn_id\":\"turn\"}", ["x-codex-window-id"] = "window" };
     var handler = new FixtureHandler(async (index, request) =>
     {
         Check(await request.Content!.ReadAsStringAsync() == body);
         Check(request.Headers.Authorization?.Parameter == (index == 1 ? "upstream-a" : "upstream-b"));
         Check(!request.Headers.Contains("Cookie") && request.Headers.GetValues("session_id").Single() == "session");
         Check(request.Headers.GetValues("x-openai-internal-codex-responses-lite").Single() == "true");
+        foreach (var name in new[] { "x-codex-beta-features", "x-codex-turn-metadata", "x-codex-window-id" })
+            Check(request.Headers.GetValues(name).Single() == headers[name]);
         Check(request.Headers.Accept.Any(x => x.MediaType == "text/event-stream"));
         Check(request.Headers.Contains("x-codex-turn-state") == (index == 1));
         return index == 1 ? Response(429, Error("usage_limit_reached")) : Response(200, "data: {}\n\n", "text/event-stream");

@@ -68,6 +68,17 @@ public sealed class Vault
         if (!File.Exists(path)) Persist(document);
     }
     public string LocalKey { get { lock (gate) return document.LocalKey; } }
+    public bool AcceptsNativeModelBearer(string bearer)
+    {
+        // Ingress proof is independent of sticky scheduling. Pausing a route does not log the user out.
+        lock (gate)
+        {
+            var accepted = false;
+            foreach (var account in document.Accounts.Where(x => x.ProviderKind == "native" && x.AuthStatus == "ready"))
+                accepted |= !string.IsNullOrEmpty(account.AccessToken) && LocalCommands.EqualSecret(bearer, account.AccessToken);
+            return accepted;
+        }
+    }
     public string HostId { get { lock (gate) return document.HostId; } }
     public string? ActiveId { get { lock (gate) return document.ActiveAccountId; } }
     public PoolSettings Settings { get { lock (gate) return document.Settings; } }

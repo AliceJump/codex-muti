@@ -46,6 +46,8 @@ try
     var boundaryProbe = args.Contains("--live-boundary-probe", StringComparer.Ordinal);
     var pool = new PoolRuntime(vault, auth, quota, boundaryProbe);
     var browsers = new BrowserSessions(); var events = new StateEvents();
+    var officialModelAuth = new OfficialModelAuth(Environment.GetEnvironmentVariable("CODEX_HOME")
+        ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex"), vault);
     long requestCount = 0;
     var sessionOwners = new ConcurrentDictionary<string, string>();
     app.Use(async (context, next) =>
@@ -61,12 +63,14 @@ try
         var path = context.Request.Path.Value ?? "";
         var publicPath = path is "/" or "/health" or "/auth/callback" or "/dashboard.js" or "/dashboard.css" || path.StartsWith("/dashboard/open/", StringComparison.Ordinal);
         var bearer = LocalCommands.EqualSecret(context.Request.Headers.Authorization.ToString(), "Bearer " + vault.LocalKey);
+        var modelBearer = !bearer && await officialModelAuth.AcceptsAsync(context.Request.Method, path,
+            context.Request.Headers.Authorization.ToString(), context.RequestAborted);
         var session = browsers.Find(context);
         var mutating = context.Request.Method is not ("GET" or "HEAD");
         var bearerOnly = path.StartsWith("/v1/", StringComparison.Ordinal) || path is "/accounts/login" or "/dashboard/session";
-        if (!publicPath && !bearer && (bearerOnly || session is null))
+        if (!publicPath && !bearer && !modelBearer && (bearerOnly || session is null))
         { context.Response.StatusCode = 401; return; }
-        if (!publicPath && !bearer && mutating && !LocalCommands.EqualSecret(context.Request.Headers["X-Codex-Pool-CSRF"].ToString(), session!.Csrf))
+        if (!publicPath && !bearer && !modelBearer && mutating && !LocalCommands.EqualSecret(context.Request.Headers["X-Codex-Pool-CSRF"].ToString(), session!.Csrf))
         { context.Response.StatusCode = 403; return; }
         try { await next(); }
         catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested) { }
@@ -76,6 +80,8 @@ try
         { if (!context.Response.HasStarted) { context.Response.StatusCode = 503; await context.Response.WriteAsJsonAsync(new { error = new { code = "no_eligible_account" } }); } else context.Abort(); }
         catch (JsonException)
         { if (!context.Response.HasStarted) { context.Response.StatusCode = 400; await context.Response.WriteAsJsonAsync(new { error = new { code = "invalid_json" } }); } else context.Abort(); }
+        catch (RequestBodyFailure ex)
+        { if (!context.Response.HasStarted) { context.Response.StatusCode = ex.Status; await context.Response.WriteAsJsonAsync(new { error = new { code = ex.Code } }); } else context.Abort(); }
         catch
         { if (!context.Response.HasStarted) { context.Response.StatusCode = 500; await context.Response.WriteAsJsonAsync(new { error = new { code = "internal_error" } }); } else context.Abort(); }
     });
@@ -118,7 +124,7 @@ try
             otherAccountCredentialsUnchanged = before.Where(x => x.Id != id).All(x => vault.Find(x.Id) is { } current
                 && current.AccessToken == x.AccessToken && current.RefreshToken == x.RefreshToken) });
     });
-    app.MapGet("/models", async (HttpContext context) =>
+    async Task<IResult> ModelCatalog(HttpContext context)
     {
         var selected = vault.Selected ?? throw new AuthFailure("no_authorized_account");
         var account = await auth.ReadyAsync(selected.Id, context.RequestAborted);
@@ -134,10 +140,13 @@ try
         using var json = JsonDocument.Parse(content.ToArray());
         if (json.RootElement.ValueKind != JsonValueKind.Object || !json.RootElement.TryGetProperty("models", out var models) || models.ValueKind != JsonValueKind.Array)
             throw new AuthFailure("unrecognized_model_catalog");
+        if (context.Request.Path == "/v1/models") return Results.Json(json.RootElement.Clone());
         var visible = models.EnumerateArray().Where(x => x.TryGetProperty("visibility", out var visibility) && visibility.GetString() == "list")
             .Select(x => new { slug = x.GetProperty("slug").GetString(), displayName = x.GetProperty("display_name").GetString() }).ToArray();
         return Results.Json(new { accountId = account.Id, models = visible });
-    });
+    }
+    app.MapGet("/models", (Func<HttpContext, Task<IResult>>)ModelCatalog);
+    app.MapGet("/v1/models", (Func<HttpContext, Task<IResult>>)ModelCatalog);
     app.MapPost("/accounts/login", async (HttpContext context) =>
     {
         var input = await context.Request.ReadFromJsonAsync<LoginInput>(context.RequestAborted) ?? throw new AuthFailure("invalid_login_request");
@@ -172,12 +181,15 @@ try
         app.MapPost("/accounts/{id}/" + operation, (string id) => vault.Control(id, operation)
             ? Results.Ok(new { accountId = id, operation, affects = "new_requests_only" })
             : Results.NotFound(new { error = new { code = "account_not_found" } }));
+    // Built-in OpenAI first probes WebSocket. 426 selects Codex's supported HTTP/SSE fallback.
+    // No model request or upstream bytes are sent for this transport negotiation.
+    app.MapGet("/v1/responses", () => Results.StatusCode(StatusCodes.Status426UpgradeRequired));
     app.MapPost("/v1/responses", async (HttpContext context) =>
     {
-        if (context.Request.ContentType?.StartsWith("application/json", StringComparison.OrdinalIgnoreCase) != true || context.Request.Headers.ContainsKey("Content-Encoding"))
+        if (context.Request.ContentType?.StartsWith("application/json", StringComparison.OrdinalIgnoreCase) != true)
         { context.Response.StatusCode = 415; return; }
-        using var bytes = new MemoryStream(); await context.Request.Body.CopyToAsync(bytes, context.RequestAborted);
-        var body = bytes.ToArray(); using var document = JsonDocument.Parse(body); var json = document.RootElement;
+        var body = await ModelRequestBody.ReadAsync(context.Request.Body, context.Request.Headers.ContentEncoding.ToString(), context.RequestAborted);
+        using var document = JsonDocument.Parse(body); var json = document.RootElement;
         if (json.ValueKind != JsonValueKind.Object || !json.TryGetProperty("input", out var input) || input.ValueKind != JsonValueKind.Array
             || !json.TryGetProperty("stream", out var stream) || stream.ValueKind != JsonValueKind.True
             || !json.TryGetProperty("store", out var store) || store.ValueKind != JsonValueKind.False

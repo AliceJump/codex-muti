@@ -49,7 +49,8 @@ public sealed class ResponsesRelay(HttpClient http)
                 request.Headers.TryAddWithoutValidation("ChatGPT-Account-Id", lease.BackendAccountId);
             request.Content = new ReadOnlyMemoryContent(body);
             request.Content.Headers.ContentType = MediaTypeHeaderValue.Parse(contentType);
-            foreach (var name in new[] { "session_id", "originator", "User-Agent", "OpenAI-Beta", "x-openai-internal-codex-responses-lite" })
+            foreach (var name in new[] { "session_id", "originator", "User-Agent", "OpenAI-Beta", "x-openai-internal-codex-responses-lite",
+                "x-codex-beta-features", "x-codex-turn-metadata", "x-codex-window-id" })
                 if (headers.TryGetValue(name, out var value)) request.Headers.TryAddWithoutValidation(name, value);
             // Turn state belongs to the original authenticated attempt; never reuse across failover.
             if (index == 0 && headers.TryGetValue("x-codex-turn-state", out var turnState))

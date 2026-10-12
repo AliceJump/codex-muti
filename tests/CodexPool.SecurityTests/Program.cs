@@ -27,8 +27,16 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Native registrations sharing official client ID remain separate", NativeRegistrations),
     ("Quota windows use durations and reject malformed percentages", QuotaParser),
     ("Durable quota, scheduler and manual epoch survive control races", PoolRouting),
-    ("Native JSON refresh isolates A/B and accepts omitted replacement refresh token", NativeRefresh)
+    ("Native JSON refresh isolates A/B and accepts omitted replacement refresh token", NativeRefresh),
+    ("Official model ingress accepts A/B, tracks rotation, excludes controls and never writes login", OfficialIngress),
+    ("Native zstd request bytes survive decoding; corrupt, unsupported and oversized bodies fail safely", CompressedRequest)
 };
+if (args.Length != 0)
+{
+    if (args.Length != 2 || args[0] != "--filter") return 2;
+    tests = tests.Where(x => x.Name.Contains(args[1], StringComparison.OrdinalIgnoreCase)).ToArray();
+    if (tests.Length == 0) return 2;
+}
 var failed = 0;
 foreach (var (name, run) in tests)
 { try { await run(); Console.WriteLine("PASS " + name); } catch { failed++; Console.WriteLine("FAIL " + name); } }
@@ -45,6 +53,75 @@ static AccountCredential Account(string id) => new()
     AccessToken = "ACCESS-CANARY-" + id, RefreshToken = "REFRESH-CANARY-" + id, IdToken = "ID-CANARY-" + id,
     Scope = "openid offline_access resource.invoke chatgpt.tokens.use.direct", ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(-1), UpdatedAt = DateTimeOffset.UtcNow
 };
+async Task OfficialIngress()
+{
+    var directory = Path.Combine(root, "official-ingress");
+    var vault = Store("official-ingress-vault");
+    var a = Account("A"); a.ProviderKind = "native"; a.BackendAccountId = "backend-A"; vault.Add(a);
+    var b = Account("B"); b.ProviderKind = "native"; b.BackendAccountId = "backend-B"; vault.Add(b);
+    Directory.CreateDirectory(directory);
+    var file = Path.Combine(directory, "auth.json");
+    var auth = new OfficialModelAuth(directory, vault);
+    async Task Write(string token) => await File.WriteAllTextAsync(file, JsonSerializer.Serialize(new
+    { auth_mode = "chatgpt", tokens = new { access_token = token, account_id = "official", refresh_token = "UNTOUCHED-REFRESH" } }));
+    await Write("OFFICIAL-CANARY-1"); var original = await File.ReadAllBytesAsync(file);
+    foreach (var token in new[] { a.AccessToken, b.AccessToken, "OFFICIAL-CANARY-1" })
+    {
+        Check(await auth.AcceptsAsync("POST", "/v1/responses", "Bearer " + token, default));
+        Check(await auth.AcceptsAsync("GET", "/v1/responses", "Bearer " + token, default));
+        Check(await auth.AcceptsAsync("GET", "/v1/models", "Bearer " + token, default));
+        Check(!await auth.AcceptsAsync("POST", "/v1/models", "Bearer " + token, default));
+        foreach (var path in new[] { "/status", "/settings", "/accounts/A/activate", "/dashboard/session", "/v1/other" })
+            Check(!await auth.AcceptsAsync("POST", path, "Bearer " + token, default));
+        Check(!await auth.AcceptsAsync("DELETE", "/v1/responses", "Bearer " + token, default));
+    }
+    var afterValidation = await File.ReadAllBytesAsync(file);
+    Check(original.SequenceEqual(afterValidation));
+    Check(!await auth.AcceptsAsync("POST", "/v1/responses", "Bearer UNKNOWN-CANARY", default));
+    await Write("OFFICIAL-CANARY-2");
+    Check(!await auth.AcceptsAsync("POST", "/v1/responses", "Bearer OFFICIAL-CANARY-1", default));
+    Check(await auth.AcceptsAsync("POST", "/v1/responses", "Bearer OFFICIAL-CANARY-2", default));
+    vault.ReplaceTokens(a.Id, a.RefreshToken, new() { AccessToken = "A-ROTATED", RefreshToken = "A-REFRESH-ROTATED", Scope = "native_codex", ExpiresIn = 3600 });
+    Check(!await auth.AcceptsAsync("POST", "/v1/responses", "Bearer " + a.AccessToken, default));
+    Check(await auth.AcceptsAsync("POST", "/v1/responses", "Bearer A-ROTATED", default));
+    Check(await auth.AcceptsAsync("POST", "/v1/responses", "Bearer " + b.AccessToken, default));
+    foreach (var malformed in new[] { "[]", "{", "{}", "{\"auth_mode\":\"apikey\",\"tokens\":{\"access_token\":\"OFFICIAL-CANARY-2\",\"account_id\":\"official\"}}", new string('x', 129 * 1024) })
+    {
+        await File.WriteAllTextAsync(file, malformed);
+        Check(!await auth.AcceptsAsync("POST", "/v1/responses", "Bearer OFFICIAL-CANARY-2", default));
+    }
+    Check(vault.Find(b.Id)?.RefreshToken == b.RefreshToken && vault.Find(a.Id)?.RefreshToken == "A-REFRESH-ROTATED");
+}
+async Task CompressedRequest()
+{
+    var original = Encoding.UTF8.GetBytes("{\"model\":\"gpt-6.1-sol\",\"input\":[{\"type\":\"function_call_output\",\"output\":\"工具结果\"}],\"opaque\":true}");
+    using var compressor = new ZstdSharp.Compressor();
+    var compressed = compressor.Wrap(original).ToArray();
+    foreach (var encoding in new[] { "", "zstd" })
+    {
+        using var source = new MemoryStream(encoding.Length == 0 ? original : compressed);
+        var decoded = await ModelRequestBody.ReadAsync(source, encoding, default);
+        Check(decoded.SequenceEqual(original));
+    }
+    foreach (var (payload, encoding, limit, status) in new[]
+    {
+        (compressed, "gzip", ModelRequestBody.MaximumBytes, 415),
+        (compressed, "zstd,gzip", ModelRequestBody.MaximumBytes, 415),
+        (original, "zstd", ModelRequestBody.MaximumBytes, 400),
+        (compressed[..^1], "zstd", ModelRequestBody.MaximumBytes, 400),
+        (compressed, "zstd", original.Length - 1, 413),
+        (original, "", original.Length - 1, 413)
+    })
+    {
+        using var source = new MemoryStream(payload);
+        try { await ModelRequestBody.ReadAsync(source, encoding, default, limit); Check(false); }
+        catch (RequestBodyFailure ex) { Check(ex.Status == status && !ex.Message.Contains("工具结果")); }
+    }
+    using var canceledSource = new MemoryStream(compressed);
+    using var canceled = new CancellationTokenSource(); canceled.Cancel();
+    try { await ModelRequestBody.ReadAsync(canceledSource, "zstd", canceled.Token); Check(false); }
+    catch (OperationCanceledException) { }
+}
 async Task Storage()
 {
     var vault = Store("storage"); vault.Add(Account("A")); vault.Add(Account("B"));
@@ -214,11 +291,15 @@ Task PoolRouting()
 async Task LocalApi()
 {
     var vault = Store("http-api");
+    var officialHome = Path.Combine(root, "http-api-official"); Directory.CreateDirectory(officialHome);
+    await File.WriteAllTextAsync(Path.Combine(officialHome, "auth.json"), JsonSerializer.Serialize(new
+    { auth_mode = "chatgpt", tokens = new { access_token = "OFFICIAL-HTTP-CANARY", account_id = "official-http" } }));
     Process Start()
     {
         var info = new ProcessStartInfo("dotnet") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
         info.ArgumentList.Add(typeof(Vault).Assembly.Location); info.ArgumentList.Add("serve");
         info.Environment["CODEX_POOL_DATA_DIR"] = Path.Combine(root, "http-api");
+        info.Environment["CODEX_HOME"] = officialHome;
         var process = Process.Start(info)!; process.OutputDataReceived += (_, _) => { }; process.ErrorDataReceived += (_, _) => { };
         process.BeginOutputReadLine(); process.BeginErrorReadLine(); return process;
     }
@@ -230,6 +311,16 @@ async Task LocalApi()
         for (var i = 0; i < 50; i++) { try { using var health = await http.GetAsync("http://127.0.0.1:3210/health"); if (health.IsSuccessStatusCode) { ready = true; break; } } catch (HttpRequestException) { } await Task.Delay(100); }
         Check(ready && !server.HasExited);
         using var unauthorized = await http.GetAsync("http://127.0.0.1:3210/status"); Check(unauthorized.StatusCode == HttpStatusCode.Unauthorized);
+        using var official = new HttpClient(new SocketsHttpHandler { UseProxy = false });
+        official.DefaultRequestHeaders.Authorization = new("Bearer", "OFFICIAL-HTTP-CANARY");
+        using var officialModel = await official.PostAsJsonAsync("http://127.0.0.1:3210/v1/responses", new { });
+        Check(officialModel.StatusCode == HttpStatusCode.BadRequest);
+        using var officialWs = await official.GetAsync("http://127.0.0.1:3210/v1/responses");
+        Check(officialWs.StatusCode == HttpStatusCode.UpgradeRequired);
+        using var officialControl = await official.PostAsJsonAsync("http://127.0.0.1:3210/settings", new { });
+        Check(officialControl.StatusCode == HttpStatusCode.Unauthorized);
+        using var officialStatus = await official.GetAsync("http://127.0.0.1:3210/status");
+        Check(officialStatus.StatusCode == HttpStatusCode.Unauthorized);
         http.DefaultRequestHeaders.Authorization = new("Bearer", vault.LocalKey);
         using var status = await http.GetAsync("http://127.0.0.1:3210/status"); var text = await status.Content.ReadAsStringAsync();
         Check(status.IsSuccessStatusCode && !text.Contains(vault.LocalKey) && !text.Contains("accessToken"));
