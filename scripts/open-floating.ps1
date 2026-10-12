@@ -15,6 +15,7 @@ try {
     }
 }
 if (-not $taskOnline) {
-    Start-Process -FilePath $taskDaemon -ArgumentList 'serve' -WorkingDirectory (Split-Path $taskDaemon -Parent) -WindowStyle Hidden
+    # The desktop launcher opts into account migration; the saved AutoSwitch setting still controls scheduling.
+    Start-Process -FilePath $taskDaemon -ArgumentList @('serve', '--live-boundary-probe') -WorkingDirectory (Split-Path $taskDaemon -Parent) -WindowStyle Hidden
 }
 Start-Process -FilePath $taskWindow -WorkingDirectory (Split-Path $taskWindow -Parent) -WindowStyle Normal

@@ -23,6 +23,8 @@ dotnet run --project src/CodexPool.Daemon --no-launch-profile -- serve
 
 Dashboard 位于 `http://127.0.0.1:3210`，`dashboard` 命令建立短期安全浏览器会话。页面提供账户 Radio、额度、pause/drain/enable、阈值、请求与切换原因；悬浮窗通过 `/events` 同步状态，通过本地 API 切换账户。窗口支持 Acrylic、完整/紧凑/胶囊模式、系统/浅色/深色、置顶、拖动、托盘、`Ctrl+Alt+C`、位置保存、DPI 和工作区钳制。关闭窗口隐藏到托盘；托盘“退出悬浮窗”仅退出 UI，Daemon 继续运行。
 
+桌面悬浮窗快捷方式（`scripts/open-floating.ps1`）和悬浮窗本身会在代理未运行时自动启动代理，并携带 `--live-boundary-probe`，允许网页开启自动切换。自动切换开关及阈值由 Dashboard 保存，后续启动沿用设置；首次安装仍默认关闭。已有代理会继续运行，启动器不会中断其请求或修改启动模式。此启动方式用于当前用户的迁移实验，完整真实账户验收仍以验收报告为准。
+
 另一个终端中登录两个账户。每次由系统浏览器完成官方 Continue with ChatGPT；不要复制 token 或覆盖 Codex auth.json。
 
 ```powershell

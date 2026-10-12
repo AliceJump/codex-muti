@@ -30,6 +30,8 @@ internal static class ProxyStartup
         var start = new ProcessStartInfo(executable) { UseShellExecute = false, CreateNoWindow = true,
             WindowStyle = ProcessWindowStyle.Hidden, WorkingDirectory = Path.GetDirectoryName(executable)! };
         start.ArgumentList.Add("serve");
+        // User-facing startup permits migration and honors the persisted automatic-switch setting.
+        start.ArgumentList.Add("--live-boundary-probe");
         using var child = Process.Start(start);
         // The daemon is independent of the window. Its own exclusive lock resolves startup races.
     }
