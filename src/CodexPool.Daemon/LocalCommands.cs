@@ -12,7 +12,7 @@ public static class LocalCommands
     {
         if (command == "help")
         {
-            Console.WriteLine("serve [--live-boundary-probe] | login <label> [account-id] | status | models | activate/pause/resume/drain/undrain/enable/disable <account-id> | codex [official arguments]"); return 0;
+            Console.WriteLine("serve [--live-boundary-probe] | login/native-login <label> | dashboard | status | usage | models | activate/pause/resume/drain/undrain/enable/disable <account-id> | codex [official arguments]"); return 0;
         }
         var key = Vault.ReadLocalKey(directory);
         if (command == "codex")
@@ -29,6 +29,15 @@ public static class LocalCommands
         }
         using var client = new HttpClient(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(30) };
         client.DefaultRequestHeaders.Authorization = new("Bearer", key);
+        if (command == "dashboard")
+        {
+            using var response = await client.PostAsync("http://127.0.0.1:3210/dashboard/session", null); response.EnsureSuccessStatusCode();
+            using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            var url = json.RootElement.GetProperty("url").GetString()!;
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || uri.Scheme != "http" || uri.Host != "127.0.0.1" || uri.Port != 3210
+                || !uri.AbsolutePath.StartsWith("/dashboard/open/", StringComparison.Ordinal)) throw new InvalidOperationException();
+            Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); Console.WriteLine("Dashboard opened in your system browser."); return 0;
+        }
         if (command is "status" or "models" or "usage")
         {
             using var response = await client.GetAsync("http://127.0.0.1:3210/" + command); response.EnsureSuccessStatusCode();

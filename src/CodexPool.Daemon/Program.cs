@@ -45,18 +45,29 @@ try
     var inFlight = new ConcurrentDictionary<string, int>();
     var boundaryProbe = args.Contains("--live-boundary-probe", StringComparer.Ordinal);
     var pool = new PoolRuntime(vault, auth, quota, boundaryProbe);
+    var browsers = new BrowserSessions(); var events = new StateEvents();
     long requestCount = 0;
     var sessionOwners = new ConcurrentDictionary<string, string>();
     app.Use(async (context, next) =>
     {
-        // No CORS. Browser JS cannot operate the control API, including from localhost variants.
-        if (context.Request.Host.Host != "127.0.0.1" || context.Request.Host.Port != 3210 || context.Request.Headers.ContainsKey("Origin"))
+        // No CORS. Only the exact local origin may use an authenticated browser session.
+        if (context.Request.Host.Host != "127.0.0.1" || context.Request.Host.Port != 3210
+            || context.Request.Headers.TryGetValue("Origin", out var origin) && origin != "http://127.0.0.1:3210")
         { context.Response.StatusCode = 403; return; }
         context.Response.Headers.CacheControl = "no-store";
         context.Response.Headers.XContentTypeOptions = "nosniff";
-        var publicPath = context.Request.Path is { Value: "/health" or "/auth/callback" };
-        if (!publicPath && !LocalCommands.EqualSecret(context.Request.Headers.Authorization.ToString(), "Bearer " + vault.LocalKey))
+        context.Response.Headers.ContentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
+        context.Response.Headers["Referrer-Policy"] = "no-referrer";
+        var path = context.Request.Path.Value ?? "";
+        var publicPath = path is "/" or "/health" or "/auth/callback" or "/dashboard.js" or "/dashboard.css" || path.StartsWith("/dashboard/open/", StringComparison.Ordinal);
+        var bearer = LocalCommands.EqualSecret(context.Request.Headers.Authorization.ToString(), "Bearer " + vault.LocalKey);
+        var session = browsers.Find(context);
+        var mutating = context.Request.Method is not ("GET" or "HEAD");
+        var bearerOnly = path.StartsWith("/v1/", StringComparison.Ordinal) || path is "/accounts/login" or "/dashboard/session";
+        if (!publicPath && !bearer && (bearerOnly || session is null))
         { context.Response.StatusCode = 401; return; }
+        if (!publicPath && !bearer && mutating && !LocalCommands.EqualSecret(context.Request.Headers["X-Codex-Pool-CSRF"].ToString(), session!.Csrf))
+        { context.Response.StatusCode = 403; return; }
         try { await next(); }
         catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested) { }
         catch (AuthFailure ex)
@@ -73,6 +84,13 @@ try
         boundaryProbe, distinctUsers = vault.DistinctUsers, liveMigrationValidated = false, quotaSource = "per_registration", accounts = vault.Views(auth.Health),
         nativeLoginAttempts = nativeLogin.PublicAttempts, usage = quota.Views, inFlightRequests = inFlight.ToArray(), recentRequests = recent.ToArray(), recentSwitches = pool.History };
     app.MapGet("/status", () => Status());
+    app.MapGet("/events", (HttpContext context) => events.StreamAsync(context, Status));
+    app.MapGet("/browser-session", (HttpContext context) => browsers.Find(context) is { } session
+        ? Results.Ok(new { csrf = session.Csrf }) : Results.Unauthorized());
+    app.MapPost("/dashboard/session", () => Results.Ok(new { url = "http://127.0.0.1:3210/dashboard/open/" + browsers.Issue() }));
+    app.MapGet("/dashboard/open/{ticket}", (string ticket, HttpContext context) => browsers.Redeem(ticket, context) ? Results.Redirect("/") : Results.Unauthorized());
+    foreach (var asset in new[] { (Path: "/", File: "index.html", Type: "text/html"), (Path: "/dashboard.js", File: "dashboard.js", Type: "text/javascript"), (Path: "/dashboard.css", File: "dashboard.css", Type: "text/css") })
+        app.MapGet(asset.Path, () => Results.Stream(typeof(Vault).Assembly.GetManifestResourceStream("CodexPool.Daemon.Dashboard." + asset.File)!, asset.Type));
     app.MapGet("/settings", () => pool.Settings);
     app.MapPost("/settings", async (HttpContext context) =>
     {
@@ -95,7 +113,10 @@ try
     {
         var selected = vault.Selected ?? throw new AuthFailure("no_authorized_account");
         var account = await auth.ReadyAsync(selected.Id, context.RequestAborted);
-        using var request = new HttpRequestMessage(HttpMethod.Get, "https://api.openai.com/v1/models"); request.Headers.Authorization = new("Bearer", account.AccessToken);
+        using var request = new HttpRequestMessage(HttpMethod.Get, account.ProviderKind == "native"
+            ? "https://chatgpt.com/backend-api/codex/models?client_version=0.157.1" : "https://api.openai.com/v1/models");
+        request.Headers.Authorization = new("Bearer", account.AccessToken);
+        if (account.ProviderKind == "native") request.Headers.TryAddWithoutValidation("ChatGPT-Account-Id", account.BackendAccountId);
         using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, context.RequestAborted);
         if (!response.IsSuccessStatusCode) return Results.Json(new { error = new { code = "model_catalog_unavailable" } }, statusCode: (int)response.StatusCode);
         await using var stream = await response.Content.ReadAsStreamAsync(context.RequestAborted);
@@ -183,9 +204,19 @@ try
         var started = Stopwatch.GetTimestamp(); var requestId = Guid.NewGuid().ToString("N");
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted); lifetime.CancelAfter(TimeSpan.FromMinutes(10));
         RelayResult result;
-        result = await relay.ForwardAsync(body, "application/json", candidates, headers,
-            new WebSink(context), lifetime.Token, pool.Rejected,
-            (lease, entering) => inFlight.AddOrUpdate(lease.AccountId, entering ? 1 : 0, (_, count) => Math.Max(0, count + (entering ? 1 : -1))));
+        var sink = new WebSink(context); var attemptedAccount = account.Id; var attemptCount = 0;
+        try
+        {
+            result = await relay.ForwardAsync(body, "application/json", candidates, headers, sink, lifetime.Token, pool.Rejected,
+                (lease, entering) =>
+                {
+                    if (entering) { attemptedAccount = lease.AccountId; attemptCount++; }
+                    inFlight.AddOrUpdate(lease.AccountId, entering ? 1 : 0, (_, count) => Math.Max(0, count + (entering ? 1 : -1)));
+                });
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
+        { result = new(attemptedAccount, context.RequestAborted.IsCancellationRequested ? 499 : 504, attemptCount, sink.Started,
+            context.RequestAborted.IsCancellationRequested ? "client_cancelled" : "request_deadline"); }
         pool.Complete(selection, result);
         if (headers.TryGetValue("session_id", out var completedSession)) sessionOwners[Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(completedSession)))] = result.AccountId;
         recent.Enqueue(new { timestamp = DateTimeOffset.UtcNow, requestId, account = result.AccountId, model = modelValue.GetString(),
@@ -194,19 +225,37 @@ try
             toolResultCount = input.EnumerateArray().Count(x => x.TryGetProperty("type", out var type) && type.GetString() == "function_call_output"),
             upstreamHeaderNames = result.UpstreamHeaderNames, upstreamContentType = result.UpstreamContentType, payloadKind = result.PayloadKind, prefixShape = result.PrefixShape });
         while (recent.Count > 100) recent.TryDequeue(out _);
-        if (result.Committed && result.Outcome == "stream_interrupted") context.Abort();
+        if (context.RequestAborted.IsCancellationRequested) return;
+        if (result.Committed && result.Outcome is "stream_interrupted" or "request_deadline") context.Abort();
         else if (!result.Committed) { context.Response.StatusCode = 502; await context.Response.WriteAsJsonAsync(new { error = new { code = result.Outcome } }); }
     });
     app.MapFallback(() => Results.NotFound(new { error = new { code = "endpoint_not_supported_in_phase0" } }));
     Console.WriteLine("Codex Pool listening at http://127.0.0.1:3210 (live migration acceptance gate applies).");
-    await app.RunAsync(); return 0;
+    var eventTask = events.RunAsync(Status, app.Lifetime.ApplicationStopping);
+    var quotaTask = Task.Run(async () =>
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(30));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(app.Lifetime.ApplicationStopping))
+            {
+                foreach (var account in vault.Accounts.Where(x => x.ProviderKind == "native" && x.Enabled && x.AuthStatus == "ready"))
+                    try { await quota.RefreshAsync(account.Id, app.Lifetime.ApplicationStopping); }
+                    catch (Exception ex) when (ex is AuthFailure or HttpRequestException or JsonException or OperationCanceledException) { }
+                if (pool.Settings.AutoSwitch) try { pool.Select(); } catch (NoEligibleAccountException) { }
+            }
+        }
+        catch (OperationCanceledException) when (app.Lifetime.ApplicationStopping.IsCancellationRequested) { }
+    });
+    await app.RunAsync(); await Task.WhenAll(eventTask, quotaTask); return 0;
 }
 catch { Console.Error.WriteLine("Daemon failed to start or stopped unexpectedly. Check port 3210 and single-instance ownership."); return 1; }
 
 sealed record LoginInput(string Name, string? AccountId);
 sealed class WebSink(HttpContext context) : IResponseSink
 {
-    public void Start(int statusCode, string contentType) { context.Response.StatusCode = statusCode; context.Response.ContentType = contentType; }
+    public bool Started { get; private set; }
+    public void Start(int statusCode, string contentType) { Started = true; context.Response.StatusCode = statusCode; context.Response.ContentType = contentType; }
     public async ValueTask WriteAsync(ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken)
     { await context.Response.Body.WriteAsync(bytes, cancellationToken); await context.Response.Body.FlushAsync(cancellationToken); }
 }
