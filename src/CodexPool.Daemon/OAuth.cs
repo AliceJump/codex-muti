@@ -65,14 +65,14 @@ public sealed class OAuth(HttpClient http, Vault vault)
         health.TryRemove(savedId, out _); refreshBackoff.TryRemove(savedId, out _); return savedId;
     }
 
-    public async Task<AccountCredential> ReadyAsync(string id, CancellationToken cancellationToken)
+    public async Task<AccountCredential> ReadyAsync(string id, CancellationToken cancellationToken, bool forceRefresh = false)
     {
         var refreshLock = refreshLocks.GetOrAdd(id, _ => new(1, 1)); await refreshLock.WaitAsync(cancellationToken);
         try
         {
             var account = vault.Find(id) ?? throw new AuthFailure("account_not_found");
             if (account.AuthStatus is "reauth_required" or "refresh_pending" || health.TryGetValue(id, out var status) && status == "reauth_required") throw new AuthFailure("reauth_required");
-            if (account.ExpiresAt > DateTimeOffset.UtcNow.AddMinutes(2)) return account;
+            if (!forceRefresh && account.ExpiresAt > DateTimeOffset.UtcNow.AddMinutes(2)) return account;
             if (refreshBackoff.TryGetValue(id, out var retryAt) && retryAt > DateTimeOffset.UtcNow) throw new AuthFailure("auth_temporarily_unavailable");
             if (account.EarliestRefreshAt > DateTimeOffset.UtcNow) throw new AuthFailure("refresh_not_yet_allowed");
             TokenResponse token;
@@ -144,8 +144,11 @@ public sealed class OAuth(HttpClient http, Vault vault)
         var text = await ReadLimitedAsync(response.Content, cancellationToken);
         if (!response.IsSuccessStatusCode) throw new AuthFailure(response.StatusCode is HttpStatusCode.BadRequest or HttpStatusCode.Unauthorized ? "reauth_required" : "auth_temporarily_unavailable");
         var token = JsonSerializer.Deserialize<TokenResponse>(text) ?? throw new AuthFailure("invalid_token_response");
-        if (string.IsNullOrEmpty(token.AccessToken) || string.IsNullOrEmpty(token.RefreshToken)) throw new AuthFailure("invalid_token_response");
-        token.Scope = "native_codex"; token.ExpiresIn = (int)Math.Clamp((new JsonWebToken(token.AccessToken).ValidTo - DateTime.UtcNow).TotalSeconds, 1, 86400);
+        if (string.IsNullOrEmpty(token.AccessToken)) throw new AuthFailure("invalid_token_response");
+        if (string.IsNullOrEmpty(token.RefreshToken)) token.RefreshToken = account.RefreshToken;
+        var seconds = (new JsonWebToken(token.AccessToken).ValidTo - DateTime.UtcNow).TotalSeconds;
+        if (seconds < 1) throw new AuthFailure("invalid_token_expiry");
+        token.Scope = "native_codex"; token.ExpiresIn = (int)Math.Min(seconds, 86400);
         if (!string.IsNullOrEmpty(token.IdToken))
         {
             var jwt = new JsonWebToken(token.IdToken);

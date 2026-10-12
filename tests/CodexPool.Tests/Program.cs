@@ -28,7 +28,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("No eligible account and auto-switch OFF never relax admission", Eligibility),
     ("Native retries use each lease account header and balance in-flight observers", NativeRouting),
     ("Streaming quota failure excludes future routing without replay", StreamQuota),
-    ("Failed durable selection never changes active owner or epoch", PersistenceFailure)
+    ("Failed durable selection never changes active owner or epoch", PersistenceFailure),
+    ("Completed metadata requires a delivered event and cannot reopen replay", CompletedMetadata)
 };
 var failed = 0;
 foreach (var (name, run) in tests)
@@ -97,6 +98,19 @@ static async Task StreamQuota()
     var result = await new ResponsesRelay(client).ForwardAsync("{}"u8.ToArray(), "application/json", Candidates(), new Dictionary<string, string>(), sink, default,
         (lease, reason) => rejected.Add(lease.AccountId + ":" + reason));
     Check(result.Committed && handler.Count == 1 && sink.Text == events && rejected.SequenceEqual(new[] { "A:quota_rejected" }));
+}
+static async Task CompletedMetadata()
+{
+    const string events = "data: {\"type\":\"response.created\"}\n\ndata: {\"type\":\"response.completed\"}\n\n";
+    foreach (var fails in new[] { false, true })
+    {
+        var handler = new FixtureHandler((_, _) => Task.FromResult(Response(200, events, "text/event-stream")));
+        using var client = new HttpClient(handler); var completed = false;
+        var sink = new MemorySink { OnWrite = () => { if (fails) throw new IOException("write-failed"); } };
+        var result = await new ResponsesRelay(client).ForwardAsync("{}"u8.ToArray(), "application/json", Candidates(), new Dictionary<string, string>(), sink, default,
+            completed: _ => completed = true);
+        Check(completed == !fails && result.Committed && handler.Count == 1);
+    }
 }
 static async Task Cancel()
 {
@@ -180,11 +194,13 @@ static async Task MissingContentType()
 }
 static async Task MissingContentTypeRejected()
 {
-    foreach (var content in new[] { "{\"id\":\"response-json\"}", "data: {}\n\n", new string('x', 9000) })
+    foreach (var content in new[] { "{\"id\":\"response-json\"}", "data: {}\n\n", new string('x', 9000),
+        "data: {\"type\":\"SECRET-CANARY\",\"SECRET-CANARY\":true,\"error\":{\"code\":\"SECRET-CANARY\"}}\n\n" })
     {
         var handler = new FixtureHandler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(Encoding.UTF8.GetBytes(content)) }));
         using var client = new HttpClient(handler); var sink = new MemorySink(); var result = await Relay(client, sink);
         Check(!result.Committed && handler.Count == 1 && sink.Text.Length == 0 && result.Outcome == "unexpected_content_type");
+        Check(!System.Text.Json.JsonSerializer.Serialize(result).Contains("SECRET-CANARY"));
     }
 }
 static Task Sticky()

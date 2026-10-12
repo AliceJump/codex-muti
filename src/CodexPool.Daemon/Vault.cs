@@ -29,10 +29,10 @@ public sealed class AccountCredential
     public DateTimeOffset? EarliestRefreshAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
     public override string ToString() => "AccountCredential [REDACTED]";
-    public object PublicView(bool active, string? authHealth = null) => new { id = Id, name = Name, active,
+    public object PublicView(bool active, string? authHealth = null, QuotaSnapshot? usage = null) => new { id = Id, name = Name, active,
         enabled = Enabled, paused = Paused, drain = Draining, cooldownUntil = CooldownUntil,
         state = !Enabled ? "disabled" : Paused ? "paused" : Draining ? "draining" : CooldownUntil > DateTimeOffset.UtcNow ? "cooldown" : active ? "active" : "standby",
-        provider = ProviderKind, plan = Plan, auth = authHealth ?? (AuthStatus != "ready" ? AuthStatus : ExpiresAt > DateTimeOffset.UtcNow ? "ready" : "refresh_needed"), quota = (object?)null, updatedAt = UpdatedAt };
+        provider = ProviderKind, plan = Plan, auth = authHealth ?? (AuthStatus != "ready" ? AuthStatus : ExpiresAt > DateTimeOffset.UtcNow ? "ready" : "refresh_needed"), quota = usage, quotaUpdatedAt = usage?.UpdatedAt, updatedAt = UpdatedAt };
 }
 
 public sealed class VaultDocument
@@ -93,8 +93,9 @@ public sealed class Vault
         lock (gate) { var next = CloneDocument(document); next.Accounts.Single(x => x.Id == id).CooldownUntil = until; Persist(next); document = next; }
     }
     public int DistinctUsers { get { lock (gate) return document.Accounts.Select(x => x.Subject).Distinct(StringComparer.Ordinal).Count(); } }
+    public int NativeDistinctUsers { get { lock (gate) return document.Accounts.Where(x => x.ProviderKind == "native").Select(x => x.Subject).Distinct(StringComparer.Ordinal).Count(); } }
     public object[] PublicAccounts => Views(_ => null);
-    public object[] Views(Func<string, string?> authHealth) { lock (gate) return document.Accounts.Select(x => x.PublicView(x.Id == document.ActiveAccountId, authHealth(x.Id))).ToArray(); }
+    public object[] Views(Func<string, string?> authHealth) { lock (gate) return document.Accounts.Select(x => x.PublicView(x.Id == document.ActiveAccountId, authHealth(x.Id), document.Quotas.FirstOrDefault(q => q.AccountId == x.Id))).ToArray(); }
     public AccountCredential? Selected { get { lock (gate) return Clone(document.Accounts.FirstOrDefault(x => x.Id == document.ActiveAccountId)); } }
     public AccountCredential? Find(string id) { lock (gate) return Clone(document.Accounts.FirstOrDefault(x => x.Id == id)); }
     public AccountCredential[] Accounts { get { lock (gate) return document.Accounts.Select(x => Clone(x)!).ToArray(); } }

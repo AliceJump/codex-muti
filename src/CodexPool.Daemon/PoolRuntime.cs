@@ -22,7 +22,9 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
     {
         lock (gate)
         {
-            var selection = scheduler.Select(Accounts(), Settings, DateTimeOffset.UtcNow);
+            var provider = scheduler.Active is { } current ? vault.Find(current)?.ProviderKind : null;
+            var accounts = Accounts().Where(x => provider is null || vault.Find(x.Id)?.ProviderKind == provider).ToArray();
+            var selection = scheduler.Select(accounts, Settings, DateTimeOffset.UtcNow);
             return selection;
         }
     }

@@ -26,7 +26,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Crash during rotation leaves durable refresh_pending and never reuses token", CrashRefresh),
     ("Native registrations sharing official client ID remain separate", NativeRegistrations),
     ("Quota windows use durations and reject malformed percentages", QuotaParser),
-    ("Durable quota, scheduler and manual epoch survive control races", PoolRouting)
+    ("Durable quota, scheduler and manual epoch survive control races", PoolRouting),
+    ("Native JSON refresh isolates A/B and accepts omitted replacement refresh token", NativeRefresh)
 };
 var failed = 0;
 foreach (var (name, run) in tests)
@@ -158,6 +159,26 @@ Task NativeRegistrations()
     Check(vault.PublicAccounts.Length == 2 && vault.DistinctUsers == 2 && vault.Find("A")!.RefreshToken != vault.Find("B")!.RefreshToken);
     return Task.CompletedTask;
 }
+async Task NativeRefresh()
+{
+    var vault = Store("native-refresh");
+    foreach (var id in new[] { "A", "B" })
+    {
+        var template = Account(id);
+        vault.Add(new() { Id = id, Name = id, Subject = template.Subject, ClientId = NativeLogin.NativeClientId,
+            ProviderKind = "native", BackendAccountId = "backend-" + id, AccessToken = template.AccessToken,
+            RefreshToken = template.RefreshToken, IdToken = template.IdToken, Scope = "native_codex", ExpiresAt = template.ExpiresAt });
+    }
+    using var issuer = new FakeIssuer(); using var http = new HttpClient(issuer); var oauth = new OAuth(http, vault);
+    var bBefore = JsonSerializer.Serialize(vault.Find("B"));
+    await Task.WhenAll(Enumerable.Range(0, 20).Select(_ => oauth.ReadyAsync("A", default)));
+    Check(issuer.RefreshCalls == 1 && JsonSerializer.Serialize(vault.Find("B")) == bBefore);
+    var aBefore = JsonSerializer.Serialize(vault.Find("A")); await oauth.ReadyAsync("B", default);
+    Check(issuer.RefreshCalls == 2 && JsonSerializer.Serialize(vault.Find("A")) == aBefore);
+    var old = vault.Find("A")!.RefreshToken; issuer.OmitNativeRefresh = true;
+    await oauth.ReadyAsync("A", default, forceRefresh: true);
+    Check(vault.Find("A")!.RefreshToken == old && vault.Find("A")!.AuthStatus == "ready");
+}
 Task QuotaParser()
 {
     var valid = """
@@ -256,14 +277,16 @@ sealed class FakeIssuer : HttpMessageHandler
     public string? ExpectedChallenge { get; set; }
     public bool GrantPlan { get; set; } = true;
     public bool RejectRefresh { get; set; }
+    public bool OmitNativeRefresh { get; set; }
     public int RefreshCalls { get; private set; }
     public int CodeCalls { get; private set; }
     public bool ValidPkce { get; private set; }
     public List<string> UsedRefreshTokens { get; } = [];
-    public string Token(string audience, string subject, string? nonce, string issuer = "https://auth.openai.com", bool expired = false, bool forged = false)
+    public string Token(string audience, string subject, string? nonce, string issuer = "https://auth.openai.com", bool expired = false, bool forged = false, string? nativeAccountId = null)
     {
         using var other = RSA.Create(2048); var key = new RsaSecurityKey(forged ? other : signing) { KeyId = "fixture-key" };
         var claims = new Dictionary<string, object> { ["sub"] = subject }; if (nonce is not null) claims["nonce"] = nonce;
+        if (nativeAccountId is not null) claims["https://api.openai.com/auth"] = new Dictionary<string, object> { ["chatgpt_account_id"] = nativeAccountId };
         var now = DateTime.UtcNow;
         return new JsonWebTokenHandler().CreateToken(new SecurityTokenDescriptor { Issuer = issuer, Audience = audience, Claims = claims,
             IssuedAt = now.AddHours(-2), NotBefore = now.AddHours(-2), Expires = expired ? now.AddMinutes(-10) : now.AddHours(1),
@@ -277,6 +300,17 @@ sealed class FakeIssuer : HttpMessageHandler
         {
             var key = signing.ExportParameters(false);
             return Json(new { keys = new[] { new { kty = "RSA", kid = "fixture-key", use = "sig", alg = "RS256", n = Base64UrlEncoder.Encode(key.Modulus!), e = Base64UrlEncoder.Encode(key.Exponent!) } } });
+        }
+        if (path == "/oauth/token")
+        {
+            if (request.Content!.Headers.ContentType?.MediaType != "application/json") throw new InvalidOperationException();
+            using var native = JsonDocument.Parse(await request.Content.ReadAsStringAsync(cancellationToken)); var nativeFields = native.RootElement;
+            if (nativeFields.GetProperty("client_id").GetString() != NativeLogin.NativeClientId || nativeFields.TryGetProperty("resource", out _)) throw new InvalidOperationException();
+            var old = nativeFields.GetProperty("refresh_token").GetString()!; UsedRefreshTokens.Add(old); RefreshCalls++;
+            var id = old.Split('-').Last();
+            return Json(new { access_token = Token("native-access", "sub-" + id, null),
+                refresh_token = OmitNativeRefresh ? "" : "native-refresh-" + RefreshCalls + "-" + id,
+                id_token = Token(NativeLogin.NativeClientId, "sub-" + id, null, nativeAccountId: "backend-" + id) });
         }
         var fields = (await request.Content!.ReadAsStringAsync(cancellationToken)).Split('&').Select(x => x.Split('=', 2)).ToDictionary(x => WebUtility.UrlDecode(x[0]), x => WebUtility.UrlDecode(x[1]));
         var clientId = fields["client_id"];

@@ -2,6 +2,8 @@ using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Globalization;
+using CodexPool.Core;
 
 namespace CodexPool.Daemon;
 
@@ -12,7 +14,7 @@ public static class LocalCommands
     {
         if (command == "help")
         {
-            Console.WriteLine("serve [--live-boundary-probe] | login/native-login <label> | dashboard | status | usage | models | activate/pause/resume/drain/undrain/enable/disable <account-id> | codex [official arguments]"); return 0;
+            Console.WriteLine("serve [--live-boundary-probe] | login/native-login <label> | dashboard | status | usage | models | settings [on/off 5h weekly] | activate/pause/resume/drain/undrain/enable/disable/refresh <account-id> | codex [official arguments]"); return 0;
         }
         var key = Vault.ReadLocalKey(directory);
         if (command == "codex")
@@ -29,6 +31,15 @@ public static class LocalCommands
         }
         using var client = new HttpClient(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(30) };
         client.DefaultRequestHeaders.Authorization = new("Bearer", key);
+        if (command == "settings" && args.Length is 0 or 3)
+        {
+            if (args.Length == 0) { Console.WriteLine(await client.GetStringAsync("http://127.0.0.1:3210/settings")); return 0; }
+            if (args[0] is not ("on" or "off") || !double.TryParse(args[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var five)
+                || !double.TryParse(args[2], NumberStyles.Float, CultureInfo.InvariantCulture, out var weekly)) return 1;
+            var settings = new PoolSettings(args[0] == "on", five, weekly); StickyScheduler.Validate(settings);
+            using var response = await client.PostAsJsonAsync("http://127.0.0.1:3210/settings", settings); response.EnsureSuccessStatusCode();
+            Console.WriteLine(await response.Content.ReadAsStringAsync()); return 0;
+        }
         if (command == "dashboard")
         {
             using var response = await client.PostAsync("http://127.0.0.1:3210/dashboard/session", null); response.EnsureSuccessStatusCode();
@@ -43,9 +54,10 @@ public static class LocalCommands
             using var response = await client.GetAsync("http://127.0.0.1:3210/" + command); response.EnsureSuccessStatusCode();
             Console.WriteLine(await response.Content.ReadAsStringAsync()); return 0;
         }
-        if (command is "activate" or "pause" or "resume" or "drain" or "undrain" or "enable" or "disable" && args.Length == 1 && Guid.TryParseExact(args[0], "N", out _))
+        if (command is "activate" or "pause" or "resume" or "drain" or "undrain" or "enable" or "disable" or "refresh" && args.Length == 1 && Guid.TryParseExact(args[0], "N", out _))
         {
             using var response = await client.PostAsync("http://127.0.0.1:3210/accounts/" + args[0] + "/" + command, null);
+            if (command == "refresh" && response.IsSuccessStatusCode) { Console.WriteLine(await response.Content.ReadAsStringAsync()); return 0; }
             Console.WriteLine(response.IsSuccessStatusCode ? "Account control applied for new requests." : "Control rejected; check account and live migration gate.");
             return response.IsSuccessStatusCode ? 0 : 1;
         }

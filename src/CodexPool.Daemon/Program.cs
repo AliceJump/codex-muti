@@ -81,7 +81,7 @@ try
     });
     app.MapGet("/health", () => new { status = "running", stage = "acceptance", automaticSwitching = pool.Settings.AutoSwitch });
     object Status() => new { activeAccountId = vault.ActiveId, stage = "acceptance", automaticSwitching = pool.Settings.AutoSwitch, settings = pool.Settings,
-        boundaryProbe, distinctUsers = vault.DistinctUsers, liveMigrationValidated = false, quotaSource = "per_registration", accounts = vault.Views(auth.Health),
+        boundaryProbe, distinctUsers = vault.DistinctUsers, nativeDistinctUsers = vault.NativeDistinctUsers, liveMigrationValidated = false, quotaSource = "per_registration", accounts = vault.Views(auth.Health),
         nativeLoginAttempts = nativeLogin.PublicAttempts, usage = quota.Views, inFlightRequests = inFlight.ToArray(), recentRequests = recent.ToArray(), recentSwitches = pool.History };
     app.MapGet("/status", () => Status());
     app.MapGet("/events", (HttpContext context) => events.StreamAsync(context, Status));
@@ -108,6 +108,15 @@ try
     {
         var input = await context.Request.ReadFromJsonAsync<LoginInput>(context.RequestAborted) ?? throw new AuthFailure("invalid_login_request");
         return Results.Json(new { attemptId = await nativeLogin.StartAsync(input.Name), state = "waiting_for_browser" });
+    });
+    app.MapPost("/accounts/{id}/refresh", async (string id, HttpContext context) =>
+    {
+        var before = vault.Accounts; var original = before.FirstOrDefault(x => x.Id == id) ?? throw new AuthFailure("account_not_found");
+        var refreshed = await auth.ReadyAsync(id, context.RequestAborted, forceRefresh: true);
+        return Results.Ok(new { accountId = refreshed.Id, auth = "ready", updatedAt = refreshed.UpdatedAt,
+            accessTokenChanged = original.AccessToken != refreshed.AccessToken, refreshTokenRotated = original.RefreshToken != refreshed.RefreshToken,
+            otherAccountCredentialsUnchanged = before.Where(x => x.Id != id).All(x => vault.Find(x.Id) is { } current
+                && current.AccessToken == x.AccessToken && current.RefreshToken == x.RefreshToken) });
     });
     app.MapGet("/models", async (HttpContext context) =>
     {
@@ -205,6 +214,7 @@ try
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted); lifetime.CancelAfter(TimeSpan.FromMinutes(10));
         RelayResult result;
         var sink = new WebSink(context); var attemptedAccount = account.Id; var attemptCount = 0;
+        var upstreamCompleted = false;
         var rejections = new List<object>(); string? failoverReason = null;
         try
         {
@@ -214,11 +224,11 @@ try
                 {
                     if (entering) { attemptedAccount = lease.AccountId; attemptCount++; }
                     inFlight.AddOrUpdate(lease.AccountId, entering ? 1 : 0, (_, count) => Math.Max(0, count + (entering ? 1 : -1)));
-                });
+                }, _ => upstreamCompleted = true);
         }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
-        { result = new(attemptedAccount, context.RequestAborted.IsCancellationRequested ? 499 : 504, attemptCount, sink.Started,
-            context.RequestAborted.IsCancellationRequested ? "client_cancelled" : "request_deadline"); }
+        { result = new(attemptedAccount, upstreamCompleted ? 200 : context.RequestAborted.IsCancellationRequested ? 499 : 504, attemptCount, sink.Started,
+            upstreamCompleted ? "completed_client_disconnect" : context.RequestAborted.IsCancellationRequested ? "client_cancelled" : "request_deadline"); }
         pool.Complete(selection, result, failoverReason);
         if (headers.TryGetValue("session_id", out var completedSession)) sessionOwners[Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(completedSession)))] = result.AccountId;
         recent.Enqueue(new { timestamp = DateTimeOffset.UtcNow, requestId, account = result.AccountId, model = modelValue.GetString(),

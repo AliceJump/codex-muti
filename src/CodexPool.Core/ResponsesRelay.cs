@@ -30,7 +30,7 @@ public sealed class ResponsesRelay(HttpClient http)
     public async Task<RelayResult> ForwardAsync(
         ReadOnlyMemory<byte> body, string contentType, IReadOnlyList<ModelLease> candidates,
         IReadOnlyDictionary<string, string> headers, IResponseSink sink, CancellationToken cancellationToken,
-        Action<ModelLease, string>? rejected = null, Action<ModelLease, bool>? attempt = null)
+        Action<ModelLease, string>? rejected = null, Action<ModelLease, bool>? attempt = null, Action<ModelLease>? completed = null)
     {
         if (candidates.Count == 0) throw new ArgumentException("No candidate accounts.", nameof(candidates));
         if (candidates.Select(x => x.AccountId).Distinct(StringComparer.Ordinal).Count() != candidates.Count)
@@ -112,14 +112,14 @@ public sealed class ResponsesRelay(HttpClient http)
                         HeaderNames(response), upstreamType, "not_inspected");
                 }
                 var buffer = new byte[16 * 1024];
-                var events = new RejectionEvents(lease, rejected);
+                var events = new RejectionEvents(lease, rejected, completed);
                 try
                 {
                     if (initialBytes is not null)
                     {
                         sink.Start(status, "text/event-stream"); committed = true;
-                        events.Feed(initialBytes);
                         await sink.WriteAsync(initialBytes, cancellationToken);
+                        events.Feed(initialBytes);
                     }
                     while (true)
                     {
@@ -131,8 +131,8 @@ public sealed class ResponsesRelay(HttpClient http)
                             // Latch BEFORE the write; a partial write can never reopen the gate.
                             committed = true;
                         }
-                        events.Feed(buffer.AsSpan(0, count));
                         await sink.WriteAsync(buffer.AsMemory(0, count), cancellationToken);
+                        events.Feed(buffer.AsSpan(0, count));
                     }
                     // EOF is never synthesized as response.completed. Codex owns recovery.
                     return new(lease.AccountId, status, index + 1, committed, committed ? "stream_forwarded" : "empty_stream",
@@ -156,7 +156,7 @@ public sealed class ResponsesRelay(HttpClient http)
     }
     // Bounded metadata observer. Oversized frames are skipped, never retained or reconstructed.
     // A response.failed can exclude the account for future requests; this never opens replay.
-    private sealed class RejectionEvents(ModelLease lease, Action<ModelLease, string>? observer)
+    private sealed class RejectionEvents(ModelLease lease, Action<ModelLease, string>? observer, Action<ModelLease>? completed)
     {
         private readonly MemoryStream line = new();
         private readonly MemoryStream data = new();
@@ -164,7 +164,7 @@ public sealed class ResponsesRelay(HttpClient http)
         private bool reported;
         public void Feed(ReadOnlySpan<byte> bytes)
         {
-            if (observer is null || reported) return;
+            if (observer is null && completed is null || reported) return;
             foreach (var b in bytes)
             {
                 if (b == '\r') continue;
@@ -191,8 +191,9 @@ public sealed class ResponsesRelay(HttpClient http)
             try
             {
                 using var json = JsonDocument.Parse(data.GetBuffer().AsMemory(0, (int)data.Length)); var root = json.RootElement;
-                if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("type", out var type) || type.ValueKind != JsonValueKind.String
-                    || type.GetString() is not ("response.failed" or "error")) return;
+                if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("type", out var type) || type.ValueKind != JsonValueKind.String) return;
+                if (type.GetString() == "response.completed") { reported = true; completed?.Invoke(lease); return; }
+                if (type.GetString() is not ("response.failed" or "error")) return;
                 var container = root.TryGetProperty("response", out var response) && response.ValueKind == JsonValueKind.Object ? response : root;
                 if (!container.TryGetProperty("error", out var error) || error.ValueKind != JsonValueKind.Object) return;
                 foreach (var field in new[] { "code", "type" })
@@ -232,28 +233,10 @@ public sealed class ResponsesRelay(HttpClient http)
     private static object DescribePrefix(ReadOnlySpan<byte> prefix)
     {
         var text = System.Text.Encoding.UTF8.GetString(prefix).Replace("\r\n", "\n", StringComparison.Ordinal);
-        string? Safe(string? value) => value is not null && System.Text.RegularExpressions.Regex.IsMatch(value, "^[a-zA-Z0-9._-]{1,80}$") ? value : null;
-        var eventNames = text.Split('\n').Where(x => x.StartsWith("event:", StringComparison.Ordinal)).Select(x => Safe(x[6..].Trim())).Where(x => x is not null).ToArray();
-        var shapes = new List<object>();
-        foreach (var line in text.Split('\n').Where(x => x.StartsWith("data:", StringComparison.Ordinal)))
-        {
-            try
-            {
-                using var json = JsonDocument.Parse(line[5..].Trim()); var root = json.RootElement;
-                if (root.ValueKind != JsonValueKind.Object) continue;
-                var fields = root.EnumerateObject().Select(x => Safe(x.Name)).Where(x => x is not null).ToArray();
-                var type = root.TryGetProperty("type", out var t) && t.ValueKind == JsonValueKind.String ? Safe(t.GetString()) : null;
-                string? errorType = null, errorCode = null;
-                if (root.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.Object)
-                {
-                    if (error.TryGetProperty("type", out var et) && et.ValueKind == JsonValueKind.String) errorType = Safe(et.GetString());
-                    if (error.TryGetProperty("code", out var ec) && ec.ValueKind == JsonValueKind.String) errorCode = Safe(ec.GetString());
-                }
-                shapes.Add(new { fields, type, errorType, errorCode });
-            }
-            catch (JsonException) { }
-        }
-        return new { byteCount = prefix.Length, eventNames, shapes };
+        // Unknown property names/error codes can themselves echo secrets. Log framing only.
+        var lines = text.Split('\n');
+        return new { byteCount = prefix.Length, dataLines = lines.Count(x => x.StartsWith("data:", StringComparison.Ordinal)),
+            eventLines = lines.Count(x => x.StartsWith("event:", StringComparison.Ordinal)) };
     }
 
     private static async Task<byte[]> ReadBoundedErrorAsync(HttpResponseMessage response, CancellationToken cancellationToken)
