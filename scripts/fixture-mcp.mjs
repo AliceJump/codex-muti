@@ -2,6 +2,7 @@ import readline from 'node:readline';
 import { appendFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 
 // Owned scratch fixture, not proxy functionality. All effects are confined to ignored research.
 const counter = resolve(process.argv[2] ?? '');
@@ -22,7 +23,9 @@ for await (const line of lines) {
         control.on('error', reject); control.on('close', code => code === 0 ? done() : reject(new Error('Fixture control rejected')));
       });
     }
-    result = { content: [{ type: 'text', text: 'phase0-mcp-ok' }] };
+    const proof = 'phase0-mcp-ok:' + randomBytes(12).toString('hex');
+    await appendFile(counter + '.proof', proof + '\n');
+    result = { content: [{ type: 'text', text: proof }] };
   }
   else if (request.method === 'resources/list') result = { resources: [] };
   else if (request.method === 'resources/templates/list') result = { resourceTemplates: [] };

@@ -35,6 +35,7 @@ default_tools_approval_mode = "approve"
 args = [${[join(root, 'scripts/fixture-mcp.mjs'), join(scratch, 'mcp-counter.txt'), assembly, accountB.id].map(x => JSON.stringify(x.replaceAll('\\', '/'))).join(', ')}]
 `);
 const summary = { model: 'gpt-6-luna', realAccounts: true, steps: [], evidenceDirectory: scratch };
+const startedAt = Date.now();
 let rpc;
 function startRpc() {
   const child = spawn('dotnet', [assembly, 'codex', 'app-server', '--listen', 'stdio://'], { cwd: scratch, env: environment, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -75,6 +76,7 @@ async function turn(threadId, text, label, expected, effort) {
   summary.steps.push({ label, status: completed.params.turn.status, expectedFactPresent: expected ? messages.includes(expected) : null });
   await writeFile(join(scratch, 'summary.json'), JSON.stringify(summary, null, 2));
   assert.equal(completed.params.turn.status, 'completed', label); if (expected) assert(messages.includes(expected), `${label}: retained fact`);
+  return messages;
 }
 const marker = `POOL-${Date.now().toString(36)}`; const code = '742913';
 try {
@@ -101,11 +103,16 @@ try {
   await turn(threadId, 'Return the arithmetic result recorded in the preceding turn. Reply with the number only. Do not use tools.', 'B after A reasoning', '2770');
   console.log('PASS Reasoning continuation boundary (inspect encrypted-item metadata)');
   await control(['activate', accountA.id]);
-  await turn(threadId, 'Invoke the phase0 MCP server count tool exactly once. Do not use shell. After the tool returns, reply exactly phase0-mcp-ok. Do not invoke the tool again.', 'A tool -> B result continuation', 'phase0-mcp-ok');
+  const echoedProof = await turn(threadId, 'Invoke the phase0 MCP server count tool exactly once. Do not use shell. After the tool returns, echo its entire text result exactly, including its unpredictable suffix. Do not invoke the tool again.', 'A tool -> B result continuation', 'phase0-mcp-ok:');
+  const proof = (await readFile(join(scratch, 'mcp-counter.txt.proof'), 'utf8')).trim();
+  assert(echoedProof.includes(proof), 'B reports fresh MCP result never present in prompt');
   assert.equal((await readFile(join(scratch, 'mcp-counter.txt'), 'utf8')).trim().split(/\r?\n/).length, 1, 'Real MCP side effect executes once');
   console.log('PASS MCP side effect and tool-result account boundary');
-  const status = JSON.parse(await control(['status']));
-  summary.requests = status.recentRequests; summary.twoAccountsStillReady = status.accounts.every(x => x.auth === 'ready');
+  let status = JSON.parse(await control(['status']));
+  for (let i = 0; i < 25 && status.inFlightRequests.some(x => x.value > 0); i++) {
+    await new Promise(resolve => setTimeout(resolve, 200)); status = JSON.parse(await control(['status']));
+  }
+  summary.requests = status.recentRequests.filter(x => Date.parse(x.timestamp) >= startedAt); summary.twoAccountsStillReady = status.accounts.every(x => x.auth === 'ready');
   summary.scope = 'Small HTTP/SSE session and local compact only; not a universal encrypted-state or Desktop guarantee';
   await writeFile(join(scratch, 'summary.json'), JSON.stringify(summary, null, 2));
   console.log(JSON.stringify(summary, null, 2));
