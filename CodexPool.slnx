@@ -2,6 +2,7 @@
   <Folder Name="/src/">
     <Project Path="src/CodexPool.Core/CodexPool.Core.csproj" />
     <Project Path="src/CodexPool.Daemon/CodexPool.Daemon.csproj" />
+    <Project Path="src/CodexPool.Floating/CodexPool.Floating.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/CodexPool.Probe/CodexPool.Probe.csproj" />

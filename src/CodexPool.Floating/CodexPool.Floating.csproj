@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- WPF owns startup. The tray uses WinForms interop, not its generated DPI entry point. -->
+    <NoWarn>$(NoWarn);WFO0003</NoWarn>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+  </PropertyGroup>
+  <ItemGroup><ProjectReference Include="../CodexPool.Daemon/CodexPool.Daemon.csproj" /></ItemGroup>
+</Project>
