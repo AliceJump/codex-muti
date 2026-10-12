@@ -8,6 +8,7 @@ using System.Text.Json;
 using CodexPool.Daemon;
 using Microsoft.IdentityModel.JsonWebTokens;
 using Microsoft.IdentityModel.Tokens;
+using CodexPool.Core;
 
 var root = Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, ".research", "security-" + Guid.NewGuid().ToString("N")));
 var tests = new (string Name, Func<Task> Run)[]
@@ -24,7 +25,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Account controls preserve credentials and cannot activate excluded accounts", AccountControls),
     ("Crash during rotation leaves durable refresh_pending and never reuses token", CrashRefresh),
     ("Native registrations sharing official client ID remain separate", NativeRegistrations),
-    ("Quota windows use durations and reject malformed percentages", QuotaParser)
+    ("Quota windows use durations and reject malformed percentages", QuotaParser),
+    ("Durable quota, scheduler and manual epoch survive control races", PoolRouting)
 };
 var failed = 0;
 foreach (var (name, run) in tests)
@@ -166,6 +168,26 @@ Task QuotaParser()
     var invalid = valid.Replace("\"used_percent\":95", "\"used_percent\":\"secret-value\"").Replace("\"used_percent\":10", "\"used_percent\":-5");
     Check(Quota.Parse("A", Encoding.UTF8.GetBytes(invalid)).Windows.Count == 0);
     Check(Quota.Parse("A", "{\"rate_limit\":null}"u8.ToArray()).Windows.Count == 0);
+    return Task.CompletedTask;
+}
+Task PoolRouting()
+{
+    var vault = Store("pool-routing"); vault.Add(Account("A")); vault.Add(Account("B"));
+    using var issuer = new FakeIssuer(); using var http = new HttpClient(issuer); var auth = new OAuth(http, vault);
+    var quota = new Quota(http, auth, vault); var pool = new PoolRuntime(vault, auth, quota, true);
+    pool.UpdateSettings(new(true)); var a = pool.Select(); Check(a.AccountId == "A");
+    pool.Rejected(new("A", new("https://api.openai.com/v1/responses"), "canary"), "quota_rejected");
+    pool.Complete(a, new("B", 200, 2, true, "stream_forwarded")); Check(vault.ActiveId == "B");
+    var b = pool.Select(); Check(b.AccountId == "B");
+    vault.Cooldown("A", DateTimeOffset.UtcNow.AddSeconds(-1)); pool.Activate("A");
+    pool.Complete(b, new("B", 200, 1, true, "stream_forwarded")); Check(vault.ActiveId == "A");
+    vault.SaveQuota(new("A", "native_codex_usage", "plus", DateTimeOffset.UtcNow,
+        [new("5h", 18000, 96, 4, DateTimeOffset.UtcNow.AddHours(1))]));
+    var reopened = Store("pool-routing"); var quota2 = new Quota(http, auth, reopened);
+    Check(quota2.Snapshot("A")!.Windows[0].UsedPercent == 96 && reopened.Settings.AutoSwitch);
+    Check(new PoolRuntime(reopened, auth, quota2, true).Select().AccountId == "B");
+    var production = new PoolRuntime(reopened, auth, quota2, false); Check(!production.Settings.AutoSwitch);
+    try { production.UpdateSettings(new(true)); Check(false); } catch (AuthFailure) { }
     return Task.CompletedTask;
 }
 async Task LocalApi()

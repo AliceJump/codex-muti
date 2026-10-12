@@ -44,6 +44,7 @@ try
     var recent = new ConcurrentQueue<object>();
     var inFlight = new ConcurrentDictionary<string, int>();
     var boundaryProbe = args.Contains("--live-boundary-probe", StringComparer.Ordinal);
+    var pool = new PoolRuntime(vault, auth, quota, boundaryProbe);
     long requestCount = 0;
     var sessionOwners = new ConcurrentDictionary<string, string>();
     app.Use(async (context, next) =>
@@ -60,15 +61,25 @@ try
         catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested) { }
         catch (AuthFailure ex)
         { if (!context.Response.HasStarted) { context.Response.StatusCode = 503; await context.Response.WriteAsJsonAsync(new { error = new { code = ex.Code } }); } else context.Abort(); }
+        catch (NoEligibleAccountException)
+        { if (!context.Response.HasStarted) { context.Response.StatusCode = 503; await context.Response.WriteAsJsonAsync(new { error = new { code = "no_eligible_account" } }); } else context.Abort(); }
         catch (JsonException)
         { if (!context.Response.HasStarted) { context.Response.StatusCode = 400; await context.Response.WriteAsJsonAsync(new { error = new { code = "invalid_json" } }); } else context.Abort(); }
         catch
         { if (!context.Response.HasStarted) { context.Response.StatusCode = 500; await context.Response.WriteAsJsonAsync(new { error = new { code = "internal_error" } }); } else context.Abort(); }
     });
-    app.MapGet("/health", () => new { status = "running", stage = "phase0", automaticSwitching = false });
-    app.MapGet("/status", () => new { activeAccountId = vault.ActiveId, stage = "phase0", automaticSwitching = false,
+    app.MapGet("/health", () => new { status = "running", stage = "acceptance", automaticSwitching = pool.Settings.AutoSwitch });
+    object Status() => new { activeAccountId = vault.ActiveId, stage = "acceptance", automaticSwitching = pool.Settings.AutoSwitch, settings = pool.Settings,
         boundaryProbe, distinctUsers = vault.DistinctUsers, liveMigrationValidated = false, quotaSource = "per_registration", accounts = vault.Views(auth.Health),
-        nativeLoginAttempts = nativeLogin.PublicAttempts, usage = quota.Views, inFlightRequests = inFlight.ToArray(), recentRequests = recent.ToArray() });
+        nativeLoginAttempts = nativeLogin.PublicAttempts, usage = quota.Views, inFlightRequests = inFlight.ToArray(), recentRequests = recent.ToArray(), recentSwitches = pool.History };
+    app.MapGet("/status", () => Status());
+    app.MapGet("/settings", () => pool.Settings);
+    app.MapPost("/settings", async (HttpContext context) =>
+    {
+        var settings = await context.Request.ReadFromJsonAsync<PoolSettings>(context.RequestAborted) ?? throw new AuthFailure("invalid_settings");
+        try { StickyScheduler.Validate(settings); } catch (ArgumentException) { return Results.BadRequest(new { error = new { code = "invalid_thresholds" } }); }
+        pool.UpdateSettings(settings); return Results.Ok(pool.Settings);
+    });
     app.MapGet("/accounts", () => vault.Views(auth.Health));
     app.MapGet("/usage", async (HttpContext context) =>
     {
@@ -122,8 +133,9 @@ try
         if (vault.Find(id) is null) return Results.NotFound(new { error = new { code = "account_not_found" } });
         if (vault.ActiveId != id && Interlocked.Read(ref requestCount) > 0 && !boundaryProbe)
             return Results.Conflict(new { error = new { code = "live_migration_gate_pending" } });
-        if (auth.Health(id) == "reauth_required" || !vault.ActivateForProbe(id))
+        if (auth.Health(id) == "reauth_required" || !Vault.IsEligible(vault.Find(id)!))
             return Results.Conflict(new { error = new { code = "account_not_eligible" } });
+        pool.Activate(id);
         return Results.Ok(new { activeAccountId = id, affects = "new_requests_only" });
     });
     foreach (var operation in new[] { "pause", "resume", "drain", "undrain", "enable", "disable" })
@@ -145,10 +157,17 @@ try
         if (json.TryGetProperty("previous_response_id", out var previous) && previous.ValueKind != JsonValueKind.Null
             || json.TryGetProperty("conversation", out var conversation) && conversation.ValueKind != JsonValueKind.Null)
         { context.Response.StatusCode = 400; await context.Response.WriteAsJsonAsync(new { error = new { code = "server_continuation_unsupported" } }); return; }
-        var selected = vault.Selected;
-        if (selected is null) { context.Response.StatusCode = 503; await context.Response.WriteAsJsonAsync(new { error = new { code = "no_authorized_account" } }); return; }
-        if (!Vault.IsEligible(selected)) { context.Response.StatusCode = 503; await context.Response.WriteAsJsonAsync(new { error = new { code = "active_account_not_eligible" } }); return; }
-        var account = await auth.ReadyAsync(selected.Id, context.RequestAborted);
+        var selection = pool.Select();
+        var account = await auth.ReadyAsync(selection.AccountId, context.RequestAborted);
+        var candidates = new List<ModelLease>();
+        ModelLease Lease(AccountCredential credential) => new(credential.Id, new(credential.ProviderKind == "native"
+            ? "https://chatgpt.com/backend-api/codex/responses" : "https://api.openai.com/v1/responses"), credential.AccessToken, credential.BackendAccountId);
+        candidates.Add(Lease(account));
+        foreach (var id in pool.Candidates(selection).Skip(1))
+        {
+            try { candidates.Add(Lease(await auth.ReadyAsync(id, context.RequestAborted))); }
+            catch (AuthFailure) { } // No model bytes were sent; this candidate cannot be used.
+        }
         Interlocked.Increment(ref requestCount);
         var headers = context.Request.Headers.ToDictionary(x => x.Key, x => x.Value.ToString(), StringComparer.OrdinalIgnoreCase);
         headers.Remove("ChatGPT-Account-Id"); // Backend account routing is supplied only by validated credentials.
@@ -163,13 +182,13 @@ try
         else headers.Remove("x-codex-turn-state");
         var started = Stopwatch.GetTimestamp(); var requestId = Guid.NewGuid().ToString("N");
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted); lifetime.CancelAfter(TimeSpan.FromMinutes(10));
-        if (account.ProviderKind == "native" && account.BackendAccountId is not null) headers["ChatGPT-Account-Id"] = account.BackendAccountId;
         RelayResult result;
         inFlight.AddOrUpdate(account.Id, 1, (_, count) => count + 1);
-        var modelEndpoint = account.ProviderKind == "native" ? "https://chatgpt.com/backend-api/codex/responses" : "https://api.openai.com/v1/responses";
-        try { result = await relay.ForwardAsync(body, "application/json", [new(account.Id, new(modelEndpoint), account.AccessToken)], headers,
-            new WebSink(context), lifetime.Token); }
+        try { result = await relay.ForwardAsync(body, "application/json", candidates, headers,
+            new WebSink(context), lifetime.Token, pool.Rejected); }
         finally { inFlight.AddOrUpdate(account.Id, 0, (_, count) => Math.Max(0, count - 1)); }
+        pool.Complete(selection, result);
+        if (headers.TryGetValue("session_id", out var completedSession)) sessionOwners[Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(completedSession)))] = result.AccountId;
         recent.Enqueue(new { timestamp = DateTimeOffset.UtcNow, requestId, account = result.AccountId, model = modelValue.GetString(),
             durationMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds, status = result.StatusCode, result.Outcome, result.Attempts,
             inputItemCount = input.GetArrayLength(), encryptedItemCount = input.EnumerateArray().Count(x => x.TryGetProperty("encrypted_content", out _)),
@@ -180,7 +199,7 @@ try
         else if (!result.Committed) { context.Response.StatusCode = 502; await context.Response.WriteAsJsonAsync(new { error = new { code = result.Outcome } }); }
     });
     app.MapFallback(() => Results.NotFound(new { error = new { code = "endpoint_not_supported_in_phase0" } }));
-    Console.WriteLine("Codex Pool Phase 0 listening at http://127.0.0.1:3210 (automatic switching gated).");
+    Console.WriteLine("Codex Pool listening at http://127.0.0.1:3210 (live migration acceptance gate applies).");
     await app.RunAsync(); return 0;
 }
 catch { Console.Error.WriteLine("Daemon failed to start or stopped unexpectedly. Check port 3210 and single-instance ownership."); return 1; }
