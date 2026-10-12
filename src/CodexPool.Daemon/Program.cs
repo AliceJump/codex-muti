@@ -23,6 +23,8 @@ try
     Directory.CreateDirectory(directory);
     using var owner = new FileStream(Path.Combine(directory, "daemon.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
     var vault = new Vault(directory);
+    // Resolve once at startup; restart the daemon after updating the installed Codex CLI.
+    var modelClientVersion = ResolveCodexClientVersion();
     var builder = WebApplication.CreateBuilder([]);
     builder.Logging.ClearProviders();
     builder.WebHost.ConfigureKestrel(options =>
@@ -129,7 +131,7 @@ try
         var selected = vault.Selected ?? throw new AuthFailure("no_authorized_account");
         var account = await auth.ReadyAsync(selected.Id, context.RequestAborted);
         using var request = new HttpRequestMessage(HttpMethod.Get, account.ProviderKind == "native"
-            ? "https://chatgpt.com/backend-api/codex/models?client_version=0.157.1" : "https://api.openai.com/v1/models");
+            ? $"https://chatgpt.com/backend-api/codex/models?client_version={Uri.EscapeDataString(modelClientVersion)}" : "https://api.openai.com/v1/models");
         request.Headers.Authorization = new("Bearer", account.AccessToken);
         if (account.ProviderKind == "native") request.Headers.TryAddWithoutValidation("ChatGPT-Account-Id", account.BackendAccountId);
         using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, context.RequestAborted);
@@ -275,6 +277,40 @@ try
     await app.RunAsync(); await Task.WhenAll(eventTask, quotaTask); return 0;
 }
 catch { Console.Error.WriteLine("Daemon failed to start or stopped unexpectedly. Check port 3210 and single-instance ownership."); return 1; }
+
+
+static string ResolveCodexClientVersion()
+{
+    const string fallback = "0.157.1"; // Last verified CLI protocol baseline.
+    var configured = Environment.GetEnvironmentVariable("CODEX_POOL_CLIENT_VERSION");
+    if (!string.IsNullOrWhiteSpace(configured))
+    {
+        var version = configured.Trim();
+        if (Regex.IsMatch(version, @"^\d+\.\d+\.\d+$", RegexOptions.CultureInvariant)) return version;
+        Console.Error.WriteLine("Invalid CODEX_POOL_CLIENT_VERSION (expected major.minor.patch); using fallback.");
+        return fallback;
+    }
+    try
+    {
+        var startInfo = new ProcessStartInfo("codex")
+        {
+            UseShellExecute = false, RedirectStandardOutput = true, CreateNoWindow = true
+        };
+        startInfo.ArgumentList.Add("--version");
+        using var process = Process.Start(startInfo);
+        if (process is not null)
+        {
+            if (!process.WaitForExit(3000)) { process.Kill(); return fallback; }
+            var output = process.StandardOutput.ReadToEnd();
+            var match = Regex.Match(output, @"\bcodex-cli\s+(\d+\.\d+\.\d+)\b", RegexOptions.CultureInvariant);
+            if (process.ExitCode == 0 && match.Success) return match.Groups[1].Value;
+        }
+    }
+    catch (System.ComponentModel.Win32Exception) { }
+    catch (InvalidOperationException) { }
+    // CLI missing or version output changed: keep the last verified catalog query.
+    return fallback;
+}
 
 sealed record LoginInput(string Name, string? AccountId);
 sealed class WebSink(HttpContext context) : IResponseSink
