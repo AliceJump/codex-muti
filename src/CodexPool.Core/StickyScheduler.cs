@@ -11,7 +11,7 @@ public sealed class NoEligibleAccountException : Exception
 { public NoEligibleAccountException() : base("no_eligible_account") { } }
 
 /// <summary>One global sticky owner. Selection and activation are atomic; no session/agent state.</summary>
-public sealed class StickyScheduler(string? activeId)
+public sealed class StickyScheduler(string? activeId, Action<string>? persistSelection = null)
 {
     private readonly object gate = new();
     private string? active = activeId;
@@ -75,6 +75,8 @@ public sealed class StickyScheduler(string? activeId)
         : !account.AuthReady ? "auth_unavailable" : account.CooldownUntil > now ? "cooldown" : null;
     private void Switch(string replacement, string reason, DateTimeOffset now)
     {
+        // Publish only after durable selection succeeds; failures leave the epoch untouched.
+        persistSelection?.Invoke(replacement);
         var old = active; active = replacement; epoch++;
         if (old == replacement) return;
         history.Enqueue(new(now, old, replacement, reason, epoch)); while (history.Count > 100) history.Dequeue();

@@ -6,7 +6,8 @@ namespace CodexPool.Daemon;
 public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool boundaryProbe)
 {
     private readonly object gate = new();
-    private readonly StickyScheduler scheduler = new(vault.ActiveId);
+    private readonly StickyScheduler scheduler = new(vault.ActiveId, id =>
+    { if (!vault.ActivateForProbe(id)) throw new NoEligibleAccountException(); });
     public PoolSettings Settings => boundaryProbe ? vault.Settings : vault.Settings with { AutoSwitch = false };
     public AccountSwitch[] History => scheduler.History;
     public string? Active => scheduler.Active;
@@ -22,7 +23,6 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
         lock (gate)
         {
             var selection = scheduler.Select(Accounts(), Settings, DateTimeOffset.UtcNow);
-            if (vault.ActiveId != selection.AccountId && !vault.ActivateForProbe(selection.AccountId)) throw new NoEligibleAccountException();
             return selection;
         }
     }
@@ -30,8 +30,6 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
     {
         lock (gate)
         {
-            // Persist before changing the epoch: failed disk writes must not publish a new owner.
-            if (!vault.ActivateForProbe(id)) throw new NoEligibleAccountException();
             scheduler.Activate(id, Accounts(), Settings, DateTimeOffset.UtcNow);
         }
     }
@@ -59,13 +57,12 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
             .Select(x => (DateTimeOffset?)x.ResetAt).Max();
         vault.Cooldown(lease.AccountId, reason == "quota_rejected" ? reset ?? DateTimeOffset.UtcNow.AddMinutes(1) : DateTimeOffset.UtcNow.AddSeconds(30));
     }
-    public void Complete(AccountSelection lease, RelayResult result)
+    public void Complete(AccountSelection lease, RelayResult result, string? failoverReason = null)
     {
         lock (gate)
         {
             if (result.AccountId != lease.AccountId)
-                scheduler.CompleteFailover(lease, result.AccountId, "safe_precommit_failover", Accounts(), Settings, DateTimeOffset.UtcNow);
-            if (scheduler.Active is { } active && vault.ActiveId != active) vault.ActivateForProbe(active);
+                scheduler.CompleteFailover(lease, result.AccountId, failoverReason ?? "safe_precommit_failover", Accounts(), Settings, DateTimeOffset.UtcNow);
             // After a rejected final attempt, only future requests may move to another account.
             if (result.Outcome is "quota_rejected" or "auth_rejected" && Settings.AutoSwitch)
                 try { Select(); } catch (NoEligibleAccountException) { }

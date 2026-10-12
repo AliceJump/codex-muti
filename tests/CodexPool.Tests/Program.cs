@@ -27,7 +27,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Sticky scheduling, recovery and stale-request epochs", Sticky),
     ("No eligible account and auto-switch OFF never relax admission", Eligibility),
     ("Native retries use each lease account header and balance in-flight observers", NativeRouting),
-    ("Streaming quota failure excludes future routing without replay", StreamQuota)
+    ("Streaming quota failure excludes future routing without replay", StreamQuota),
+    ("Failed durable selection never changes active owner or epoch", PersistenceFailure)
 };
 var failed = 0;
 foreach (var (name, run) in tests)
@@ -214,6 +215,16 @@ static Task Eligibility()
     accounts = [new("A", Enabled: false), new("B", Draining: true)];
     try { scheduler.Select(accounts, new(true), now); throw new InvalidOperationException(); } catch (NoEligibleAccountException) { }
     Check(scheduler.History.Length == 1);
+    return Task.CompletedTask;
+}
+static Task PersistenceFailure()
+{
+    var scheduler = new StickyScheduler("A", _ => throw new IOException("disk-unavailable"));
+    PoolAccount[] accounts = [new("A"), new("B")]; var now = DateTimeOffset.UtcNow;
+    var before = scheduler.Select(accounts, new(true), now);
+    try { scheduler.Activate("B", accounts, new(true), now); throw new InvalidOperationException(); } catch (IOException) { }
+    var after = scheduler.Select(accounts, new(true), now);
+    Check(after.AccountId == "A" && after.Epoch == before.Epoch && scheduler.History.Length == 0);
     return Task.CompletedTask;
 }
 

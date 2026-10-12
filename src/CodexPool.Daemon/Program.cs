@@ -205,9 +205,11 @@ try
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted); lifetime.CancelAfter(TimeSpan.FromMinutes(10));
         RelayResult result;
         var sink = new WebSink(context); var attemptedAccount = account.Id; var attemptCount = 0;
+        var rejections = new List<object>(); string? failoverReason = null;
         try
         {
-            result = await relay.ForwardAsync(body, "application/json", candidates, headers, sink, lifetime.Token, pool.Rejected,
+            result = await relay.ForwardAsync(body, "application/json", candidates, headers, sink, lifetime.Token,
+                (lease, reason) => { pool.Rejected(lease, reason); failoverReason = reason; rejections.Add(new { account = lease.AccountId, reason }); },
                 (lease, entering) =>
                 {
                     if (entering) { attemptedAccount = lease.AccountId; attemptCount++; }
@@ -217,10 +219,11 @@ try
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
         { result = new(attemptedAccount, context.RequestAborted.IsCancellationRequested ? 499 : 504, attemptCount, sink.Started,
             context.RequestAborted.IsCancellationRequested ? "client_cancelled" : "request_deadline"); }
-        pool.Complete(selection, result);
+        pool.Complete(selection, result, failoverReason);
         if (headers.TryGetValue("session_id", out var completedSession)) sessionOwners[Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(completedSession)))] = result.AccountId;
         recent.Enqueue(new { timestamp = DateTimeOffset.UtcNow, requestId, account = result.AccountId, model = modelValue.GetString(),
             durationMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds, status = result.StatusCode, result.Outcome, result.Attempts,
+            failover = result.Attempts > 1, failoverReason, rejections,
             inputItemCount = input.GetArrayLength(), encryptedItemCount = input.EnumerateArray().Count(x => x.TryGetProperty("encrypted_content", out _)),
             toolResultCount = input.EnumerateArray().Count(x => x.TryGetProperty("type", out var type) && type.GetString() == "function_call_output"),
             upstreamHeaderNames = result.UpstreamHeaderNames, upstreamContentType = result.UpstreamContentType, payloadKind = result.PayloadKind, prefixShape = result.PrefixShape });
