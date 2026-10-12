@@ -74,6 +74,10 @@ Native backdrop spike before choosing WPF/WinUI implementation. Full, compact an
 - Completed: architecture and phase plan written before implementation.
 - Completed: Phase 0 fixture transport, official CLI/app-server probes, DPAPI/OIDC login bootstrap and two different real SIWC registrations.
 - Completed within tested scope: GPT-6 Luna same-thread A/B, local compact, resume, encrypted reasoning and a controlled MCP operation. See docs/phase0-results.md.
-- Pending: real A/B refresh rotation, upstream Codex quota source, remote encrypted compaction/long-session failure matrix, Shell/Git execution counters and Desktop acceptance.
+- Verified in limited live scope: both SIWC grants refreshed; A/B small-session continuation, compact/resume, encrypted reasoning and fresh unpredictable MCP result returned on B with side-effect count one.
+- Implemented: native authorization adapter and persisted quota snapshots, sticky routing/epochs, gated automatic failover, secure browser Dashboard/SSE and native Windows Acrylic/tray client. Per-phase implementation commits are separate; these do not clear the live release gates.
+- Synthetic verification: 25 transport/scheduler cases and 15 credential/local-API cases; official CLI fixture has seven passing scenarios. Actual Windows radio A->B updated active state.
+- Native live verification: two different Plus users, real 5h/weekly windows, two token rotations per account with credential isolation, eight-stage continuation/compact/resume/reasoning/MCP regression, and real quota thresholds automatically switching A->B->A. See docs/native-acceptance-results.md.
+- Pending: natural exhaustion/reset and live failure matrix, remote encrypted compaction/long sessions, Shell/Git execution counters, prompt cache and Desktop acceptance. Dashboard visual inspection stopped when Computer Use could not confidently identify the browser URL. Native modes/tray/hotkey/mixed-DPI/disconnected-monitor behavior need full UI acceptance.
 
 Do not check off pending live requirements using synthetic accounts, a README assertion or source inspection alone.

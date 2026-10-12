@@ -6,7 +6,7 @@ Recorded 2026-10-13, Asia/Shanghai. Real acceptance used installed official Code
 
 Two different users completed independent official SIWC dynamic-registration OAuth flows. Credentials are in Windows DPAPI CurrentUser storage outside the repository. Neither the user's Codex auth.json nor its session/worktree files were changed. Each account's public model catalog included GPT-6 Luna.
 
-The real test observed successful inference in one official thread on A, same-thread continuation on B, official local compaction on B, return to A, official process restart/resume and continuation on B. A medium-effort reasoning response was then continued on B with encrypted input items still present. A configured MCP counter ran once; its fixture selected B before returning the tool result and the official thread completed. The proxy did not execute the MCP tool.
+The real test observed successful inference in one official thread on A, same-thread continuation on B, official local compaction on B, return to A, official process restart/resume and continuation on B. A medium-effort reasoning response was then continued on B with encrypted input items still present. A configured MCP counter ran once; its fixture selected B before returning an unpredictable proof absent from the prompt, and B echoed that proof. The proxy did not execute the MCP tool. This strengthened regression passed eight steps on 2026-10-13.
 
 Evidence files remain in the primary checkout's ignored `.research/` directory. They are intentionally excluded from Git. Exact transcripts, OAuth secrets and real account identities are not copied into this document.
 
@@ -17,7 +17,7 @@ Evidence files remain in the primary checkout's ignored `.research/` directory. 
 - Small same-thread HTTP/SSE A->B continuation preserves controlled test facts.
 - Official local compact, return to another account and resume preserve these facts.
 - At least one cross-account request carries encrypted reasoning input; a successful response alone does not prove every encrypted state format is portable.
-- MCP side effect counter equals one and the controlled task completes after fixture activation of B.
+- MCP side effect counter equals one and B reports the fresh unpredictable result after fixture activation of B.
 - Synthetic error tests prohibit transparent replay after downstream commitment; ordinary 429, 5xx, network ambiguity and cancellation do not authorize failover.
 - Official-client mock tests cover plain response, definite quota failover, tool rejection/result return, MCP count, resume, compact and partial-stream failure without calling B.
 - Security tests cover DPAPI plaintext canaries, OIDC signature/issuer/audience/nonce/lifetime validation, one-use callback state, PKCE, registration isolation, synthetic rotation/single-flight, no-account API, Host/Origin control and single daemon ownership.
@@ -31,10 +31,11 @@ GPT-6 Luna's Codex request uses Responses Lite with `additional_tools`. Preserve
 ## Still pending — not release guarantees
 
 - Real grants refreshed successfully after access-token expiry on 2026-10-13. B's refresh updated only B; A's saved timestamp stayed unchanged. Repeated real rotation, transient/ambiguous refresh recovery and crash-after-rotation persistence remain pending.
-- A verified machine-readable Codex 5h/weekly quota source compatible with the chosen authorization route. SIWC docs do not establish one; no unknown value is shown as 0%.
+- SIWC docs still do not establish a Codex 5h/weekly source. Separate native grants now returned verified real windows; native rotations and configured automatic threshold tests passed. See [native-acceptance-results.md](native-acceptance-results.md). Unknown SIWC values remain unknown.
 - Remote encrypted compaction, WS continuation, large/long sessions and comprehensive adversarial failure cases.
 - Shell/Git side-effect counters: current official CLI test policy blocked even harmless shell commands. Rejection/result round-trip passed; actual command execution did not.
 - Desktop custom-provider compatibility, approval/MCP variations, prompt-cache metrics and worktree continuity under live failures.
-- Automatic sticky scheduling, Dashboard and Windows Acrylic/tray UI.
+- Implementation now exists for gated sticky scheduling, Dashboard and Windows Acrylic/tray UI. Actual floating-window Radio A->B changed daemon active state and synchronized the UI; full automatic/window-mode/DPI/tray acceptance remains pending.
+- Dashboard browser visual acceptance: Computer Use stopped because the current Windows browser URL could not be determined confidently. Cookie/CSRF/Host/Origin and initial SSE snapshots passed local API tests.
 
-Production automatic switching remains disabled. `--live-boundary-probe` only permits explicit manual migration experiments; successful small-session tests do not clear all release gates. Codex remains the owner of workflow recovery and tool execution.
+Production automatic switching remains disabled. `--live-boundary-probe` permits explicit manual migration and opt-in automatic scheduler experiments; successful small-session tests do not clear all release gates. Native quota login subsequently completed with the user's participation. Codex remains the owner of workflow recovery and tool execution.

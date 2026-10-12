@@ -2,7 +2,7 @@
 
 本地 Codex 多账户模型访问代理。**Codex owns the workflow. The proxy only owns model access.**
 
-目前处于 Phase 0：可运行的官方 OAuth 登录、DPAPI 存储、单账户 Responses/SSE 转发、显式手动迁移实验和协议验证。自动调度、真实 5h/weekly 额度、Dashboard 和 Windows 悬浮窗尚未实现。生产跨账户切换保持关闭，不能把小会话通过等同于全部验收完成。
+核心代码、localhost Dashboard 和 Windows 悬浮窗已实现，当前处于验收阶段。两个原生账户已通过登录、独立 refresh-token rotation、真实 5h/weekly 额度、小会话续接/Compact/Resume/MCP，以及真实额度驱动的阈值自动切换。默认关闭自动切换，不能把小会话通过等同于完整验收。范围见 [docs/native-acceptance-results.md](docs/native-acceptance-results.md)。
 
 ## 运行
 
@@ -13,6 +13,16 @@ dotnet build CodexPool.slnx
 dotnet run --project src/CodexPool.Daemon --no-launch-profile -- serve
 ```
 
+便捷启动和界面：
+
+```powershell
+.\scripts\pool.ps1 start
+.\scripts\pool.ps1 dashboard
+.\scripts\pool.ps1 window
+```
+
+Dashboard 位于 `http://127.0.0.1:3210`，`dashboard` 命令建立短期安全浏览器会话。页面提供账户 Radio、额度、pause/drain/enable、阈值、请求与切换原因；悬浮窗通过 `/events` 同步状态，通过本地 API 切换账户。窗口支持 Acrylic、完整/紧凑/胶囊模式、系统/浅色/深色、置顶、拖动、托盘、`Ctrl+Alt+C`、位置保存、DPI 和工作区钳制。关闭窗口隐藏到托盘；托盘“退出悬浮窗”仅退出 UI，Daemon 继续运行。
+
 另一个终端中登录两个账户。每次由系统浏览器完成官方 Continue with ChatGPT；不要复制 token 或覆盖 Codex auth.json。
 
 ```powershell
@@ -22,9 +32,11 @@ dotnet run --project src/CodexPool.Daemon --no-launch-profile -- status
 dotnet run --project src/CodexPool.Daemon --no-launch-profile -- models
 ```
 
+要使用 Codex 原生 5h/weekly 额度适配器，分别执行 `native-login "Native Account A"` 和 `native-login "Native Account B"`。它启动官方登录的独立临时 profile，将新 grant 一次性交给 DPAPI，删除 helper 凭据后只有 Daemon 刷新。详情见 [docs/native-auth-adapter.md](docs/native-auth-adapter.md)。原有 SIWC 注册会保留；SIWC token 只访问公开路线，额度仍显示未知。
+
 首次成功授权成为 active，其余账户保持独立登录。相同 client 注册的重新授权保留本地 ID；不同注册即使显示标签相同也不混用 token。`distinctUsers` 用于检查测试是否确有不同 ChatGPT 用户，不公开真实 subject。
 
-账户控制命令为 `activate <id>`、`pause <id>`、`resume <id>`、`drain <id>`、`undrain <id>`、`enable <id>`、`disable <id>`，ID 来自 `status`。控制状态持久保存。暂停/排空/禁用仅阻止后续请求，已接受的 streaming 请求继续使用原账户；状态中单独显示各账户正在处理的请求数量。被排除账户不能激活。尚未开放自动调度，因此 active 不可用时返回明确错误，由用户手动选择 eligible 账户。
+账户控制命令为 `activate <id>`、`pause <id>`、`resume <id>`、`drain <id>`、`undrain <id>`、`enable <id>`、`disable <id>`，ID 来自 `status`。控制状态持久保存。暂停/排空/禁用仅阻止后续请求，已接受的 streaming 请求继续使用原账户；状态中单独显示各账户正在处理的请求数量。被排除账户不能激活。Sticky 调度只在 active 达到条件时重新选择，恢复的 standby 不抢回 active；手动选择推进 epoch，旧请求不能覆盖它。自动关闭且 active 不可用时返回明确错误。
 
 使用可选的单一 wrapper：
 
@@ -41,10 +53,10 @@ Wrapper 只为官方可执行文件提供 custom provider 配置和本地代理�
 - 一个 Daemon 持有跨进程独占锁；各注册单独刷新锁，成功后原子替换整组凭据。
 - 本地 API 使用独立访问凭证，CLI 从本机加密存储读取；不把 OAuth token 返回 Web API。
 - 不记录完整 prompt、工具参数/结果、token、cookies 或 OAuth callback query。最近请求只保留 100 条元数据。
-- 默认只监听 loopback；LAN、浏览器控制会话和 Dashboard 不在本阶段。
+- 默认只监听 loopback，不提供 LAN 开关。精确 Host/Origin 检查、HttpOnly/SameSite 浏览器会话及 CSRF 校验保护控制 API；浏览器 cookie 不能调用模型或取得本地模型 key。
 - `/health` 为最小公开状态；`/status`、`/accounts`、`/usage`、`/models` 和控制/模型请求需要本地鉴权。`/auth/callback` 使用一次性 state、nonce、PKCE 和 ID token 校验。
 
-`/usage` 明确返回未知。官方第三方 OAuth 文档公开了 model list/Responses 路线，没有确认可读的 Codex 5h/weekly 额度接口；不会猜测额度，也不会拿这条授权访问文档排除的 ChatGPT backend-api。后续额度方案必须单独定案。
+`/usage` 对 SIWC 明确返回未知。原生注册使用固定官方源码中的 usage endpoint，按实际窗口时长识别 5h/weekly，保存每账户独立快照并每 30 秒刷新；过期/缺失数据不伪装为 0%。阈值决策只使用新鲜且未过 reset 的窗口。两个原生账户的真实接口已通过；它是版本敏感的私有 Codex 接口。
 
 ## 验证
 
@@ -67,12 +79,23 @@ dotnet run --project src/CodexPool.Daemon --no-launch-profile -- serve --live-bo
 node scripts/phase0-live.mjs
 ```
 
-测试模式仅允许手动迁移，不开启自动调度。脚本使用 GPT-6 Luna、隔离官方 Codex home、受控测试事实和 MCP 计数器；不会访问用户原有工作树。它区分可读上下文、加密 reasoning 和 local compact；不宣称 remote encrypted compaction、全部长会话或 Desktop 都已通过。
+测试模式允许手动迁移，并允许在 Dashboard 显式开启自动调度；默认仍为 OFF。脚本使用 GPT-6 Luna、隔离官方 Codex home、受控事实及不可预测的 MCP 结果证明；不会访问用户原有工作树。它区分可读上下文、加密 reasoning 和 local compact；不宣称 remote encrypted compaction、全部长会话或 Desktop 都已通过。原生与 SIWC grant 不作为同次透明 failover 的混合候选。
 
 部署使用普通 `serve`，不要长期保留实验开关。请求一旦开始交付任何正文即锁死重放门；生命周期/工具事件也是正文。错误类型不明确、网络故障或客户端取消不会透明切号。Proxy 不执行也不去重工具，最终工具副作用由官方 Codex 及测试计数器验收。
+
+## 打包
+
+```powershell
+.\scripts\build-release.ps1
+# 无需目标机器安装 .NET runtime 时：
+.\scripts\build-release.ps1 -SelfContained
+```
+
+产物位于忽略目录 `.local\release`，Daemon/Floating 是两个独立进程。普通包需要 .NET 10 Desktop 和 ASP.NET Core runtime；self-contained 包包含运行时。仍需要官方 Codex CLI。源码验收入口不需要安装或修改默认 Codex 配置。
 
 ## 文档
 
 - [architecture.md](architecture.md)：责任边界、并发/刷新/协议安全与证据。
 - [implementation-plan.md](implementation-plan.md)：分阶段提交和真实验收门槛。
 - [docs/phase0-results.md](docs/phase0-results.md)：已通过与仍待验证项目。
+- [docs/native-acceptance-results.md](docs/native-acceptance-results.md)：原生账户、真实额度、轮换与自动切换验收范围。
