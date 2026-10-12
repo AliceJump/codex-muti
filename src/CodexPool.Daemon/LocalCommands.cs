@@ -29,7 +29,7 @@ public static class LocalCommands
         }
         using var client = new HttpClient(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(30) };
         client.DefaultRequestHeaders.Authorization = new("Bearer", key);
-        if (command is "status" or "models")
+        if (command is "status" or "models" or "usage")
         {
             using var response = await client.GetAsync("http://127.0.0.1:3210/" + command); response.EnsureSuccessStatusCode();
             Console.WriteLine(await response.Content.ReadAsStringAsync()); return 0;
@@ -39,6 +39,11 @@ public static class LocalCommands
             using var response = await client.PostAsync("http://127.0.0.1:3210/accounts/" + args[0] + "/" + command, null);
             Console.WriteLine(response.IsSuccessStatusCode ? "Account control applied for new requests." : "Control rejected; check account and live migration gate.");
             return response.IsSuccessStatusCode ? 0 : 1;
+        }
+        if (command == "native-login" && args.Length == 1)
+        {
+            using var response = await client.PostAsJsonAsync("http://127.0.0.1:3210/accounts/native-login", new { name = args[0], accountId = (string?)null });
+            response.EnsureSuccessStatusCode(); Console.WriteLine("Official Codex login started in an isolated local profile. Complete authorization in the system browser, then run status."); return 0;
         }
         if (command == "login" && args.Length is 1 or 2)
         {

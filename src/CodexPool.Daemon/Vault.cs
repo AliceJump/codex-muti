@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using CodexPool.Core;
 
 namespace CodexPool.Daemon;
 
@@ -12,6 +13,9 @@ public sealed class AccountCredential
     public required string Name { get; set; }
     public required string Subject { get; init; }
     public required string ClientId { get; init; }
+    public string ProviderKind { get; set; } = "siwc";
+    public string? BackendAccountId { get; set; }
+    public string? Plan { get; set; }
     public required string AccessToken { get; set; }
     public required string RefreshToken { get; set; }
     public required string IdToken { get; set; }
@@ -28,7 +32,7 @@ public sealed class AccountCredential
     public object PublicView(bool active, string? authHealth = null) => new { id = Id, name = Name, active,
         enabled = Enabled, paused = Paused, drain = Draining, cooldownUntil = CooldownUntil,
         state = !Enabled ? "disabled" : Paused ? "paused" : Draining ? "draining" : CooldownUntil > DateTimeOffset.UtcNow ? "cooldown" : active ? "active" : "standby",
-        plan = (string?)null, auth = authHealth ?? (AuthStatus != "ready" ? AuthStatus : ExpiresAt > DateTimeOffset.UtcNow ? "ready" : "refresh_needed"), quota = (object?)null, updatedAt = UpdatedAt };
+        provider = ProviderKind, plan = Plan, auth = authHealth ?? (AuthStatus != "ready" ? AuthStatus : ExpiresAt > DateTimeOffset.UtcNow ? "ready" : "refresh_needed"), quota = (object?)null, updatedAt = UpdatedAt };
 }
 
 public sealed class VaultDocument
@@ -38,6 +42,8 @@ public sealed class VaultDocument
     public string LocalKey { get; set; } = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
     public string? ActiveAccountId { get; set; }
     public List<AccountCredential> Accounts { get; set; } = [];
+    public PoolSettings Settings { get; set; } = new();
+    public List<QuotaSnapshot> Quotas { get; set; } = [];
     public override string ToString() => "VaultDocument [REDACTED]";
 }
 
@@ -64,17 +70,41 @@ public sealed class Vault
     public string LocalKey { get { lock (gate) return document.LocalKey; } }
     public string HostId { get { lock (gate) return document.HostId; } }
     public string? ActiveId { get { lock (gate) return document.ActiveAccountId; } }
+    public PoolSettings Settings { get { lock (gate) return document.Settings; } }
+    public QuotaSnapshot[] Quotas { get { lock (gate) return document.Quotas.ToArray(); } }
+    public void SaveSettings(PoolSettings settings)
+    {
+        StickyScheduler.Validate(settings);
+        lock (gate) { var next = CloneDocument(document); next.Settings = settings; Persist(next); document = next; }
+    }
+    public void SaveQuota(QuotaSnapshot snapshot)
+    {
+        lock (gate)
+        {
+            var next = CloneDocument(document);
+            var account = next.Accounts.Single(x => x.Id == snapshot.AccountId);
+            next.Quotas.RemoveAll(x => x.AccountId == snapshot.AccountId); next.Quotas.Add(snapshot);
+            account.Plan = snapshot.Plan ?? account.Plan;
+            Persist(next); document = next;
+        }
+    }
+    public void Cooldown(string id, DateTimeOffset until)
+    {
+        lock (gate) { var next = CloneDocument(document); next.Accounts.Single(x => x.Id == id).CooldownUntil = until; Persist(next); document = next; }
+    }
     public int DistinctUsers { get { lock (gate) return document.Accounts.Select(x => x.Subject).Distinct(StringComparer.Ordinal).Count(); } }
     public object[] PublicAccounts => Views(_ => null);
     public object[] Views(Func<string, string?> authHealth) { lock (gate) return document.Accounts.Select(x => x.PublicView(x.Id == document.ActiveAccountId, authHealth(x.Id))).ToArray(); }
     public AccountCredential? Selected { get { lock (gate) return Clone(document.Accounts.FirstOrDefault(x => x.Id == document.ActiveAccountId)); } }
     public AccountCredential? Find(string id) { lock (gate) return Clone(document.Accounts.FirstOrDefault(x => x.Id == id)); }
+    public AccountCredential[] Accounts { get { lock (gate) return document.Accounts.Select(x => Clone(x)!).ToArray(); } }
     public string Add(AccountCredential credential)
     {
         lock (gate)
         {
             var next = CloneDocument(document);
-            var duplicate = next.Accounts.FindIndex(x => x.ClientId == credential.ClientId);
+            var duplicate = next.Accounts.FindIndex(x => x.ProviderKind == credential.ProviderKind && x.ClientId == credential.ClientId
+                && (credential.ProviderKind != "native" || x.Subject == credential.Subject && x.BackendAccountId == credential.BackendAccountId));
             if (duplicate >= 0)
             {
                 var existing = next.Accounts[duplicate];
@@ -82,7 +112,8 @@ public sealed class Vault
                 credential = new() { Id = existing.Id, Name = existing.Name, Subject = credential.Subject, ClientId = credential.ClientId,
                     AccessToken = credential.AccessToken, RefreshToken = credential.RefreshToken, IdToken = credential.IdToken,
                     Scope = credential.Scope, ExpiresAt = credential.ExpiresAt, EarliestRefreshAt = credential.EarliestRefreshAt, UpdatedAt = credential.UpdatedAt,
-                    Enabled = existing.Enabled, Paused = existing.Paused, Draining = existing.Draining, CooldownUntil = existing.CooldownUntil };
+                    Enabled = existing.Enabled, Paused = existing.Paused, Draining = existing.Draining, CooldownUntil = existing.CooldownUntil,
+                    ProviderKind = credential.ProviderKind, BackendAccountId = credential.BackendAccountId, Plan = credential.Plan };
                 next.Accounts[duplicate] = credential;
             }
             else next.Accounts.Add(credential);
@@ -98,7 +129,7 @@ public sealed class Vault
             var next = CloneDocument(document); next.ActiveAccountId = id; Persist(next); document = next; return true;
         }
     }
-    public static bool IsEligible(AccountCredential account) => account.Enabled && !account.Paused && !account.Draining && account.AuthStatus != "reauth_required" && !(account.CooldownUntil > DateTimeOffset.UtcNow);
+    public static bool IsEligible(AccountCredential account) => account.Enabled && !account.Paused && !account.Draining && account.AuthStatus == "ready" && !(account.CooldownUntil > DateTimeOffset.UtcNow);
     public void RequireReauthorization(string id) => SetAuthStatus(id, "reauth_required");
     public void SetAuthStatus(string id, string status)
     {

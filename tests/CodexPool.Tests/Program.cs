@@ -23,7 +23,9 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Malformed JSON rejection never fails over", MalformedError),
     ("Lease formatting and serialization redact secrets", SecretRedaction),
     ("Missing Content-Type accepts typed SSE framing without losing bytes", MissingContentType),
-    ("Missing Content-Type rejects JSON or untyped streams without retry", MissingContentTypeRejected)
+    ("Missing Content-Type rejects JSON or untyped streams without retry", MissingContentTypeRejected),
+    ("Sticky scheduling, recovery and stale-request epochs", Sticky),
+    ("No eligible account and auto-switch OFF never relax admission", Eligibility)
 };
 var failed = 0;
 foreach (var (name, run) in tests)
@@ -157,6 +159,36 @@ static async Task MissingContentTypeRejected()
         using var client = new HttpClient(handler); var sink = new MemorySink(); var result = await Relay(client, sink);
         Check(!result.Committed && handler.Count == 1 && sink.Text.Length == 0 && result.Outcome == "unexpected_content_type");
     }
+}
+static Task Sticky()
+{
+    var now = DateTimeOffset.UtcNow; var settings = new PoolSettings(true); var scheduler = new StickyScheduler("A");
+    PoolAccount[] healthy = [new("A"), new("B"), new("C")];
+    for (var i = 0; i < 10; i++) Check(scheduler.Select(healthy, settings, now).AccountId == "A");
+    PoolAccount[] exhausted = [new("A", FiveHourUsed: 95, QuotaUpdatedAt: now), new("B"), new("C")];
+    Check(scheduler.Select(exhausted, settings, now).AccountId == "B");
+    Check(scheduler.Select(healthy, settings, now).AccountId == "B"); // recovered A cannot steal B
+    var lease = scheduler.Select(healthy, settings, now);
+    scheduler.Activate("C", healthy, settings, now);
+    scheduler.CompleteFailover(lease, "A", "quota_rejected", healthy, settings, now);
+    Check(scheduler.Active == "C");
+    scheduler.Activate("B", healthy, settings, now);
+    PoolAccount[] bExhausted = [new("A"), new("B", WeeklyUsed: 95, QuotaUpdatedAt: now), new("C")];
+    Check(scheduler.Select(bExhausted, settings, now).AccountId == "A");
+    var stale = new[] { new PoolAccount("A", FiveHourUsed: 100, QuotaUpdatedAt: now.AddMinutes(-5)), new PoolAccount("B") };
+    Check(scheduler.Select(stale, settings, now).AccountId == "A");
+    return Task.CompletedTask;
+}
+static Task Eligibility()
+{
+    var now = DateTimeOffset.UtcNow; var scheduler = new StickyScheduler("A");
+    PoolAccount[] accounts = [new("A", Paused: true), new("B")];
+    try { scheduler.Select(accounts, new(false), now); throw new InvalidOperationException(); } catch (NoEligibleAccountException) { }
+    Check(scheduler.Select(accounts, new(true), now).AccountId == "B");
+    accounts = [new("A", Enabled: false), new("B", Draining: true)];
+    try { scheduler.Select(accounts, new(true), now); throw new InvalidOperationException(); } catch (NoEligibleAccountException) { }
+    Check(scheduler.History.Length == 1);
+    return Task.CompletedTask;
 }
 
 sealed class FixtureHandler(Func<int, HttpRequestMessage, Task<HttpResponseMessage>> respond) : HttpMessageHandler

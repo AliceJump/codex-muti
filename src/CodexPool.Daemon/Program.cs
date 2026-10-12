@@ -39,6 +39,8 @@ try
         AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate })
         { Timeout = TimeSpan.FromMinutes(10) };
     var auth = new OAuth(http, vault); var relay = new ResponsesRelay(modelHttp);
+    var nativeLogin = new NativeLogin(vault, auth, directory);
+    var quota = new Quota(http, auth, vault);
     var recent = new ConcurrentQueue<object>();
     var inFlight = new ConcurrentDictionary<string, int>();
     var boundaryProbe = args.Contains("--live-boundary-probe", StringComparer.Ordinal);
@@ -65,9 +67,19 @@ try
     });
     app.MapGet("/health", () => new { status = "running", stage = "phase0", automaticSwitching = false });
     app.MapGet("/status", () => new { activeAccountId = vault.ActiveId, stage = "phase0", automaticSwitching = false,
-        boundaryProbe, distinctUsers = vault.DistinctUsers, liveMigrationValidated = false, quotaSource = "unverified", accounts = vault.Views(auth.Health), inFlightRequests = inFlight.ToArray(), recentRequests = recent.ToArray() });
+        boundaryProbe, distinctUsers = vault.DistinctUsers, liveMigrationValidated = false, quotaSource = "per_registration", accounts = vault.Views(auth.Health),
+        nativeLoginAttempts = nativeLogin.PublicAttempts, usage = quota.Views, inFlightRequests = inFlight.ToArray(), recentRequests = recent.ToArray() });
     app.MapGet("/accounts", () => vault.Views(auth.Health));
-    app.MapGet("/usage", () => new { available = false, reason = "public_quota_source_unverified", accounts = vault.PublicAccounts });
+    app.MapGet("/usage", async (HttpContext context) =>
+    {
+        foreach (var account in vault.Accounts.Where(x => x.ProviderKind == "native")) await quota.RefreshAsync(account.Id, context.RequestAborted);
+        return quota.Views;
+    });
+    app.MapPost("/accounts/native-login", async (HttpContext context) =>
+    {
+        var input = await context.Request.ReadFromJsonAsync<LoginInput>(context.RequestAborted) ?? throw new AuthFailure("invalid_login_request");
+        return Results.Json(new { attemptId = await nativeLogin.StartAsync(input.Name), state = "waiting_for_browser" });
+    });
     app.MapGet("/models", async (HttpContext context) =>
     {
         var selected = vault.Selected ?? throw new AuthFailure("no_authorized_account");
@@ -139,6 +151,7 @@ try
         var account = await auth.ReadyAsync(selected.Id, context.RequestAborted);
         Interlocked.Increment(ref requestCount);
         var headers = context.Request.Headers.ToDictionary(x => x.Key, x => x.Value.ToString(), StringComparer.OrdinalIgnoreCase);
+        headers.Remove("ChatGPT-Account-Id"); // Backend account routing is supplied only by validated credentials.
         if (headers.TryGetValue("session_id", out var session))
         {
             var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(session)));
@@ -150,9 +163,11 @@ try
         else headers.Remove("x-codex-turn-state");
         var started = Stopwatch.GetTimestamp(); var requestId = Guid.NewGuid().ToString("N");
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted); lifetime.CancelAfter(TimeSpan.FromMinutes(10));
+        if (account.ProviderKind == "native" && account.BackendAccountId is not null) headers["ChatGPT-Account-Id"] = account.BackendAccountId;
         RelayResult result;
         inFlight.AddOrUpdate(account.Id, 1, (_, count) => count + 1);
-        try { result = await relay.ForwardAsync(body, "application/json", [new(account.Id, new("https://api.openai.com/v1/responses"), account.AccessToken)], headers,
+        var modelEndpoint = account.ProviderKind == "native" ? "https://chatgpt.com/backend-api/codex/responses" : "https://api.openai.com/v1/responses";
+        try { result = await relay.ForwardAsync(body, "application/json", [new(account.Id, new(modelEndpoint), account.AccessToken)], headers,
             new WebSink(context), lifetime.Token); }
         finally { inFlight.AddOrUpdate(account.Id, 0, (_, count) => Math.Max(0, count - 1)); }
         recent.Enqueue(new { timestamp = DateTimeOffset.UtcNow, requestId, account = result.AccountId, model = modelValue.GetString(),

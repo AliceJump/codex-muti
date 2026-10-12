@@ -6,7 +6,7 @@ using System.Text.Json.Serialization;
 namespace CodexPool.Core;
 
 // A lease is fixed for one attempt. Control commands cannot mutate its target or token.
-public sealed record ModelLease(string AccountId, Uri Endpoint, [property: JsonIgnore] string AccessToken)
+public sealed record ModelLease(string AccountId, Uri Endpoint, [property: JsonIgnore] string AccessToken, [property: JsonIgnore] string? BackendAccountId = null)
 {
     public override string ToString() => $"ModelLease {{ AccountId = {AccountId}, AccessToken = [REDACTED] }}";
 }
@@ -29,7 +29,8 @@ public sealed class ResponsesRelay(HttpClient http)
 
     public async Task<RelayResult> ForwardAsync(
         ReadOnlyMemory<byte> body, string contentType, IReadOnlyList<ModelLease> candidates,
-        IReadOnlyDictionary<string, string> headers, IResponseSink sink, CancellationToken cancellationToken)
+        IReadOnlyDictionary<string, string> headers, IResponseSink sink, CancellationToken cancellationToken,
+        Action<ModelLease, string>? rejected = null)
     {
         if (candidates.Count == 0) throw new ArgumentException("No candidate accounts.", nameof(candidates));
         if (candidates.Select(x => x.AccountId).Distinct(StringComparer.Ordinal).Count() != candidates.Count)
@@ -42,6 +43,9 @@ public sealed class ResponsesRelay(HttpClient http)
             using var request = new HttpRequestMessage(HttpMethod.Post, lease.Endpoint);
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", lease.AccessToken);
             request.Headers.Accept.Add(new("text/event-stream"));
+            // Account routing is constructed by the daemon, never trusted from downstream callers.
+            if (lease.Endpoint.Host == "chatgpt.com" && lease.BackendAccountId is not null)
+                request.Headers.TryAddWithoutValidation("ChatGPT-Account-Id", lease.BackendAccountId);
             request.Content = new ReadOnlyMemoryContent(body);
             request.Content.Headers.ContentType = MediaTypeHeaderValue.Parse(contentType);
             foreach (var name in new[] { "session_id", "originator", "User-Agent", "OpenAI-Beta", "x-openai-internal-codex-responses-lite" })
@@ -61,6 +65,7 @@ public sealed class ResponsesRelay(HttpClient http)
                 {
                     var error = await ReadBoundedErrorAsync(response, cancellationToken);
                     var reason = ClassifyRejection(response.StatusCode, error);
+                    if (reason is "quota_rejected" or "auth_rejected") rejected?.Invoke(lease, reason);
                     if (!committed && index + 1 < candidates.Count && reason is "quota_rejected" or "auth_rejected") continue;
                     // Never send upstream error bodies: they can echo prompts or credentials.
                     var safeError = JsonSerializer.SerializeToUtf8Bytes(new { error = new

@@ -78,8 +78,9 @@ public sealed class OAuth(HttpClient http, Vault vault)
             TokenResponse token;
             // Crash between remote rotation and local replacement must not reuse the old token.
             vault.SetAuthStatus(id, "refresh_pending");
-            try { token = await ExchangeAsync(new() { ["grant_type"] = "refresh_token", ["client_id"] = account.ClientId,
-                ["refresh_token"] = account.RefreshToken, ["resource"] = Resource }, cancellationToken); }
+            try { token = account.ProviderKind == "native" ? await RefreshNativeAsync(account, cancellationToken)
+                : await ExchangeAsync(new() { ["grant_type"] = "refresh_token", ["client_id"] = account.ClientId,
+                    ["refresh_token"] = account.RefreshToken, ["resource"] = Resource }, cancellationToken); }
             catch (AuthFailure ex)
             {
                 health[id] = ex.Code == "auth_temporarily_unavailable" ? ex.Code : "reauth_required";
@@ -134,6 +135,25 @@ public sealed class OAuth(HttpClient http, Vault vault)
         if (nonce is not null && (!jwt.TryGetClaim("nonce", out var claim) || !FixedEquals(claim.Value, nonce))) throw new AuthFailure("invalid_oidc_nonce");
         if (string.IsNullOrWhiteSpace(jwt.Subject)) throw new AuthFailure("missing_account_subject");
         return jwt.Subject;
+    }
+    private async Task<TokenResponse> RefreshNativeAsync(AccountCredential account, CancellationToken cancellationToken)
+    {
+        // Matches the pinned official codex-login native refresh wire shape; separate from SIWC.
+        using var response = await http.PostAsJsonAsync(Issuer + "/oauth/token", new
+        { grant_type = "refresh_token", client_id = account.ClientId, refresh_token = account.RefreshToken }, cancellationToken);
+        var text = await ReadLimitedAsync(response.Content, cancellationToken);
+        if (!response.IsSuccessStatusCode) throw new AuthFailure(response.StatusCode is HttpStatusCode.BadRequest or HttpStatusCode.Unauthorized ? "reauth_required" : "auth_temporarily_unavailable");
+        var token = JsonSerializer.Deserialize<TokenResponse>(text) ?? throw new AuthFailure("invalid_token_response");
+        if (string.IsNullOrEmpty(token.AccessToken) || string.IsNullOrEmpty(token.RefreshToken)) throw new AuthFailure("invalid_token_response");
+        token.Scope = "native_codex"; token.ExpiresIn = (int)Math.Clamp((new JsonWebToken(token.AccessToken).ValidTo - DateTime.UtcNow).TotalSeconds, 1, 86400);
+        if (!string.IsNullOrEmpty(token.IdToken))
+        {
+            var jwt = new JsonWebToken(token.IdToken);
+            if (!jwt.TryGetClaim("https://api.openai.com/auth", out var metadata)) throw new AuthFailure("native_account_metadata_missing");
+            using var claims = JsonDocument.Parse(metadata.Value);
+            if (claims.RootElement.GetProperty("chatgpt_account_id").GetString() != account.BackendAccountId) throw new AuthFailure("account_identity_mismatch");
+        }
+        return token;
     }
 
     private async Task<TokenResponse> ExchangeAsync(Dictionary<string, string> fields, CancellationToken cancellationToken)

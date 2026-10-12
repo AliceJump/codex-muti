@@ -22,7 +22,9 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Tampered ciphertext never falls back to plaintext", Tamper),
     ("Local API authenticates controls, rejects Origin/Host, enforces one daemon", LocalApi),
     ("Account controls preserve credentials and cannot activate excluded accounts", AccountControls),
-    ("Crash during rotation leaves durable refresh_pending and never reuses token", CrashRefresh)
+    ("Crash during rotation leaves durable refresh_pending and never reuses token", CrashRefresh),
+    ("Native registrations sharing official client ID remain separate", NativeRegistrations),
+    ("Quota windows use durations and reject malformed percentages", QuotaParser)
 };
 var failed = 0;
 foreach (var (name, run) in tests)
@@ -140,6 +142,31 @@ async Task CrashRefresh()
     using var issuer = new FakeIssuer(); using var http = new HttpClient(issuer);
     var reopened = Store("crash-refresh");
     await Rejected(() => new OAuth(http, reopened).ReadyAsync("A", default)); Check(issuer.RefreshCalls == 0);
+}
+Task NativeRegistrations()
+{
+    var vault = Store("native-registrations");
+    foreach (var id in new[] { "A", "B" })
+    {
+        var template = Account(id);
+        vault.Add(new() { Id = id, Name = id, Subject = template.Subject, ClientId = NativeLogin.NativeClientId,
+            ProviderKind = "native", BackendAccountId = "backend-" + id, AccessToken = template.AccessToken,
+            RefreshToken = template.RefreshToken, IdToken = template.IdToken, Scope = "native_codex", ExpiresAt = template.ExpiresAt });
+    }
+    Check(vault.PublicAccounts.Length == 2 && vault.DistinctUsers == 2 && vault.Find("A")!.RefreshToken != vault.Find("B")!.RefreshToken);
+    return Task.CompletedTask;
+}
+Task QuotaParser()
+{
+    var valid = """
+        {"plan_type":"plus","rate_limit":{"primary_window":{"used_percent":95,"limit_window_seconds":604800,"reset_at":1791810000},"secondary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_at":1791813000}}}
+        """;
+    var parsed = Quota.Parse("A", Encoding.UTF8.GetBytes(valid));
+    Check(parsed.Windows[0].Kind == "weekly" && parsed.Windows[1].Kind == "5h" && parsed.Windows[0].RemainingPercent == 5);
+    var invalid = valid.Replace("\"used_percent\":95", "\"used_percent\":\"secret-value\"").Replace("\"used_percent\":10", "\"used_percent\":-5");
+    Check(Quota.Parse("A", Encoding.UTF8.GetBytes(invalid)).Windows.Count == 0);
+    Check(Quota.Parse("A", "{\"rate_limit\":null}"u8.ToArray()).Windows.Count == 0);
+    return Task.CompletedTask;
 }
 async Task LocalApi()
 {

@@ -1,0 +1,82 @@
+namespace CodexPool.Core;
+
+public sealed record PoolAccount(string Id, bool Enabled = true, bool Paused = false, bool Draining = false,
+    bool AuthReady = true, DateTimeOffset? CooldownUntil = null, double? FiveHourUsed = null,
+    double? WeeklyUsed = null, DateTimeOffset? QuotaUpdatedAt = null);
+public sealed record PoolSettings(bool AutoSwitch = false, double FiveHourThreshold = 95, double WeeklyThreshold = 95);
+public sealed record AccountSelection(string AccountId, long Epoch, string? SwitchReason);
+public sealed record AccountSwitch(DateTimeOffset At, string? From, string To, string Reason, long Epoch);
+
+public sealed class NoEligibleAccountException : Exception
+{ public NoEligibleAccountException() : base("no_eligible_account") { } }
+
+/// <summary>One global sticky owner. Selection and activation are atomic; no session/agent state.</summary>
+public sealed class StickyScheduler(string? activeId)
+{
+    private readonly object gate = new();
+    private string? active = activeId;
+    private long epoch;
+    private readonly Queue<AccountSwitch> history = new();
+    public string? Active { get { lock (gate) return active; } }
+    public AccountSwitch[] History { get { lock (gate) return history.ToArray(); } }
+    public AccountSelection Activate(string id, IReadOnlyList<PoolAccount> accounts, PoolSettings settings, DateTimeOffset now)
+    {
+        lock (gate)
+        {
+            var account = accounts.FirstOrDefault(x => x.Id == id);
+            // Manual activation respects admission/auth, but thresholds only drive auto routing.
+            if (account is null || AdmissionReason(account, now) is not null) throw new NoEligibleAccountException();
+            Switch(id, "manual", now); return new(id, epoch, "manual");
+        }
+    }
+    public AccountSelection Select(IReadOnlyList<PoolAccount> accounts, PoolSettings settings, DateTimeOffset now)
+    {
+        Validate(settings);
+        lock (gate)
+        {
+            var current = accounts.FirstOrDefault(x => x.Id == active);
+            var reason = current is null ? "no_active_account" : ExclusionReason(current, settings, now);
+            if (reason is null) return new(current!.Id, epoch, null);
+            if (active is not null && !settings.AutoSwitch) throw new NoEligibleAccountException();
+            var next = accounts.FirstOrDefault(x => ExclusionReason(x, settings, now) is null);
+            if (next is null) throw new NoEligibleAccountException();
+            Switch(next.Id, reason, now); return new(next.Id, epoch, reason);
+        }
+    }
+    public void CompleteFailover(AccountSelection lease, string replacement, string reason, IReadOnlyList<PoolAccount> accounts, PoolSettings settings, DateTimeOffset now)
+    {
+        lock (gate)
+        {
+            // A late request cannot undo a manual command or newer automatic routing decision.
+            if (active != lease.AccountId || epoch != lease.Epoch || !settings.AutoSwitch) return;
+            if (!accounts.Any(x => x.Id == replacement && ExclusionReason(x, settings, now) is null)) return;
+            Switch(replacement, reason, now);
+        }
+    }
+    public static void Validate(PoolSettings settings)
+    {
+        if (!double.IsFinite(settings.FiveHourThreshold) || !double.IsFinite(settings.WeeklyThreshold)
+            || settings.FiveHourThreshold is <= 0 or > 100 || settings.WeeklyThreshold is <= 0 or > 100)
+            throw new ArgumentException("Thresholds must be finite values greater than 0 and at most 100.");
+    }
+    public static string? ExclusionReason(PoolAccount account, PoolSettings settings, DateTimeOffset now)
+    {
+        var admission = AdmissionReason(account, now); if (admission is not null) return admission;
+        if (!settings.AutoSwitch) return null;
+        if (account.QuotaUpdatedAt is { } updated && now - updated <= TimeSpan.FromMinutes(2) && updated <= now.AddSeconds(30))
+        {
+            if (account.FiveHourUsed >= settings.FiveHourThreshold) return "5h_threshold";
+            if (account.WeeklyUsed >= settings.WeeklyThreshold) return "weekly_threshold";
+        }
+        return null;
+    }
+    private static string? AdmissionReason(PoolAccount account, DateTimeOffset now) =>
+        !account.Enabled ? "disabled" : account.Paused ? "paused" : account.Draining ? "draining"
+        : !account.AuthReady ? "auth_unavailable" : account.CooldownUntil > now ? "cooldown" : null;
+    private void Switch(string replacement, string reason, DateTimeOffset now)
+    {
+        var old = active; active = replacement; epoch++;
+        if (old == replacement) return;
+        history.Enqueue(new(now, old, replacement, reason, epoch)); while (history.Count > 100) history.Dequeue();
+    }
+}
