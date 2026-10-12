@@ -1,0 +1,8 @@
+.research/
+node_modules/
+dist/
+**/bin/
+**/obj/
+.local/
+*.user
+*.log
