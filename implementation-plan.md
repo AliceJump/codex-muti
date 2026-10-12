@@ -72,7 +72,8 @@ Native backdrop spike before choosing WPF/WinUI implementation. Full, compact an
 
 - Completed: initial parallel Luna research and primary architecture review.
 - Completed: architecture and phase plan written before implementation.
-- Next: Phase 0 fixture transport, target-client probes, supported OAuth implementation research.
-- Pending: real A/B credentials/interactive login, upstream quota access, encrypted/compacted cross-account compatibility and Desktop acceptance.
+- Completed: Phase 0 fixture transport, official CLI/app-server probes, DPAPI/OIDC login bootstrap and two different real SIWC registrations.
+- Completed within tested scope: GPT-6 Luna same-thread A/B, local compact, resume, encrypted reasoning and a controlled MCP operation. See docs/phase0-results.md.
+- Pending: real A/B refresh rotation, upstream Codex quota source, remote encrypted compaction/long-session failure matrix, Shell/Git execution counters and Desktop acceptance.
 
 Do not check off pending live requirements using synthetic accounts, a README assertion or source inspection alone.
