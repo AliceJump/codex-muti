@@ -42,7 +42,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Token statistics aggregate local days, accounts, models and unknown detail coverage", UsagePeriods),
     ("Concurrent token accounting is exact and failed writes retry without losing history", UsageConcurrency),
     ("Quota preserves arbitrary, absent, optional and scoped windows plus credit metadata", DynamicQuotaParser),
-    ("Generic routing honors credits, explicit denial, budgets, model scope and stale snapshots", DynamicQuotaRouting)
+    ("Generic routing honors credits, explicit denial, budgets, model scope and stale snapshots", DynamicQuotaRouting),
+    ("WHAM usage rewrite exposes pool allowed shape for Desktop chatgpt_base_url", WhamUsageRewrite)
 };
 if (args.Length != 0)
 {
@@ -396,6 +397,31 @@ Task DynamicQuotaRouting()
     Check(PoolAvailability.Aggregate([new("A", "quota_threshold")]).Code == "account_pool_threshold_reached");
     return Task.CompletedTask;
 }
+Task WhamUsageRewrite()
+{
+    var empty = WhamUsage.Response(Array.Empty<AccountAvailability>());
+    using (var emptyJson = JsonDocument.Parse(JsonSerializer.Serialize(empty)))
+    {
+        var rate = emptyJson.RootElement.GetProperty("rate_limit");
+        Check(rate.GetProperty("allowed").GetBoolean() == false);
+        Check(rate.GetProperty("limit_reached").GetBoolean() == true);
+    }
+    var usable = WhamUsage.Response([new AccountAvailability("A", null, Plan: "plus")], "acct-1", "plus");
+    using (var usableJson = JsonDocument.Parse(JsonSerializer.Serialize(usable)))
+    {
+        var root = usableJson.RootElement;
+        Check(root.GetProperty("account_id").GetString() == "acct-1");
+        Check(root.GetProperty("plan_type").GetString() == "plus");
+        Check(root.GetProperty("rate_limit").GetProperty("allowed").GetBoolean());
+        Check(root.GetProperty("rate_limit").GetProperty("limit_reached").GetBoolean() == false);
+    }
+    var exhausted = WhamUsage.Response([new AccountAvailability("A", "quota_exhausted", "insufficient_quota")]);
+    using (var exhaustedJson = JsonDocument.Parse(JsonSerializer.Serialize(exhausted)))
+        Check(exhaustedJson.RootElement.GetProperty("rate_limit").GetProperty("allowed").GetBoolean() == false);
+    Check(WhamUsage.PoolAllowed([new("A", null), new("B", "paused")]));
+    Check(!WhamUsage.PoolAllowed([new("A", "quota_exhausted"), new("B", "auth_unavailable")]));
+    return Task.CompletedTask;
+}
 async Task LocalApi()
 {
     var vault = Store("http-api");
@@ -418,6 +444,12 @@ async Task LocalApi()
         var ready = false;
         for (var i = 0; i < 50; i++) { try { using var health = await http.GetAsync("http://127.0.0.1:3210/health"); if (health.IsSuccessStatusCode) { ready = true; break; } } catch (HttpRequestException) { } await Task.Delay(100); }
         Check(ready && !server.HasExited);
+        using var whamAnon = await http.GetAsync("http://127.0.0.1:3210/backend-api/wham/usage");
+        using var whamDoc = JsonDocument.Parse(await whamAnon.Content.ReadAsStringAsync());
+        Check(whamAnon.IsSuccessStatusCode && whamDoc.RootElement.GetProperty("rate_limit").TryGetProperty("allowed", out _));
+        using var codexUsage = await http.GetAsync("http://127.0.0.1:3210/api/codex/usage");
+        using var codexDoc = JsonDocument.Parse(await codexUsage.Content.ReadAsStringAsync());
+        Check(codexUsage.IsSuccessStatusCode && codexDoc.RootElement.GetProperty("rate_limit").GetProperty("allowed").ValueKind is JsonValueKind.True or JsonValueKind.False);
         using var unauthorized = await http.GetAsync("http://127.0.0.1:3210/status"); Check(unauthorized.StatusCode == HttpStatusCode.Unauthorized);
         using var unauthorizedStatistics = await http.GetAsync("http://127.0.0.1:3210/statistics"); Check(unauthorizedStatistics.StatusCode == HttpStatusCode.Unauthorized);
         using var official = new HttpClient(new SocketsHttpHandler { UseProxy = false });

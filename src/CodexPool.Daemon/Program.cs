@@ -63,7 +63,9 @@ try
         context.Response.Headers.ContentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
         context.Response.Headers["Referrer-Policy"] = "no-referrer";
         var path = context.Request.Path.Value ?? "";
-        var publicPath = path is "/" or "/health" or "/auth/callback" or "/dashboard.js" or "/dashboard.css" || path.StartsWith("/dashboard/open/", StringComparison.Ordinal);
+        var publicPath = path is "/" or "/health" or "/auth/callback" or "/dashboard.js" or "/dashboard.css"
+            || path is "/backend-api/wham/usage" or "/api/codex/usage"
+            || path.StartsWith("/dashboard/open/", StringComparison.Ordinal);
         var bearer = LocalCommands.EqualSecret(context.Request.Headers.Authorization.ToString(), "Bearer " + vault.LocalKey);
         var modelBearer = !bearer && await officialModelAuth.AcceptsAsync(context.Request.Method, path,
             context.Request.Headers.Authorization.ToString(), context.RequestAborted);
@@ -126,6 +128,16 @@ try
         if (pool.Settings.AutoSwitch) try { pool.Select(); } catch (NoEligibleAccountException) { }
         return quota.Views;
     });
+    // ChatGPT Desktop / Codex 在 chatgpt_base_url 或 CODEX_API_BASE_URL 指向本机时读取用量；按池可用性改写 allowed。
+    IResult WhamUsageEndpoint(HttpContext context)
+    {
+        var availability = pool.Availability();
+        var plan = availability.Select(x => x.Plan).FirstOrDefault(p => !string.IsNullOrWhiteSpace(p))
+            ?? vault.Accounts.Select(x => quota.Snapshot(x.Id)?.Plan).FirstOrDefault(p => !string.IsNullOrWhiteSpace(p));
+        return Results.Json(WhamUsage.Response(availability, WhamUsage.HeaderAccountId(context.Request), plan));
+    }
+    app.MapGet("/backend-api/wham/usage", WhamUsageEndpoint);
+    app.MapGet("/api/codex/usage", WhamUsageEndpoint);
     app.MapPost("/accounts/native-login", async (HttpContext context) =>
     {
         var input = await context.Request.ReadFromJsonAsync<LoginInput>(context.RequestAborted) ?? throw new AuthFailure("invalid_login_request");
