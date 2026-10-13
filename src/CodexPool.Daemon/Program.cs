@@ -50,7 +50,6 @@ try
     var browsers = new BrowserSessions(); var events = new StateEvents();
     var officialModelAuth = new OfficialModelAuth(Environment.GetEnvironmentVariable("CODEX_HOME")
         ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex"), vault);
-    long requestCount = 0;
     var sessionOwners = new ConcurrentDictionary<string, string>();
     app.Use(async (context, next) =>
     {
@@ -109,7 +108,9 @@ try
     app.MapGet("/accounts", () => vault.Views(auth.Health));
     app.MapGet("/usage", async (HttpContext context) =>
     {
-        foreach (var account in vault.Accounts.Where(x => x.ProviderKind == "native")) await quota.RefreshAsync(account.Id, context.RequestAborted);
+        foreach (var account in vault.Accounts.Where(x => x.ProviderKind == "native"))
+            try { await quota.RefreshAsync(account.Id, context.RequestAborted); }
+            catch (AuthFailure ex) when (ex.Code == "account_not_found") { }
         return quota.Views;
     });
     app.MapPost("/accounts/native-login", async (HttpContext context) =>
@@ -129,6 +130,7 @@ try
     async Task<IResult> ModelCatalog(HttpContext context)
     {
         var selected = vault.Selected ?? throw new AuthFailure("no_authorized_account");
+        using var use = vault.AcquireUse(selected.Id);
         var account = await auth.ReadyAsync(selected.Id, context.RequestAborted);
         // Forward Codex's client_version so the picker catalog matches the installed CLI (e.g. gpt-6.1-sol).
         var catalogVersion = CodexClientVersion.FromQueryOrFallback(context.Request.Query["client_version"], modelClientVersion);
@@ -174,11 +176,14 @@ try
     app.MapPost("/accounts/{id}/activate", (string id) =>
     {
         if (vault.Find(id) is null) return Results.NotFound(new { error = new { code = "account_not_found" } });
-        if (vault.ActiveId != id && Interlocked.Read(ref requestCount) > 0 && !boundaryProbe)
-            return Results.Conflict(new { error = new { code = "live_migration_gate_pending" } });
-        if (auth.Health(id) == "reauth_required" || !Vault.IsEligible(vault.Find(id)!))
+        var account = vault.Find(id);
+        if (account is null) return Results.NotFound(new { error = new { code = "account_not_found" } });
+        if (auth.Health(id) == "reauth_required" || !Vault.IsEligible(account))
             return Results.Conflict(new { error = new { code = "account_not_eligible" } });
-        pool.Activate(id);
+        try { pool.Activate(id); }
+        catch (AuthFailure ex) when (ex.Code == "live_migration_gate_pending")
+        { return Results.Conflict(new { error = new { code = ex.Code } }); }
+        catch (NoEligibleAccountException) { return Results.Conflict(new { error = new { code = "account_not_eligible" } }); }
         return Results.Ok(new { activeAccountId = id, affects = "new_requests_only" });
     });
     foreach (var operation in new[] { "pause", "resume", "drain", "undrain", "enable", "disable" })
@@ -187,18 +192,12 @@ try
             : Results.NotFound(new { error = new { code = "account_not_found" } }));
     app.MapPost("/accounts/{id}/delete", (string id) =>
     {
-        // Permanent vault removal. Never echoes tokens. Design: auto-pick eligible standby when deleting active.
-        if (vault.Find(id) is null) return Results.NotFound(new { error = new { code = "account_not_found" } });
-        if (inFlight.TryGetValue(id, out var flying) && flying > 0)
-            return Results.Conflict(new { error = new { code = "account_in_flight" } });
-        var deletingActive = vault.ActiveId == id;
-        var others = vault.Accounts.Where(x => x.Id != id).ToArray();
-        if (deletingActive && others.Length > 0 && !others.Any(Vault.IsEligible))
-            return Results.Conflict(new { error = new { code = "activate_another_first" } });
-        if (!vault.Delete(id, out var newActiveId))
-            return Results.NotFound(new { error = new { code = "account_not_found" } });
-        if (deletingActive && newActiveId is not null) pool.Activate(newActiveId);
-        return Results.Ok(new { deleted = id, activeAccountId = newActiveId, affects = "credentials_removed" });
+        try
+        {
+            if (!pool.Delete(id, out var newActiveId)) return Results.NotFound(new { error = new { code = "account_not_found" } });
+            return Results.Ok(new { deleted = id, activeAccountId = newActiveId, affects = "credentials_removed" });
+        }
+        catch (AccountDeletionRejected ex) { return Results.Conflict(new { error = new { code = ex.Code } }); }
     });
 
     // Built-in OpenAI first probes WebSocket. 426 selects Codex's supported HTTP/SSE fallback.
@@ -219,18 +218,18 @@ try
         if (json.TryGetProperty("previous_response_id", out var previous) && previous.ValueKind != JsonValueKind.Null
             || json.TryGetProperty("conversation", out var conversation) && conversation.ValueKind != JsonValueKind.Null)
         { context.Response.StatusCode = 400; await context.Response.WriteAsJsonAsync(new { error = new { code = "server_continuation_unsupported" } }); return; }
-        var selection = pool.Select();
+        using var reservation = pool.ReserveModelRequest();
+        var selection = reservation.Selection;
         var account = await auth.ReadyAsync(selection.AccountId, context.RequestAborted);
         var candidates = new List<ModelLease>();
         ModelLease Lease(AccountCredential credential) => new(credential.Id, new(credential.ProviderKind == "native"
             ? "https://chatgpt.com/backend-api/codex/responses" : "https://api.openai.com/v1/responses"), credential.AccessToken, credential.BackendAccountId);
         candidates.Add(Lease(account));
-        foreach (var id in pool.Candidates(selection).Skip(1))
+        foreach (var id in reservation.CandidateIds.Skip(1))
         {
             try { candidates.Add(Lease(await auth.ReadyAsync(id, context.RequestAborted))); }
             catch (AuthFailure) { } // No model bytes were sent; this candidate cannot be used.
         }
-        Interlocked.Increment(ref requestCount);
         var headers = context.Request.Headers.ToDictionary(x => x.Key, x => x.Value.ToString(), StringComparer.OrdinalIgnoreCase);
         headers.Remove("ChatGPT-Account-Id"); // Backend account routing is supplied only by validated credentials.
         if (headers.TryGetValue("session_id", out var session))

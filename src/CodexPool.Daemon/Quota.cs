@@ -13,8 +13,10 @@ public sealed class Quota(HttpClient http, OAuth auth, Vault vault)
     public object View(string id) => snapshots.TryGetValue(id, out var snapshot) ? snapshot : new { accountId = id, available = false, reason = "quota_source_unverified" };
     public object[] Views => vault.Accounts.Select(x => View(x.Id)).ToArray();
     public QuotaSnapshot? Snapshot(string id) => snapshots.GetValueOrDefault(id);
+    public void Forget(string id) => snapshots.TryRemove(id, out _);
     public async Task<object> RefreshAsync(string id, CancellationToken cancellationToken)
     {
+        using var use = vault.AcquireUse(id);
         var account = vault.Find(id) ?? throw new AuthFailure("account_not_found");
         if (account.ProviderKind != "native") return View(id); // Do not use SIWC grants against backend-api.
         var singleFlight = locks.GetOrAdd(id, _ => new(1, 1)); await singleFlight.WaitAsync(cancellationToken);
