@@ -19,6 +19,7 @@ dotnet run --project src/CodexPool.Daemon --no-launch-profile -- serve
 .\scripts\pool.ps1 start
 .\scripts\pool.ps1 dashboard
 .\scripts\pool.ps1 window
+.\scripts\pool.ps1 widget
 ```
 
 Dashboard 位于 `http://127.0.0.1:3210`，`dashboard` 命令建立短期安全浏览器会话。页面提供账户 Radio、额度、pause/drain/enable、阈值、请求与切换原因；悬浮窗通过 `/events` 同步状态，通过本地 API 切换账户。窗口支持 Acrylic、完整/紧凑/胶囊模式、系统/浅色/深色、置顶、拖动、托盘、`Ctrl+Alt+C`、位置保存、DPI 和工作区钳制。关闭窗口隐藏到托盘；托盘“退出悬浮窗”仅退出 UI，Daemon 继续运行。
@@ -58,6 +59,12 @@ openai_base_url = "http://127.0.0.1:3210/v1"
 模型入口接受账户池中任一原生登录的当前 access token，或只读核对 Daemon 的 `CODEX_HOME/auth.json` 中当前 ChatGPT 登录。现有文件由官方 Codex 维护，代理不导入、复制、刷新或写入该登录。请求入口认证和账户选择独立；实际上游账户仍由 sticky 调度决定。此只读适配目前针对官方 file 存储；keyring/ephemeral 中的其他 grant 没有自动读取支持。
 
 原生客户端的 WebSocket 探测返回 426，让 Codex 回落到 HTTP/SSE；`/v1/models` 返回原生模型目录。Codex 请求 `/v1/models?client_version=...` 时，Daemon 优先转发该查询参数到上游 `backend-api/codex/models`，使选择器目录与当前 CLI 一致（例如 `gpt-6.1-sol`）；无查询参数时回退到启动时解析的本机 `codex --version`，也可通过 `CODEX_POOL_CLIENT_VERSION=0.162.1` 手动指定，失败则回退到已验证的 `0.157.1`。升级 CLI 后建议重启 Daemon。支持原生请求的 zstd 压缩，解压正文和解码窗口均限制为 32 MiB，解压后原样转发 JSON 字节。官方/native 登录凭据仅能调用这些模型接口，控制 API 继续使用本地密钥或 Dashboard 安全会话。模型调用仍受账户额度和切换阈值约束，两个账户均不可用时返回 503。验收范围见 [docs/local-provider-acceptance.md](docs/local-provider-acceptance.md)。
+
+## 桌面小组件
+
+Windows 提供右下角托盘状态面板，单击 Codex Pool 图标展开当前账户、额度、自动切换状态，以及“打开悬浮窗 / 打开 Web”入口；点外部自动收起。Web 服务默认随代理启用。运行 `scripts/build-widget.ps1`、`scripts/install-widget-shortcut.ps1` 后，可双击桌面的“Codex Pool 小组件”启动托盘入口；快捷键为 `Ctrl+Alt+W`。它与原浮窗独立运行，退出 UI 后代理继续运行。
+
+macOS SwiftUI 客户端原型和构建脚本已提供，当前尚未通过 Mac 编译/真机验收，Mac Daemon 的 Keychain 存储适配仍待实现。Windows 无法直接运行原生 `.app`。使用方式与准确验收范围见 [docs/desktop-widget.md](docs/desktop-widget.md)。
 
 ## 本地状态和凭据
 
