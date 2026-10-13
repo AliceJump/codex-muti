@@ -14,6 +14,7 @@ public sealed record RelayResult(string AccountId, int StatusCode, int Attempts,
 
 public interface IResponseSink
 {
+    void SetHeader(string name, string value) { }
     void Start(int statusCode, string contentType);
     ValueTask WriteAsync(ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken);
 }
@@ -22,15 +23,12 @@ public interface IResponseSink
 public sealed class ResponsesRelay(HttpClient http)
 {
     private const int MaximumErrorBytes = 8192;
-    private static readonly HashSet<string> QuotaCodes = new(StringComparer.Ordinal)
-    { "usage_limit_reached", "quota_exhausted", "insufficient_quota", "subscription_sharing_usage_limit_exceeded" };
-    private static readonly HashSet<string> AuthCodes = new(StringComparer.Ordinal)
-    { "invalid_api_key", "invalid_token", "token_expired", "authentication_error", "unauthorized" };
 
     public async Task<RelayResult> ForwardAsync(
         ReadOnlyMemory<byte> body, string contentType, IReadOnlyList<ModelLease> candidates,
         IReadOnlyDictionary<string, string> headers, IResponseSink sink, CancellationToken cancellationToken,
-        Action<ModelLease, string>? rejected = null, Action<ModelLease, bool>? attempt = null, Action<ModelLease>? completed = null)
+        Action<ModelLease, string>? rejected = null, Action<ModelLease, bool>? attempt = null, Action<ModelLease>? completed = null,
+        Action<ModelLease, ModelError>? classified = null, Func<ModelError, ModelError>? exhausted = null)
     {
         if (candidates.Count == 0) throw new ArgumentException("No candidate accounts.", nameof(candidates));
         if (candidates.Select(x => x.AccountId).Distinct(StringComparer.Ordinal).Count() != candidates.Count)
@@ -66,16 +64,19 @@ public sealed class ResponsesRelay(HttpClient http)
                 if (!response.IsSuccessStatusCode)
                 {
                     var error = await ReadBoundedErrorAsync(response, cancellationToken);
-                    var reason = ClassifyRejection(response.StatusCode, error);
-                    if (reason is "quota_rejected" or "auth_rejected") rejected?.Invoke(lease, reason);
-                    if (!committed && index + 1 < candidates.Count && reason is "quota_rejected" or "auth_rejected") continue;
+                    var advice = response.Headers.TryGetValues("Retry-After", out var values) ? values.Take(2).ToArray() : [];
+                    var mapped = ModelErrors.FromUpstream(response.StatusCode, error, advice.Length == 1 ? advice[0] : null);
+                    var reason = mapped.FailoverReason ?? "unknown_rejection";
+                    classified?.Invoke(lease, mapped);
+                    if (mapped.FailoverReason is not null) rejected?.Invoke(lease, reason);
+                    if (!committed && index + 1 < candidates.Count && mapped.FailoverReason is not null) continue;
                     // Never send upstream error bodies: they can echo prompts or credentials.
-                    var safeError = JsonSerializer.SerializeToUtf8Bytes(new { error = new
-                    { type = "proxy_upstream_error", code = reason, message = "The upstream model request was rejected." } });
-                    sink.Start(status, "application/json");
+                    if (mapped.FailoverReason is not null && exhausted is not null) mapped = exhausted(mapped);
+                    if (mapped.RetryAfter is not null) sink.SetHeader("Retry-After", mapped.RetryAfter);
+                    sink.Start(mapped.Status, "application/json");
                     committed = true;
-                    await sink.WriteAsync(safeError, cancellationToken);
-                    return new(lease.AccountId, status, index + 1, committed, reason);
+                    await sink.WriteAsync(mapped.Body(), cancellationToken);
+                    return new(lease.AccountId, mapped.Status, index + 1, committed, reason);
                 }
                 await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
                 byte[]? initialBytes = null;
@@ -113,7 +114,7 @@ public sealed class ResponsesRelay(HttpClient http)
                         HeaderNames(response), upstreamType, "not_inspected");
                 }
                 var buffer = new byte[16 * 1024];
-                var events = new RejectionEvents(lease, rejected, completed);
+                var events = new RejectionEvents(lease, rejected, completed, classified);
                 try
                 {
                     if (initialBytes is not null)
@@ -157,7 +158,7 @@ public sealed class ResponsesRelay(HttpClient http)
     }
     // Bounded metadata observer. Oversized frames are skipped, never retained or reconstructed.
     // A response.failed can exclude the account for future requests; this never opens replay.
-    private sealed class RejectionEvents(ModelLease lease, Action<ModelLease, string>? observer, Action<ModelLease>? completed)
+    private sealed class RejectionEvents(ModelLease lease, Action<ModelLease, string>? observer, Action<ModelLease>? completed, Action<ModelLease, ModelError>? classified)
     {
         private readonly MemoryStream line = new();
         private readonly MemoryStream data = new();
@@ -200,8 +201,13 @@ public sealed class ResponsesRelay(HttpClient http)
                 foreach (var field in new[] { "code", "type" })
                 {
                     if (!error.TryGetProperty(field, out var code) || code.ValueKind != JsonValueKind.String) continue;
-                    var reason = QuotaCodes.Contains(code.GetString()!) ? "quota_rejected" : AuthCodes.Contains(code.GetString()!) ? "auth_rejected" : null;
-                    if (reason is not null) { reported = true; observer?.Invoke(lease, reason); return; }
+                    var reason = ModelErrors.FailoverReason(code.GetString());
+                    if (reason is not null)
+                    {
+                        var mapped = ModelErrors.FromUpstream(reason == "auth_rejected" ? HttpStatusCode.Unauthorized : HttpStatusCode.TooManyRequests,
+                            JsonSerializer.SerializeToUtf8Bytes(new { error }), null);
+                        reported = true; classified?.Invoke(lease, mapped); observer?.Invoke(lease, reason); return;
+                    }
                 }
             }
             catch (JsonException) { }
@@ -256,22 +262,5 @@ public sealed class ResponsesRelay(HttpClient http)
         catch (IOException) { return []; }
         catch (HttpRequestException) { return []; }
         return count > MaximumErrorBytes ? [] : bytes[..count];
-    }
-    private static string ClassifyRejection(HttpStatusCode status, byte[] body)
-    {
-        try
-        {
-            using var json = JsonDocument.Parse(body);
-            if (json.RootElement.ValueKind != JsonValueKind.Object || !json.RootElement.TryGetProperty("error", out var error) || error.ValueKind != JsonValueKind.Object) return "unknown_rejection";
-            foreach (var field in new[] { "code", "type" })
-            {
-                if (!error.TryGetProperty(field, out var value) || value.ValueKind != JsonValueKind.String) continue;
-                var code = value.GetString()!;
-                if (status == HttpStatusCode.TooManyRequests && QuotaCodes.Contains(code)) return "quota_rejected";
-                if (status == HttpStatusCode.Unauthorized && AuthCodes.Contains(code)) return "auth_rejected";
-            }
-        }
-        catch (JsonException) { }
-        return "unknown_rejection";
     }
 }

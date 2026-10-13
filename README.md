@@ -58,7 +58,7 @@ openai_base_url = "http://127.0.0.1:3210/v1"
 
 模型入口接受账户池中任一原生登录的当前 access token，或只读核对 Daemon 的 `CODEX_HOME/auth.json` 中当前 ChatGPT 登录。现有文件由官方 Codex 维护，代理不导入、复制、刷新或写入该登录。请求入口认证和账户选择独立；实际上游账户仍由 sticky 调度决定。此只读适配目前针对官方 file 存储；keyring/ephemeral 中的其他 grant 没有自动读取支持。
 
-原生客户端的 WebSocket 探测返回 426，让 Codex 回落到 HTTP/SSE；`/v1/models` 返回原生模型目录。Codex 请求 `/v1/models?client_version=...` 时，Daemon 优先转发该查询参数到上游 `backend-api/codex/models`，使选择器目录与当前 CLI 一致（例如 `gpt-6.1-sol`）；无查询参数时回退到启动时解析的本机 `codex --version`，也可通过 `CODEX_POOL_CLIENT_VERSION=0.162.1` 手动指定，失败则回退到已验证的 `0.157.1`。升级 CLI 后建议重启 Daemon。支持原生请求的 zstd 压缩，解压正文和解码窗口均限制为 32 MiB，解压后原样转发 JSON 字节。官方/native 登录凭据仅能调用这些模型接口，控制 API 继续使用本地密钥或 Dashboard 安全会话。模型调用仍受账户额度和切换阈值约束，两个账户均不可用时返回 503。验收范围见 [docs/local-provider-acceptance.md](docs/local-provider-acceptance.md)。
+原生客户端的 WebSocket 探测返回 426，让 Codex 回落到 HTTP/SSE；`/v1/models` 返回原生模型目录。Codex 请求 `/v1/models?client_version=...` 时，Daemon 优先转发该查询参数到上游 `backend-api/codex/models`，使选择器目录与当前 CLI 一致（例如 `gpt-6.1-sol`）；无查询参数时回退到启动时解析的本机 `codex --version`，也可通过 `CODEX_POOL_CLIENT_VERSION=0.162.1` 手动指定，失败则回退到已验证的 `0.157.1`。升级 CLI 后建议重启 Daemon。支持原生请求的 zstd 压缩，解压正文和解码窗口均限制为 32 MiB，解压后原样转发 JSON 字节。官方/native 登录凭据仅能调用这些模型接口，控制 API 继续使用本地密钥或 Dashboard 安全会话。模型调用仍受账户额度和切换阈值约束。单账户明确额度/认证失败先标记并尝试可用备用账户；全部参与账户不可用时按额度、授权、阈值或混合原因返回终止错误，不再统一返回 503。详见 [错误与账户池汇总](docs/model-errors.md)。验收范围见 [docs/local-provider-acceptance.md](docs/local-provider-acceptance.md)。
 
 ## 桌面小组件
 

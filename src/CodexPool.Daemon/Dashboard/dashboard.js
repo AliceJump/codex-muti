@@ -2,6 +2,7 @@
 const $ = id => document.getElementById(id);
 let csrf = '', state = null, busy = false, lastActiveId = null, switchReady = false;
 const states = {active:'使用中',standby:'待命',paused:'已暂停',draining:'Drain',disabled:'已禁用',cooldown:'冷却中'};
+const availabilityReasons={quota_exhausted:'额度耗尽',auth_unavailable:'需要重新授权',access_unavailable:'套餐不包含模型权限',auth_temporarily_unavailable:'授权暂时不可用',configuration_unavailable:'账户配置不可用','5h_threshold':'达到 5h 切换阈值',weekly_threshold:'达到周切换阈值',cooldown:'冷却中',disabled:'已禁用',paused:'已暂停',draining:'排空中'};
 const reasons = {'manual':'手动切换','5h_threshold':'达到 5h 阈值','weekly_threshold':'达到 Weekly 阈值',cooldown:'额度 / 认证冷却',disabled:'账户已禁用',paused:'账户已暂停',draining:'账户 Drain',auth_unavailable:'授权不可用',safe_precommit_failover:'请求发送前安全切换',quota_rejected:'明确额度拒绝',auth_rejected:'明确授权拒绝',no_active_account:'初始选择'};
 const text = (tag, value, cls) => { const el = document.createElement(tag); el.textContent = value; if(cls) el.className=cls; return el; };
 function notice(message) { $('notice').textContent=message; $('notice').hidden=!message; }
@@ -28,6 +29,7 @@ function render(s) {
     if(a.active)card.append(text('span','✓','check-mark'));
     head.append(text('strong',a.name),text('span',states[a.state]||a.state,'badge'));card.append(head);const meta=text('div','','meta');meta.append(text('span',a.plan||'Plan 待确认'),text('span',`授权：${a.auth}`));card.append(meta);
     if(canActivate&&!a.active){card.classList.add('selectable');card.addEventListener('click',e=>{if(e.target.closest('.controls')||e.target.closest('button'))return;action(`/accounts/${a.id}/activate`);});}
+    const access=s.accountAvailability?.find(x=>x.accountId===a.id);if(access?.reason)card.append(text('small',`模型访问：${availabilityReasons[access.reason]||'暂不可用'}`));
     const usage=s.usage.find(u=>u.accountId===a.id);for(const [kind,label] of [['5h','5h'],['weekly','Weekly']]){const row=text('div','','quota'),w=usage?.windows?.find(w=>w.kind===kind),qhead=text('div','','quota-head');const remaining=w?Number(w.remainingPercent):null;const tone=remainingTone(remaining);qhead.append(text('span',label),text('b',w?`剩 ${remaining.toFixed(0)}%`:'待确认'));row.append(qhead);if(w){const bar=document.createElement('progress');bar.max=100;bar.value=Math.max(0,Math.min(100,remaining));bar.className=tone?`quota-${tone}`:'';bar.setAttribute('aria-label',`${label}剩余 ${remaining.toFixed(0)}%`);row.append(bar,text('small',`${reset(w.resetAt)} 后重置`));}card.append(row);}
     card.append(text('small',usage?.updatedAt?`更新于 ${new Date(usage.updatedAt).toLocaleTimeString()}${Date.now()-Date.parse(usage.updatedAt)>120000?' · 数据已过期':''}`:'额度来源待验证'));
     const controls=text('div','','controls');for(const [op,label] of [[a.paused?'resume':'pause',a.paused?'恢复':'暂停'],[a.drain?'undrain':'drain',a.drain?'取消 Drain':'Drain'],[a.enabled?'disable':'enable',a.enabled?'禁用':'启用']]){const button=text('button',label);button.onclick=()=>action(`/accounts/${a.id}/${op}`);controls.append(button);}
