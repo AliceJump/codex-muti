@@ -43,6 +43,7 @@ try
     var auth = new OAuth(http, vault); var relay = new ResponsesRelay(modelHttp);
     var nativeLogin = new NativeLogin(vault, auth, directory);
     var quota = new Quota(http, auth, vault);
+    var statistics = new UsageStatistics(directory);
     var recent = new ConcurrentQueue<object>();
     var inFlight = new ConcurrentDictionary<string, int>();
     var boundaryProbe = args.Contains("--live-boundary-probe", StringComparer.Ordinal);
@@ -87,7 +88,7 @@ try
             else { context.Response.StatusCode = 503; await context.Response.WriteAsJsonAsync(new { error = new { code = ex.Code } }); }
         }
         catch (NoEligibleAccountException)
-        { if (!context.Response.HasStarted) { var error = pool.Unavailable(); context.Response.StatusCode = error.Status; context.Response.ContentType = "application/json"; if (error.RetryAfter is not null) context.Response.Headers["Retry-After"] = error.RetryAfter; await context.Response.Body.WriteAsync(error.Body(), context.RequestAborted); } else context.Abort(); }
+        { if (!context.Response.HasStarted) { var error = pool.Unavailable(model: context.Items["quotaModel"] as string); context.Response.StatusCode = error.Status; context.Response.ContentType = "application/json"; if (error.RetryAfter is not null) context.Response.Headers["Retry-After"] = error.RetryAfter; await context.Response.Body.WriteAsync(error.Body(), context.RequestAborted); } else context.Abort(); }
         catch (JsonException)
         { if (!context.Response.HasStarted) { context.Response.StatusCode = 400; await context.Response.WriteAsJsonAsync(new { error = new { code = "invalid_json" } }); } else context.Abort(); }
         catch (RequestBodyFailure ex)
@@ -98,8 +99,9 @@ try
     app.MapGet("/health", () => new { status = "running", stage = "acceptance", automaticSwitching = pool.Settings.AutoSwitch });
     object Status() => new { activeAccountId = vault.ActiveId, stage = "acceptance", automaticSwitching = pool.Settings.AutoSwitch, settings = pool.Settings,
         boundaryProbe, distinctUsers = vault.DistinctUsers, nativeDistinctUsers = vault.NativeDistinctUsers, liveMigrationValidated = false, quotaSource = "per_registration", accounts = vault.Views(auth.Health), accountAvailability = pool.Availability(),
-        nativeLoginAttempts = nativeLogin.PublicAttempts, usage = quota.Views, inFlightRequests = inFlight.ToArray(), recentRequests = recent.ToArray(), recentSwitches = pool.History };
+        nativeLoginAttempts = nativeLogin.PublicAttempts, usage = quota.Views, tokenStatistics = statistics.View(), inFlightRequests = inFlight.ToArray(), recentRequests = recent.ToArray(), recentSwitches = pool.History };
     app.MapGet("/status", () => Status());
+    app.MapGet("/statistics", () => statistics.View());
     app.MapGet("/events", (HttpContext context) => events.StreamAsync(context, Status));
     app.MapGet("/browser-session", (HttpContext context) => browsers.Find(context) is { } session
         ? Results.Ok(new { csrf = session.Csrf }) : Results.Unauthorized());
@@ -254,7 +256,9 @@ try
         if (json.TryGetProperty("previous_response_id", out var previous) && previous.ValueKind != JsonValueKind.Null
             || json.TryGetProperty("conversation", out var conversation) && conversation.ValueKind != JsonValueKind.Null)
         { context.Response.StatusCode = 400; await context.Response.WriteAsJsonAsync(new { error = new { code = "server_continuation_unsupported" } }); return; }
-        using var reservation = pool.ReserveModelRequest();
+        var requestedModel = modelValue.GetString()!;
+        context.Items["quotaModel"] = requestedModel;
+        using var reservation = pool.ReserveModelRequest(requestedModel);
         var selection = reservation.Selection;
         var candidates = await pool.PrepareAsync(reservation, context.RequestAborted);
         var account = candidates[0];
@@ -274,6 +278,7 @@ try
         RelayResult result;
         var sink = new WebSink(context); var attemptedAccount = account.AccountId; var attemptCount = 0;
         var upstreamCompleted = false;
+        ResponseTokenUsage? tokenUsage = null;
         var rejections = new List<object>(); string? failoverReason = null;
         try
         {
@@ -284,16 +289,22 @@ try
                     if (entering) { attemptedAccount = lease.AccountId; attemptCount++; }
                     inFlight.AddOrUpdate(lease.AccountId, entering ? 1 : 0, (_, count) => Math.Max(0, count + (entering ? 1 : -1)));
                 }, lease => { upstreamCompleted = true; pool.RecordSuccess(lease.AccountId); },
-                (lease, error) => pool.RecordFailure(lease.AccountId, error), error => pool.Unavailable(error, reservation.CandidateIds.ToArray(), reservation.AutoSwitch));
+                (lease, error) => pool.RecordFailure(lease.AccountId, error), error => pool.Unavailable(error, reservation.CandidateIds.ToArray(), reservation.AutoSwitch, requestedModel),
+                (_, value) => tokenUsage = value);
         }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
         { result = new(attemptedAccount, upstreamCompleted ? 200 : context.RequestAborted.IsCancellationRequested ? 499 : 504, attemptCount, sink.Started,
             upstreamCompleted ? "completed_client_disconnect" : context.RequestAborted.IsCancellationRequested ? "client_cancelled" : "request_deadline"); }
-        pool.Complete(selection, result, failoverReason);
+        finally
+        {
+            // Account admission/control persistence errors must not erase observed consumption.
+            if (attemptCount > 0) statistics.Record(attemptedAccount, modelValue.GetString()!, tokenUsage);
+        }
+        pool.Complete(selection, result, failoverReason, requestedModel);
         if (headers.TryGetValue("session_id", out var completedSession)) sessionOwners[Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(completedSession)))] = result.AccountId;
         recent.Enqueue(new { timestamp = DateTimeOffset.UtcNow, requestId, account = result.AccountId, model = modelValue.GetString(),
             durationMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds, status = result.StatusCode, result.Outcome, result.Attempts,
-            failover = result.Attempts > 1, failoverReason, rejections,
+            failover = result.Attempts > 1, failoverReason, rejections, tokenUsage,
             inputItemCount = input.GetArrayLength(), encryptedItemCount = input.EnumerateArray().Count(x => x.TryGetProperty("encrypted_content", out _)),
             toolResultCount = input.EnumerateArray().Count(x => x.TryGetProperty("type", out var type) && type.GetString() == "function_call_output"),
             upstreamHeaderNames = result.UpstreamHeaderNames, upstreamContentType = result.UpstreamContentType, payloadKind = result.PayloadKind, prefixShape = result.PrefixShape });
@@ -305,6 +316,13 @@ try
     app.MapFallback(() => Results.NotFound(new { error = new { code = "endpoint_not_supported_in_phase0" } }));
     Console.WriteLine("Codex Pool listening at http://127.0.0.1:3210 (live migration acceptance gate applies).");
     var eventTask = events.RunAsync(Status, app.Lifetime.ApplicationStopping);
+    var statisticsTask = Task.Run(async () =>
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
+        try { while (await timer.WaitForNextTickAsync(app.Lifetime.ApplicationStopping)) statistics.Flush(); }
+        catch (OperationCanceledException) when (app.Lifetime.ApplicationStopping.IsCancellationRequested) { }
+        finally { statistics.Flush(); }
+    });
     var quotaTask = Task.Run(async () =>
     {
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(30));
@@ -320,7 +338,9 @@ try
         }
         catch (OperationCanceledException) when (app.Lifetime.ApplicationStopping.IsCancellationRequested) { }
     });
-    await app.RunAsync(); await Task.WhenAll(eventTask, quotaTask); return 0;
+    await app.RunAsync(); await Task.WhenAll(eventTask, quotaTask, statisticsTask);
+    // ApplicationStopping occurs before Kestrel drains its accepted requests.
+    statistics.Flush(); return 0;
 }
 catch { Console.Error.WriteLine("Daemon failed to start or stopped unexpectedly. Check port 3210 and single-instance ownership."); return 1; }
 

@@ -11,7 +11,7 @@ namespace CodexPool.Floating;
 internal static class CapsuleLayout
 {
     internal static Border Account(string name, string status, string tooltip, bool active, bool selectable,
-        Brush foreground, Brush accent, Brush edge, AccountElements? shared = null, string? five = null, string? week = null)
+        Brush foreground, Brush accent, Brush edge, AccountElements? shared = null, IReadOnlyList<DisplayQuotaWindow>? windows = null)
     {
         var textColor = !selectable ? SystemColors.GrayTextBrush : active ? Brushes.White : foreground;
         shared ??= new AccountElements();
@@ -21,16 +21,16 @@ internal static class CapsuleLayout
         shared.Name.FontWeight = FontWeights.Normal; shared.Name.Foreground = textColor;
         shared.Name.TextTrimming = TextTrimming.CharacterEllipsis;
         body.Children.Add(shared.Name);
-        if (five is not null && week is not null)
+        if (windows is { Count: > 0 })
         {
-            var quota = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal, Margin = new Thickness(0, 2, 0, 0) };
-            shared.FiveValue.Text = five; shared.WeekValue.Text = week;
-            foreach (var part in new[] { shared.FiveHeading, shared.FiveValue, shared.WeekHeading, shared.WeekValue })
-            { part.FontSize = 10; part.Foreground = textColor; part.Opacity = .75; }
-            shared.FiveHeading.Margin = shared.WeekHeading.Margin = new Thickness(0, 0, 3, 0);
-            quota.Children.Add(shared.FiveHeading); quota.Children.Add(shared.FiveValue);
-            quota.Children.Add(new TextBlock { Text = " · ", FontSize = 10, Foreground = textColor, Opacity = .75 });
-            quota.Children.Add(shared.WeekHeading); quota.Children.Add(shared.WeekValue);
+            var quota = new WrapPanel { MaxWidth = 240, Margin = new Thickness(0, 2, 0, 0) };
+            foreach (var window in windows)
+            {
+                var row = shared.Window(window); row.Heading.Text = window.Label; row.Value.Text = QuotaDisplay.Percent(window);
+                foreach (var part in new[] { row.Heading, row.Value }) { part.FontSize = 10; part.Foreground = textColor; part.Opacity = .75; }
+                var pair = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal, Margin = new Thickness(0, 0, 6, 0) };
+                row.Heading.Margin = new Thickness(0, 0, 3, 0); pair.Children.Add(row.Heading); pair.Children.Add(row.Value); quota.Children.Add(pair);
+            }
             body.Children.Add(quota);
         }
         else body.Children.Add(new TextBlock { Text = status, FontSize = 10, Foreground = textColor, Opacity = .75, Margin = new Thickness(0, 2, 0, 0) });

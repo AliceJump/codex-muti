@@ -28,7 +28,8 @@ public sealed class ResponsesRelay(HttpClient http)
         ReadOnlyMemory<byte> body, string contentType, IReadOnlyList<ModelLease> candidates,
         IReadOnlyDictionary<string, string> headers, IResponseSink sink, CancellationToken cancellationToken,
         Action<ModelLease, string>? rejected = null, Action<ModelLease, bool>? attempt = null, Action<ModelLease>? completed = null,
-        Action<ModelLease, ModelError>? classified = null, Func<ModelError, ModelError>? exhausted = null)
+        Action<ModelLease, ModelError>? classified = null, Func<ModelError, ModelError>? exhausted = null,
+        Action<ModelLease, ResponseTokenUsage>? usage = null)
     {
         if (candidates.Count == 0) throw new ArgumentException("No candidate accounts.", nameof(candidates));
         if (candidates.Select(x => x.AccountId).Distinct(StringComparer.Ordinal).Count() != candidates.Count)
@@ -115,10 +116,12 @@ public sealed class ResponsesRelay(HttpClient http)
                 }
                 var buffer = new byte[16 * 1024];
                 var events = new RejectionEvents(lease, rejected, completed, classified);
+                using var tokens = new ResponseUsageObserver(usage is null ? null : value => usage(lease, value));
                 try
                 {
                     if (initialBytes is not null)
                     {
+                        tokens.Feed(initialBytes);
                         sink.Start(status, "text/event-stream"); committed = true;
                         await sink.WriteAsync(initialBytes, cancellationToken);
                         events.Feed(initialBytes);
@@ -127,6 +130,8 @@ public sealed class ResponsesRelay(HttpClient http)
                     {
                         var count = await stream.ReadAsync(buffer, cancellationToken);
                         if (count == 0) break;
+                        // Upstream consumption can be reported even when the client disconnects on this write.
+                        tokens.Feed(buffer.AsSpan(0, count));
                         if (!committed)
                         {
                             sink.Start(status, "text/event-stream");

@@ -1,0 +1,44 @@
+using System.Text.Json;
+using CodexPool.Core;
+
+namespace CodexPool.Floating;
+
+internal sealed record DisplayQuotaWindow(string Key, string Kind, string Label, JsonElement Window, double? Remaining);
+internal static class QuotaDisplay
+{
+    internal static bool Fresh(JsonElement quota) => quota.ValueKind == JsonValueKind.Object
+        && quota.TryGetProperty("updatedAt", out var updated) && updated.ValueKind == JsonValueKind.String && updated.TryGetDateTimeOffset(out var at)
+        && DateTimeOffset.UtcNow - at <= TimeSpan.FromMinutes(2) && at <= DateTimeOffset.UtcNow.AddSeconds(30);
+    internal static DisplayQuotaWindow[] Windows(JsonElement quota)
+    {
+        if (quota.ValueKind != JsonValueKind.Object || !quota.TryGetProperty("windows", out var windows) || windows.ValueKind != JsonValueKind.Array) return [];
+        var fresh = Fresh(quota);
+        return windows.EnumerateArray().Select((w, index) =>
+        {
+            var kind = w.GetProperty("kind").GetString() ?? "window";
+            int? seconds = w.TryGetProperty("windowSeconds", out var length) && length.ValueKind == JsonValueKind.Number && length.TryGetInt32(out var value) ? value
+                : kind == "5h" ? 18000 : kind == "weekly" ? 604800 : null;
+            var family = w.TryGetProperty("limitId", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() : "codex";
+            var label = QuotaLabels.Duration(seconds);
+            if (family != "codex") label = (w.TryGetProperty("limitName", out var name) && name.ValueKind == JsonValueKind.String ? name.GetString() : "附加额度") + " · " + label;
+            double? remaining = fresh && w.TryGetProperty("resetAt", out var reset) && reset.ValueKind == JsonValueKind.String && reset.TryGetDateTimeOffset(out var at) && at > DateTimeOffset.UtcNow
+                ? w.TryGetProperty("remainingPercent", out var amount) && amount.ValueKind == JsonValueKind.Number && amount.TryGetDouble(out var percent) && double.IsFinite(percent) ? Math.Clamp(percent, 0, 100) : null : null;
+            return new DisplayQuotaWindow(family + ":" + kind + ":" + seconds + ":" + index, kind, label, w, remaining);
+        }).ToArray();
+    }
+    internal static string State(JsonElement quota)
+    {
+        if (!Fresh(quota)) return "额度未知或已过期";
+        if (quota.TryGetProperty("credits", out var credits) && credits.ValueKind == JsonValueKind.Object)
+        {
+            if (credits.TryGetProperty("unlimited", out var unlimited) && unlimited.ValueKind == JsonValueKind.True) return "Credits 无额度上限";
+            if (credits.TryGetProperty("balance", out var balance) && balance.ValueKind == JsonValueKind.Number) return "Credits " + balance.GetDecimal().ToString("0.##");
+            if (credits.TryGetProperty("hasCredits", out var has) && has.ValueKind is JsonValueKind.True or JsonValueKind.False) return has.GetBoolean() ? "Credits 可用" : "Credits 不可用";
+        }
+        return quota.TryGetProperty("windowState", out var state) && state.GetString() == "not_reported" ? "未提供固定额度窗口" : "额度窗口未知";
+    }
+    internal static bool AllowsContinuation(JsonElement quota) => Fresh(quota) &&
+        (quota.TryGetProperty("allowed", out var allowed) && allowed.ValueKind == JsonValueKind.True
+        || quota.TryGetProperty("creditsAvailable", out var credit) && credit.ValueKind == JsonValueKind.True);
+    internal static string Percent(DisplayQuotaWindow w) => w.Remaining is { } value ? value.ToString("0") + "%" : "—";
+}

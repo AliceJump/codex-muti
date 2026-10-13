@@ -2,8 +2,14 @@ namespace CodexPool.Core;
 
 public sealed record PoolAccount(string Id, bool Enabled = true, bool Paused = false, bool Draining = false,
     bool AuthReady = true, DateTimeOffset? CooldownUntil = null, double? FiveHourUsed = null,
-    double? WeeklyUsed = null, DateTimeOffset? QuotaUpdatedAt = null);
-public sealed record PoolSettings(bool AutoSwitch = false, double FiveHourThreshold = 95, double WeeklyThreshold = 95);
+    double? WeeklyUsed = null, DateTimeOffset? QuotaUpdatedAt = null, IReadOnlyList<RoutingQuotaWindow>? Windows = null);
+public sealed record RoutingQuotaWindow(int? WindowSeconds, double UsedPercent, DateTimeOffset? ResetAt);
+public sealed record PoolSettings(bool AutoSwitch = false, double FiveHourThreshold = 95, double WeeklyThreshold = 95, double? WindowThreshold = null)
+{
+    // Preserve saved legacy values until the user saves the single common threshold.
+    public double Threshold(int? seconds) => WindowThreshold ?? (seconds == 18000 ? FiveHourThreshold
+        : seconds == 604800 ? WeeklyThreshold : Math.Min(FiveHourThreshold, WeeklyThreshold));
+}
 public sealed record AccountSelection(string AccountId, long Epoch, string? SwitchReason);
 public sealed record AccountSwitch(DateTimeOffset At, string? From, string To, string Reason, long Epoch);
 
@@ -69,6 +75,7 @@ public sealed class StickyScheduler(string? activeId, Action<string>? persistSel
     public static void Validate(PoolSettings settings)
     {
         if (!double.IsFinite(settings.FiveHourThreshold) || !double.IsFinite(settings.WeeklyThreshold)
+            || settings.WindowThreshold is { } threshold && (!double.IsFinite(threshold) || threshold is <= 0 or > 100)
             || settings.FiveHourThreshold is <= 0 or > 100 || settings.WeeklyThreshold is <= 0 or > 100)
             throw new ArgumentException("Thresholds must be finite values greater than 0 and at most 100.");
     }
@@ -78,6 +85,9 @@ public sealed class StickyScheduler(string? activeId, Action<string>? persistSel
         if (!settings.AutoSwitch) return null;
         if (account.QuotaUpdatedAt is { } updated && now - updated <= TimeSpan.FromMinutes(2) && updated <= now.AddSeconds(30))
         {
+            if (account.Windows is not null)
+                return account.Windows.Any(w => double.IsFinite(w.UsedPercent) && w.UsedPercent is >= 0 and <= 100
+                    && w.ResetAt > now && w.UsedPercent >= settings.Threshold(w.WindowSeconds)) ? "quota_threshold" : null;
             if (account.FiveHourUsed >= settings.FiveHourThreshold) return "5h_threshold";
             if (account.WeeklyUsed >= settings.WeeklyThreshold) return "weekly_threshold";
         }

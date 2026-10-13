@@ -29,7 +29,7 @@ public static class PoolAvailability
             return new(429, "usage_not_included", "usage_not_included", "参与调度的账户套餐均不包含此模型的使用权限。");
         if (participating.All(x => x.Reason == "auth_temporarily_unavailable"))
             return new(503, "server_is_overloaded", "server_is_overloaded", "各账户授权服务暂时不可用，请稍后再试。", RetryAfter: "30");
-        if (participating.Any(x => x.Reason is "5h_threshold" or "weekly_threshold"))
+        if (participating.Any(x => x.Reason is "quota_threshold" or "5h_threshold" or "weekly_threshold"))
             return ModelError.Terminal("account_pool_threshold_reached", "当前切换阈值下没有可用账户，请在 Codex Pool 检查各账户状态与阈值。");
         return ModelError.Terminal("account_pool_unavailable", "账户池因额度、授权、套餐权限或冷却等不同原因暂不可用，请在 Codex Pool 查看每个账户。");
     }

@@ -4,8 +4,19 @@ using System.Text.RegularExpressions;
 
 namespace CodexPool.Daemon;
 
-public sealed record QuotaWindow(string Kind, int WindowSeconds, double UsedPercent, double RemainingPercent, DateTimeOffset ResetAt);
-public sealed record QuotaSnapshot(string AccountId, string Source, string? Plan, DateTimeOffset UpdatedAt, IReadOnlyList<QuotaWindow> Windows);
+public sealed record QuotaWindow(string Kind, int? WindowSeconds, double UsedPercent, double RemainingPercent, DateTimeOffset? ResetAt,
+    string LimitId = "codex", string? Model = null, string? LimitName = null);
+public sealed record QuotaCredits(bool HasCredits, bool Unlimited, decimal? Balance);
+public sealed record QuotaSnapshot(string AccountId, string Source, string? Plan, DateTimeOffset UpdatedAt, IReadOnlyList<QuotaWindow> Windows,
+    bool? Allowed = null, bool? LimitReached = null, QuotaCredits? Credits = null, bool? SpendControlReached = null,
+    string WindowState = "unknown")
+{
+    public bool Fresh(DateTimeOffset now) => now - UpdatedAt <= TimeSpan.FromMinutes(2) && UpdatedAt <= now.AddSeconds(30);
+    public IEnumerable<QuotaWindow> Applicable(string? model) => Windows.Where(w => w.LimitId == "codex" || model is not null && w.Model == model);
+    public bool CreditsAvailable => Credits is { HasCredits: true } or { Unlimited: true };
+    public IEnumerable<QuotaWindow> RoutingWindows(string? model, DateTimeOffset now) => Applicable(model).Where(w => w.ResetAt > now
+        && !(w.LimitId == "codex" && w.UsedPercent >= 100 && (Allowed == true || CreditsAvailable)));
+}
 public sealed class Quota(HttpClient http, OAuth auth, Vault vault)
 {
     private readonly ConcurrentDictionary<string, QuotaSnapshot> snapshots = new(vault.Quotas.Select(x => new KeyValuePair<string, QuotaSnapshot>(x.AccountId, x)));
@@ -45,19 +56,64 @@ public sealed class Quota(HttpClient http, OAuth auth, Vault vault)
         string? plan = null;
         if (root.TryGetProperty("plan_type", out var planValue) && planValue.ValueKind == JsonValueKind.String
             && Regex.IsMatch(planValue.GetString()!, "^[a-zA-Z0-9_-]{1,80}$")) plan = planValue.GetString();
-        var windows = new List<QuotaWindow>();
-        if (root.TryGetProperty("rate_limit", out var limit) && limit.ValueKind == JsonValueKind.Object)
+        static bool? Bool(JsonElement value, string field) => value.TryGetProperty(field, out var item)
+            && item.ValueKind is JsonValueKind.True or JsonValueKind.False ? item.GetBoolean() : null;
+        static string? SafeName(JsonElement value, string field) => value.TryGetProperty(field, out var item) && item.ValueKind == JsonValueKind.String
+            && Regex.IsMatch(item.GetString()!, "^[a-zA-Z0-9._:/-]{1,128}$") ? item.GetString() : null;
+        var windows = new List<QuotaWindow>(); var malformed = false;
+        void AddWindows(JsonElement limit, string limitId, string? model = null, string? name = null)
         {
-            foreach (var field in new[] { "primary_window", "secondary_window" })
+            foreach (var field in limit.EnumerateObject().Where(p => Regex.IsMatch(p.Name, "^[a-zA-Z0-9_]{1,64}_window$")).Take(64).Select(p => p.Name))
             {
-                if (!limit.TryGetProperty(field, out var window) || window.ValueKind != JsonValueKind.Object) continue;
-                if (!window.TryGetProperty("used_percent", out var usedValue) || usedValue.ValueKind != JsonValueKind.Number || !usedValue.TryGetDouble(out var used) || !double.IsFinite(used) || used < 0 || used > 100
-                    || !window.TryGetProperty("limit_window_seconds", out var durationValue) || durationValue.ValueKind != JsonValueKind.Number || !durationValue.TryGetInt32(out var duration) || duration <= 0
-                    || !window.TryGetProperty("reset_at", out var resetValue) || resetValue.ValueKind != JsonValueKind.Number || !resetValue.TryGetInt64(out var reset)) continue;
-                if (reset < 0 || reset > 253402300799) continue;
-                windows.Add(new(duration == 18000 ? "5h" : duration == 604800 ? "weekly" : field, duration, used, 100 - used, DateTimeOffset.FromUnixTimeSeconds(reset)));
+                if (!limit.TryGetProperty(field, out var window) || window.ValueKind == JsonValueKind.Null) continue;
+                if (window.ValueKind != JsonValueKind.Object || !window.TryGetProperty("used_percent", out var usedValue)
+                    || usedValue.ValueKind != JsonValueKind.Number || !usedValue.TryGetDouble(out var used) || !double.IsFinite(used) || used < 0 || used > 100)
+                { malformed = true; continue; }
+                int? duration = null; DateTimeOffset? reset = null;
+                if (window.TryGetProperty("limit_window_seconds", out var durationValue) && durationValue.ValueKind != JsonValueKind.Null)
+                {
+                    if (durationValue.ValueKind != JsonValueKind.Number || !durationValue.TryGetInt32(out var seconds) || seconds <= 0)
+                    { malformed = true; continue; }
+                    duration = seconds;
+                }
+                if (window.TryGetProperty("reset_at", out var resetValue) && resetValue.ValueKind != JsonValueKind.Null)
+                {
+                    if (resetValue.ValueKind != JsonValueKind.Number || !resetValue.TryGetInt64(out var epoch) || epoch < 0 || epoch > 253402300799)
+                    { malformed = true; continue; }
+                    reset = DateTimeOffset.FromUnixTimeSeconds(epoch);
+                }
+                windows.Add(new(duration == 18000 ? "5h" : duration == 604800 ? "weekly" : field, duration, used, 100 - used, reset, limitId, model, name));
             }
         }
-        return new(id, "native_codex_usage", plan, DateTimeOffset.UtcNow, windows);
+        bool? allowed = null; bool? reached = null;
+        if (root.TryGetProperty("rate_limit", out var baseLimit) && baseLimit.ValueKind == JsonValueKind.Object)
+        { allowed = Bool(baseLimit, "allowed"); reached = Bool(baseLimit, "limit_reached"); AddWindows(baseLimit, "codex"); }
+        if (root.TryGetProperty("additional_rate_limits", out var additional) && additional.ValueKind == JsonValueKind.Array)
+        {
+            var index = 0;
+            foreach (var family in additional.EnumerateArray().Take(64))
+            {
+                if (family.ValueKind != JsonValueKind.Object || !family.TryGetProperty("rate_limit", out var limit) || limit.ValueKind != JsonValueKind.Object) continue;
+                // Preserve a distinct identity even if upstream repeats a feature name.
+                AddWindows(limit, "additional_" + index++, SafeName(family, "normal_model_slug") ?? SafeName(family, "normal_model"), SafeName(family, "limit_name") ?? SafeName(family, "metered_feature"));
+            }
+        }
+        QuotaCredits? credits = null;
+        if (root.TryGetProperty("credits", out var creditValue) && creditValue.ValueKind == JsonValueKind.Object
+            && Bool(creditValue, "has_credits") is { } hasCredits && Bool(creditValue, "unlimited") is { } unlimited)
+        {
+            decimal? balance = null;
+            if (creditValue.TryGetProperty("balance", out var amount))
+            {
+                if (amount.ValueKind == JsonValueKind.String && decimal.TryParse(amount.GetString(), System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var textBalance) && textBalance >= 0) balance = textBalance;
+                else if (amount.ValueKind == JsonValueKind.Number && amount.TryGetDecimal(out var numberBalance) && numberBalance >= 0) balance = numberBalance;
+            }
+            credits = new(hasCredits, unlimited, balance);
+        }
+        var spendReached = root.TryGetProperty("spend_control", out var spend) && spend.ValueKind == JsonValueKind.Object ? Bool(spend, "reached") : null;
+        // A missing window is never evidence of unlimited use. Only explicit availability makes a no-window response usable as such.
+        var state = windows.Count > 0 ? "reported" : malformed ? "unknown" : allowed == true || credits is { HasCredits: true } or { Unlimited: true } ? "not_reported" : "unknown";
+        return new(id, "native_codex_usage", plan, DateTimeOffset.UtcNow, windows, allowed, reached, credits, spendReached, state);
     }
 }
