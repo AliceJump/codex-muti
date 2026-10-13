@@ -17,12 +17,13 @@ internal sealed class AccountElements
     internal TextBlock WeekValue { get; } = new();
     internal TextBlock Plan { get; } = new();
     internal TextBlock Updated { get; } = new();
+    internal TextBlock Tokens { get; } = new();
     internal TextBlock FiveReset { get; } = new();
     internal TextBlock WeekReset { get; } = new();
     internal ProgressBar FiveTrack { get; } = new();
     internal ProgressBar WeekTrack { get; } = new();
     internal IEnumerable<FrameworkElement> Parts => new FrameworkElement[]
-        { Name, FiveHeading, FiveValue, WeekHeading, WeekValue, Plan, Updated, FiveReset, WeekReset, FiveTrack, WeekTrack };
+        { Name, FiveHeading, FiveValue, WeekHeading, WeekValue, Plan, Updated, Tokens, FiveReset, WeekReset, FiveTrack, WeekTrack };
     internal void Detach()
     {
         if (Card.Parent is Panel parent) parent.Children.Remove(Card);

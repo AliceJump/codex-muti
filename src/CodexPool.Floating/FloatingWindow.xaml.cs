@@ -243,19 +243,17 @@ public partial class FloatingWindow : Window
                 };
             }
             var usage = state.GetProperty("usage").EnumerateArray().FirstOrDefault(x => x.GetProperty("accountId").GetString() == id);
-            JsonElement Window(string kind) => usage.ValueKind == JsonValueKind.Object && usage.TryGetProperty("windows", out var windows)
-                ? windows.EnumerateArray().FirstOrDefault(x => x.GetProperty("kind").GetString() == kind) : default;
+            var freshUsage = usage.ValueKind == JsonValueKind.Object && usage.TryGetProperty("updatedAt", out var quotaUpdated)
+                && quotaUpdated.TryGetDateTimeOffset(out var quotaDate) && DateTimeOffset.UtcNow - quotaDate <= TimeSpan.FromMinutes(2)
+                && quotaDate <= DateTimeOffset.UtcNow.AddSeconds(30);
+            JsonElement Window(string kind) => freshUsage && usage.TryGetProperty("windows", out var windows)
+                ? windows.EnumerateArray().FirstOrDefault(x => x.GetProperty("kind").GetString() == kind
+                    && x.GetProperty("resetAt").GetDateTimeOffset() > DateTimeOffset.UtcNow) : default;
             var five = Window("5h"); var week = Window("weekly");
             var canActivate = account.GetProperty("enabled").GetBoolean() && !account.GetProperty("paused").GetBoolean() && !account.GetProperty("drain").GetBoolean()
                 && account.GetProperty("state").GetString() != "cooldown" && auth is not ("reauth_required" or "refresh_pending");
             if (capsule)
             {
-                var fresh = usage.ValueKind == JsonValueKind.Object && usage.TryGetProperty("updatedAt", out var capsuleUpdated)
-                    && capsuleUpdated.TryGetDateTimeOffset(out var date) && DateTimeOffset.UtcNow - date <= TimeSpan.FromMinutes(2)
-                    && date <= DateTimeOffset.UtcNow.AddSeconds(30);
-                if (!fresh) { five = default; week = default; }
-                if (five.ValueKind == JsonValueKind.Object && five.GetProperty("resetAt").GetDateTimeOffset() <= DateTimeOffset.UtcNow) five = default;
-                if (week.ValueKind == JsonValueKind.Object && week.GetProperty("resetAt").GetDateTimeOffset() <= DateTimeOffset.UtcNow) week = default;
                 var status = !connected ? "离线" : account.GetProperty("paused").GetBoolean() ? "暂停"
                     : account.GetProperty("drain").GetBoolean() ? "排空"
                     : auth == "reauth_required" ? "需登录" : auth == "refresh_pending" ? "认证中"
@@ -279,6 +277,21 @@ public partial class FloatingWindow : Window
             }
             body.Children.Add(QuotaBar("5h", five, shared.FiveHeading, shared.FiveValue, shared.FiveReset, shared.FiveTrack));
             body.Children.Add(QuotaBar("周", week, shared.WeekHeading, shared.WeekValue, shared.WeekReset, shared.WeekTrack));
+            if (preferences.Mode == 0 && state.TryGetProperty("tokenStatistics", out var statistics)
+                && statistics.TryGetProperty("today", out var today) && today.TryGetProperty("accounts", out var tokenAccounts))
+            {
+                var tokenAccount = tokenAccounts.EnumerateArray().FirstOrDefault(x => x.GetProperty("accountId").GetString() == id);
+                var totals = tokenAccount.ValueKind == JsonValueKind.Object ? tokenAccount.GetProperty("totals") : default;
+                var requests = totals.ValueKind == JsonValueKind.Object ? totals.GetProperty("requests").GetInt64() : 0;
+                var reported = totals.ValueKind == JsonValueKind.Object ? totals.GetProperty("reportedRequests").GetInt64() : 0;
+                var amount = requests > 0 && reported == 0 ? "未报告" : totals.ValueKind == JsonValueKind.Object
+                    ? totals.GetProperty("totalTokens").GetDecimal().ToString("N0") : "0";
+                shared.Tokens.Text = "今日 " + amount + " Token · " + requests + " 个请求";
+                shared.Tokens.ToolTip = "只统计本代理请求，上游已报告 " + reported + "/" + requests + " 个请求；详细统计见 Web 面板。";
+                shared.Tokens.FontSize = 10; shared.Tokens.Opacity = .55;
+                shared.Tokens.Foreground = (System.Windows.Media.Brush)Resources["ForegroundBrush"];
+                shared.Tokens.Margin = new Thickness(0, 7, 0, 0); body.Children.Add(shared.Tokens);
+            }
             if (preferences.Mode == 0 && usage.ValueKind == JsonValueKind.Object && usage.TryGetProperty("updatedAt", out var updated))
             {
                 shared.Updated.Text = "更新 " + updated.GetDateTimeOffset().ToLocalTime().ToString("HH:mm:ss")

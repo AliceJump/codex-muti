@@ -97,6 +97,8 @@ macOS SwiftUI 客户端原型和构建脚本已提供，当前尚未通过 Mac �
 
 `/usage` 对 SIWC 明确返回未知。原生注册使用固定官方源码中的 usage endpoint，按实际窗口时长识别 5h/weekly，保存每账户独立快照并每 30 秒刷新；过期/缺失数据不伪装为 0%。阈值决策只使用新鲜且未过 reset 的窗口。两个原生账户的真实接口已通过；它是版本敏感的私有 Codex 接口。
 
+Web 提供今日／最近 7 天／累计 Token 统计、账户与模型汇总、每日趋势和请求明细；完整悬浮窗显示账户今日用量。`pool.ps1 statistics` 或本地鉴权的 `/statistics` 可读取同一汇总。数据独立加密保存，缓存／推理是输入／输出子集，缺少上游 usage 显示未报告。仅统计新版本启用后经过代理的请求，详见 [额度与 Token 统计](docs/usage-statistics.md)。
+
 ## 验证
 
 ```powershell

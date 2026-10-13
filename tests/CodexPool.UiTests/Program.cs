@@ -17,7 +17,7 @@ internal static class Program
         void Run(string name, Action test)
         {
             try { test(); Console.WriteLine("PASS " + name); }
-            catch (Exception ex) { failed++; Console.WriteLine("FAIL " + name + " " + ex.GetType().Name + ": " + ex.Message); }
+            catch (Exception ex) { failed++; Console.WriteLine("FAIL " + name + " " + ex.GetType().Name + ": " + ex.Message); Console.WriteLine(ex.StackTrace); }
         }
         Run("Either quota window exhausted marks the account, unknown alone does not", () =>
         {
@@ -158,7 +158,66 @@ internal static class Program
             }
             finally { Environment.SetEnvironmentVariable("CODEX_POOL_DATA_DIR", previous); }
         });
-        Console.WriteLine($"{7 - failed}/7 passed; no shown windows, credentials, real tray registration or proxy processes");
+        Run("Full account cards show reported token totals and distinguish missing usage", () =>
+        {
+            var previous = Environment.GetEnvironmentVariable("CODEX_POOL_DATA_DIR");
+            Environment.SetEnvironmentVariable("CODEX_POOL_DATA_DIR", System.IO.Path.GetFullPath(".research/ui-statistics-fixture"));
+            try
+            {
+                var window = new FloatingWindow();
+                const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+                var render = typeof(FloatingWindow).GetMethod("Render", flags)!;
+                foreach (var reported in new[] { 0, 1 })
+                {
+                    var state = JsonSerializer.SerializeToElement(new
+                    {
+                        automaticSwitching = false, inFlightRequests = Array.Empty<object>(), usage = Array.Empty<object>(),
+                        accounts = new[] { new { id = "a", name = "测试账户", active = true, enabled = true, paused = false, drain = false, state = "active", auth = "ready", plan = "Plus" } },
+                        tokenStatistics = new { today = new { accounts = new[] { new { accountId = "a", totals = new { requests = 2, reportedRequests = reported, totalTokens = 150 } } } } }
+                    });
+                    render.Invoke(window, new object[] { state });
+                    var current = ((Dictionary<string, AccountElements>)typeof(FloatingWindow).GetField("accountElements", flags)!.GetValue(window)!)["a"];
+                    Check(current.Tokens.Text == "今日 " + (reported == 0 ? "未报告" : 150.ToString("N0")) + " Token · 2 个请求");
+                    var surface = (Border)window.FindName("Surface");
+                    surface.Measure(new Size(window.Width, double.PositiveInfinity)); surface.Arrange(new Rect(surface.DesiredSize));
+                    Check(surface.IsAncestorOf(current.Tokens));
+                    Check(current.Tokens.ToolTip!.ToString()!.Contains(reported + "/2"));
+                }
+                typeof(FloatingWindow).GetField("preferences", flags)!.SetValue(window, new WindowPreferences(Mode: 2));
+                var last = (JsonElement?)typeof(FloatingWindow).GetField("snapshot", flags)!.GetValue(window);
+                render.Invoke(window, new object[] { last!.Value });
+                var elements = ((Dictionary<string, AccountElements>)typeof(FloatingWindow).GetField("accountElements", flags)!.GetValue(window)!)["a"];
+                Check(!((Border)window.FindName("Surface")).IsAncestorOf(elements.Tokens));
+            }
+            finally { Environment.SetEnvironmentVariable("CODEX_POOL_DATA_DIR", previous); }
+        });
+        Run("Every layout treats stale or reset quota as unknown", () =>
+        {
+            var previous = Environment.GetEnvironmentVariable("CODEX_POOL_DATA_DIR");
+            Environment.SetEnvironmentVariable("CODEX_POOL_DATA_DIR", System.IO.Path.GetFullPath(".research/ui-stale-quota-fixture"));
+            try
+            {
+                var window = new FloatingWindow(); const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+                var render = typeof(FloatingWindow).GetMethod("Render", flags)!;
+                foreach (var stale in new[] { true, false })
+                foreach (var mode in new[] { 0, 1, 2 })
+                {
+                    typeof(FloatingWindow).GetField("preferences", flags)!.SetValue(window, new WindowPreferences(Mode: mode));
+                    var state = JsonSerializer.SerializeToElement(new
+                    {
+                        automaticSwitching = false, inFlightRequests = Array.Empty<object>(),
+                        accounts = new[] { new { id = "a", name = "测试账户", active = true, enabled = true, paused = false, drain = false, state = "active", auth = "ready", plan = "Plus" } },
+                        usage = new[] { new { accountId = "a", updatedAt = stale ? DateTimeOffset.UtcNow.AddMinutes(-3) : DateTimeOffset.UtcNow,
+                            windows = new[] { new { kind = "5h", remainingPercent = 66, resetAt = stale ? DateTimeOffset.UtcNow.AddHours(2) : DateTimeOffset.UtcNow.AddSeconds(-1) } } } }
+                    });
+                    render.Invoke(window, new object[] { state });
+                    var account = ((Dictionary<string, AccountElements>)typeof(FloatingWindow).GetField("accountElements", flags)!.GetValue(window)!)["a"];
+                    Check(account.FiveValue.Text == "—");
+                }
+            }
+            finally { Environment.SetEnvironmentVariable("CODEX_POOL_DATA_DIR", previous); }
+        });
+        Console.WriteLine($"{9 - failed}/9 passed; no shown windows, credentials, real tray registration or proxy processes");
         return failed == 0 ? 0 : 1;
     }
     private static void Check(bool value) { if (!value) throw new InvalidOperationException(); }
