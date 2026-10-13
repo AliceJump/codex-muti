@@ -14,7 +14,7 @@ public static class LocalCommands
     {
         if (command == "help")
         {
-            Console.WriteLine("serve [--live-boundary-probe] | login/native-login <label> | dashboard | status | usage | models | settings [on/off 5h weekly] | rename <account-id> <name> | activate/pause/resume/drain/undrain/enable/disable/refresh/delete <account-id> | codex [official arguments]"); return 0;
+            Console.WriteLine("serve [--live-boundary-probe] | login/native-login <label> | dashboard | status | usage | statistics | models | settings [on/off 5h weekly] | rename <account-id> <name> | activate/pause/resume/drain/undrain/enable/disable/refresh/delete <account-id> | codex [official arguments]"); return 0;
         }
         var key = Vault.ReadLocalKey(directory);
         if (command == "model-credential")
@@ -55,7 +55,7 @@ public static class LocalCommands
                 || !uri.AbsolutePath.StartsWith("/dashboard/open/", StringComparison.Ordinal)) throw new InvalidOperationException();
             Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); Console.WriteLine("Dashboard opened in your system browser."); return 0;
         }
-        if (command is "status" or "models" or "usage")
+        if (command is "status" or "models" or "usage" or "statistics")
         {
             using var response = await client.GetAsync("http://127.0.0.1:3210/" + command); response.EnsureSuccessStatusCode();
             Console.WriteLine(await response.Content.ReadAsStringAsync()); return 0;

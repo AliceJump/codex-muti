@@ -37,7 +37,10 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Rename preserves credentials, quotas, controls and active epoch through refresh and reauthorization", AccountRename),
     ("Pool errors describe all accounts and distinguish quota, policy, auth and mixed failures", PoolErrors),
     ("A failed refresh can use B, whole-pool rejection is terminal, ambiguous failures never switch", PreparedPoolErrors),
-    ("Catalog client_version prefers Codex query and keeps visibility=list Sol slugs", CatalogClientVersion)
+    ("Catalog client_version prefers Codex query and keeps visibility=list Sol slugs", CatalogClientVersion),
+    ("Token statistics survive encrypted atomic persistence without touching credentials", UsagePersistence),
+    ("Token statistics aggregate local days, accounts, models and unknown detail coverage", UsagePeriods),
+    ("Concurrent token accounting is exact and failed writes retry without losing history", UsageConcurrency)
 };
 if (args.Length != 0)
 {
@@ -47,7 +50,7 @@ if (args.Length != 0)
 }
 var failed = 0;
 foreach (var (name, run) in tests)
-{ try { await run(); Console.WriteLine("PASS " + name); } catch { failed++; Console.WriteLine("FAIL " + name); } }
+{ try { await run(); Console.WriteLine("PASS " + name); } catch (Exception ex) { failed++; Console.WriteLine("FAIL " + name + " (" + ex.GetType().Name + ")"); Console.WriteLine(ex.StackTrace); } }
 Console.WriteLine($"{tests.Length - failed}/{tests.Length} passed; synthetic credentials only");
 return failed == 0 ? 0 : 1;
 
@@ -79,7 +82,7 @@ async Task OfficialIngress()
         Check(await auth.AcceptsAsync("GET", "/v1/responses", "Bearer " + token, default));
         Check(await auth.AcceptsAsync("GET", "/v1/models", "Bearer " + token, default));
         Check(!await auth.AcceptsAsync("POST", "/v1/models", "Bearer " + token, default));
-        foreach (var path in new[] { "/status", "/settings", "/accounts/A/activate", "/accounts/A/rename", "/dashboard/session", "/v1/other" })
+        foreach (var path in new[] { "/status", "/statistics", "/settings", "/accounts/A/activate", "/accounts/A/rename", "/dashboard/session", "/v1/other" })
             Check(!await auth.AcceptsAsync("POST", path, "Bearer " + token, default));
         Check(!await auth.AcceptsAsync("DELETE", "/v1/responses", "Bearer " + token, default));
     }
@@ -99,6 +102,56 @@ async Task OfficialIngress()
         Check(!await auth.AcceptsAsync("POST", "/v1/responses", "Bearer OFFICIAL-CANARY-2", default));
     }
     Check(vault.Find(b.Id)?.RefreshToken == b.RefreshToken && vault.Find(a.Id)?.RefreshToken == "A-REFRESH-ROTATED");
+}
+Task UsagePersistence()
+{
+    var directory = Path.Combine(root, "usage-persistence"); var vault = Store("usage-persistence"); vault.Add(Account("A"));
+    var credentials = File.ReadAllBytes(Path.Combine(directory, "vault.dpapi"));
+    var usage = new UsageStatistics(directory); usage.Record("A", "gpt-6-luna", new(120, 30, 150, 80, 20)); usage.Flush();
+    var saved = File.ReadAllBytes(Path.Combine(directory, "usage.dpapi"));
+    Check(!Encoding.UTF8.GetString(saved).Contains("gpt-6-luna") && credentials.SequenceEqual(File.ReadAllBytes(Path.Combine(directory, "vault.dpapi"))));
+    var restored = new UsageStatistics(directory).View();
+    Check(restored.Persistence == "ready" && restored.AllTime.Totals == new TokenTotals(1, 1, 120, 30, 150, 80, 20, 1, 1));
+    Check(restored.AllTime.Accounts.Single().AccountId == "A" && restored.AllTime.Models.Single().Model == "gpt-6-luna");
+    saved[^1] ^= 255; File.WriteAllBytes(Path.Combine(directory, "usage.dpapi"), saved);
+    var damaged = new UsageStatistics(directory); Check(damaged.View().Persistence == "unavailable");
+    damaged.Record("A", "gpt-6-luna", new(120, 30, 150, null, null)); damaged.Flush();
+    Check(saved.SequenceEqual(File.ReadAllBytes(Path.Combine(directory, "usage.dpapi"))) && !Directory.EnumerateFiles(directory, "*.tmp").Any());
+    return Task.CompletedTask;
+}
+Task UsagePeriods()
+{
+    var directory = Path.Combine(root, "usage-periods"); Directory.CreateDirectory(directory);
+    var now = DateTimeOffset.Parse("2026-10-13T15:59:59Z");
+    var zone = TimeZoneInfo.CreateCustomTimeZone("Asia/Shanghai-fixture", TimeSpan.FromHours(8), "fixture", "fixture");
+    var stats = new UsageStatistics(directory, zone, () => now);
+    stats.Record("A", "gpt-6-luna", new(120, 30, 150, 80, 20));
+    now = now.AddSeconds(1); stats.Record("B", "gpt-6.1-sol", null); stats.Record("B", "gpt-6.1-sol", new(1, 2, 3, null, null));
+    var view = stats.View();
+    Check(view.Today.Totals.Requests == 2 && view.Today.Totals.UnreportedRequests == 1 && view.Today.Totals.TotalTokens == 3
+        && view.Today.Totals.CachedReportedRequests == 0 && view.Today.Totals.ReasoningReportedRequests == 0);
+    Check(view.Last7Days.Totals.TotalTokens == 153 && view.AllTime.Accounts.Length == 2 && view.AllTime.Models.Length == 2);
+    Check(view.Daily[^1].Day == new DateOnly(2026, 10, 14) && view.Daily[^2].Totals.TotalTokens == 150);
+    now = now.AddDays(95); stats.Record("A", "gpt-6-luna", new(0, 0, 0, 0, 0));
+    view = stats.View(); Check(view.Last7Days.Totals.Requests == 1 && view.AllTime.Totals.Requests == 4);
+    stats.Flush();
+    var restored = new UsageStatistics(directory, zone, () => now).View();
+    Check(restored.AllTime.Totals == view.AllTime.Totals && restored.Daily.Sum(x => x.Totals.Requests) == 1);
+    return Task.CompletedTask;
+}
+Task UsageConcurrency()
+{
+    var directory = Path.Combine(root, "usage-concurrency"); Directory.CreateDirectory(directory);
+    var stats = new UsageStatistics(directory);
+    Parallel.For(0, 1000, i => stats.Record(i % 2 == 0 ? "A" : "B", "gpt-6-luna", i % 4 == 0 ? null : new(120, 30, 150, 80, 20)));
+    var totals = stats.View().AllTime.Totals;
+    Check(totals.Requests == 1000 && totals.ReportedRequests == 750 && totals.TotalTokens == 112500 && totals.CachedInputTokens == 60000);
+    // A failed atomic replacement retains pending memory and cleans the temporary file; the next flush can recover.
+    Directory.CreateDirectory(Path.Combine(directory, "usage.dpapi")); stats.Flush();
+    Check(stats.View().Persistence == "pending" && !Directory.EnumerateFiles(directory, "*.tmp").Any());
+    Directory.Delete(Path.Combine(directory, "usage.dpapi")); stats.Flush();
+    Check(stats.View().Persistence == "ready" && new UsageStatistics(directory).View().AllTime.Totals == totals);
+    return Task.CompletedTask;
 }
 async Task CompressedRequest()
 {
@@ -319,6 +372,7 @@ async Task LocalApi()
         for (var i = 0; i < 50; i++) { try { using var health = await http.GetAsync("http://127.0.0.1:3210/health"); if (health.IsSuccessStatusCode) { ready = true; break; } } catch (HttpRequestException) { } await Task.Delay(100); }
         Check(ready && !server.HasExited);
         using var unauthorized = await http.GetAsync("http://127.0.0.1:3210/status"); Check(unauthorized.StatusCode == HttpStatusCode.Unauthorized);
+        using var unauthorizedStatistics = await http.GetAsync("http://127.0.0.1:3210/statistics"); Check(unauthorizedStatistics.StatusCode == HttpStatusCode.Unauthorized);
         using var official = new HttpClient(new SocketsHttpHandler { UseProxy = false });
         official.DefaultRequestHeaders.Authorization = new("Bearer", "OFFICIAL-HTTP-CANARY");
         using var officialModel = await official.PostAsJsonAsync("http://127.0.0.1:3210/v1/responses", new { });
@@ -329,9 +383,13 @@ async Task LocalApi()
         Check(officialControl.StatusCode == HttpStatusCode.Unauthorized);
         using var officialStatus = await official.GetAsync("http://127.0.0.1:3210/status");
         Check(officialStatus.StatusCode == HttpStatusCode.Unauthorized);
+        using var officialStatistics = await official.GetAsync("http://127.0.0.1:3210/statistics"); Check(officialStatistics.StatusCode == HttpStatusCode.Unauthorized);
         http.DefaultRequestHeaders.Authorization = new("Bearer", vault.LocalKey);
         using var status = await http.GetAsync("http://127.0.0.1:3210/status"); var text = await status.Content.ReadAsStringAsync();
         Check(status.IsSuccessStatusCode && !text.Contains(vault.LocalKey) && !text.Contains("accessToken"));
+        using var statistics = await http.GetAsync("http://127.0.0.1:3210/statistics");
+        using var statsJson = JsonDocument.Parse(await statistics.Content.ReadAsStringAsync());
+        Check(statistics.IsSuccessStatusCode && statsJson.RootElement.GetProperty("allTime").GetProperty("totals").GetProperty("requests").GetInt64() == 0);
         using var ticketResponse = await http.PostAsync("http://127.0.0.1:3210/dashboard/session", null);
         using var ticketJson = JsonDocument.Parse(await ticketResponse.Content.ReadAsStringAsync());
         var ticketUrl = ticketJson.RootElement.GetProperty("url").GetString()!;
@@ -339,6 +397,7 @@ async Task LocalApi()
         using var redeemed = await browser.GetAsync(ticketUrl); Check(redeemed.StatusCode == HttpStatusCode.Redirect);
         using var replay = await browser.GetAsync(ticketUrl); Check(replay.StatusCode == HttpStatusCode.Unauthorized);
         using var browserStatus = await browser.GetAsync("http://127.0.0.1:3210/status"); Check(browserStatus.IsSuccessStatusCode);
+        using var browserStatistics = await browser.GetAsync("http://127.0.0.1:3210/statistics"); Check(browserStatistics.IsSuccessStatusCode);
         using var noCsrf = await browser.PostAsJsonAsync("http://127.0.0.1:3210/settings", new { autoSwitch = false, fiveHourThreshold = 90, weeklyThreshold = 90 });
         Check(noCsrf.StatusCode == HttpStatusCode.Forbidden);
         using var sessionResponse = await browser.GetAsync("http://127.0.0.1:3210/browser-session");
