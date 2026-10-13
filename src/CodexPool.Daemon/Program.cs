@@ -111,6 +111,8 @@ try
         foreach (var account in vault.Accounts.Where(x => x.ProviderKind == "native"))
             try { await quota.RefreshAsync(account.Id, context.RequestAborted); }
             catch (AuthFailure ex) when (ex.Code == "account_not_found") { }
+        // Reuse sticky auto-switch after explicit refresh so exhausted weekly/5h can fail over without waiting for a model request.
+        if (pool.Settings.AutoSwitch) try { pool.Select(); } catch (NoEligibleAccountException) { }
         return quota.Views;
     });
     app.MapPost("/accounts/native-login", async (HttpContext context) =>
