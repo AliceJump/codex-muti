@@ -29,7 +29,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Durable quota, scheduler and manual epoch survive control races", PoolRouting),
     ("Native JSON refresh isolates A/B and accepts omitted replacement refresh token", NativeRefresh),
     ("Official model ingress accepts A/B, tracks rotation, excludes controls and never writes login", OfficialIngress),
-    ("Native zstd request bytes survive decoding; corrupt, unsupported and oversized bodies fail safely", CompressedRequest)
+    ("Native zstd request bytes survive decoding; corrupt, unsupported and oversized bodies fail safely", CompressedRequest),
+    ("Catalog client_version prefers Codex query and keeps visibility=list Sol slugs", CatalogClientVersion)
 };
 if (args.Length != 0)
 {
@@ -358,6 +359,24 @@ async Task LocalApi()
         using var second = Start(); await second.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)); Check(second.ExitCode != 0);
     }
     finally { if (!server.HasExited) { server.Kill(true); await server.WaitForExitAsync(); } }
+}
+async Task CatalogClientVersion()
+{
+    Check(CodexClientVersion.FromQueryOrFallback("0.162.1", "0.157.1") == "0.162.1");
+    Check(CodexClientVersion.FromQueryOrFallback(null, "0.162.1") == "0.162.1");
+    Check(CodexClientVersion.FromQueryOrFallback(" ", CodexClientVersion.Fallback) == CodexClientVersion.Fallback);
+    Check(CodexClientVersion.FromQueryOrFallback("latest", "0.162.1") == "0.162.1");
+    Check(CodexClientVersion.FromQueryOrFallback("../x", "0.162.1") == "0.162.1");
+    Check(CodexClientVersion.IsValid("0.162.1"));
+    Check(!CodexClientVersion.IsValid("0.162"));
+    Check(!CodexClientVersion.IsValid("v0.162.1"));
+    // Upstream-shaped picker payload: visibility=list Sol must survive as a listable slug.
+    using var catalog = JsonDocument.Parse("""{"models":[{"slug":"gpt-6.1-sol","display_name":"GPT-6.1 Sol","visibility":"list"},{"slug":"gpt-hidden","display_name":"Hidden","visibility":"hide"}]}""");
+    var visible = catalog.RootElement.GetProperty("models").EnumerateArray()
+        .Where(x => x.TryGetProperty("visibility", out var visibility) && visibility.GetString() == "list")
+        .Select(x => x.GetProperty("slug").GetString())
+        .ToArray();
+    Check(visible.Contains("gpt-6.1-sol") && !visible.Contains("gpt-hidden"));
 }
 static async Task Rejected<T>(Func<Task<T>> operation) { try { await operation(); throw new InvalidOperationException(); } catch (AuthFailure) { } }
 
