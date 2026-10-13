@@ -4,14 +4,27 @@ import SwiftUI
 // UI client only. OAuth, scheduling and model requests remain in the daemon.
 struct UsageWindow: Decodable, Identifiable {
     let kind: String
+    var windowSeconds: Int? = nil
+    var limitId: String? = nil
+    var limitName: String? = nil
     let usedPercent: Double
-    let resetAt: Date
-    var id: String { kind }
+    let resetAt: Date?
+    var id: String { "\(limitId ?? "codex"):\(kind):\(windowSeconds ?? 0)" }
+    var label: String {
+        let seconds = windowSeconds ?? (kind == "5h" ? 18000 : kind == "weekly" ? 604800 : 0)
+        let duration = seconds <= 0 ? "额度窗口" : seconds == 604800 ? "周" : seconds % 86400 == 0 ? "\(seconds / 86400)d"
+            : seconds % 3600 == 0 ? "\(seconds / 3600)h" : seconds % 60 == 0 ? "\(seconds / 60)m" : "\(seconds)s"
+        return limitId != nil && limitId != "codex" ? "\(limitName ?? "附加额度") · \(duration)" : duration
+    }
 }
+struct UsageCredits: Decodable { let hasCredits: Bool; let unlimited: Bool; let balance: Double? }
 struct AccountUsage: Decodable {
     let accountId: String
     let windows: [UsageWindow]?
     let updatedAt: Date?
+    var credits: UsageCredits? = nil
+    var windowState: String? = nil
+    var fresh: Bool { updatedAt.map { Date().timeIntervalSince($0) <= 120 && $0.timeIntervalSinceNow <= 30 } ?? false }
 }
 struct PoolAccount: Decodable, Identifiable {
     let id: String
@@ -238,12 +251,22 @@ struct WidgetView: View {
             ForEach(store.status.usage.first(where: { $0.accountId == account.id })?.windows ?? []) { window in
                 VStack(spacing: 4) {
                     HStack {
-                        Text(window.kind == "5h" ? "5h" : "周额度")
+                        Text(window.label)
                         Spacer()
-                        Text("\(Int(window.usedPercent))% 已用")
-                        Text(window.resetAt, style: .relative).foregroundStyle(.secondary)
+                        let usage = store.status.usage.first(where: { $0.accountId == account.id })
+                        let valid = usage?.fresh == true && window.resetAt.map { $0 > Date() } == true
+                        Text(valid ? "剩 \(Int(100 - window.usedPercent))%" : "待确认")
+                        if let reset = window.resetAt, valid { Text(reset, style: .relative).foregroundStyle(.secondary) }
                     }.font(.caption)
-                    ProgressView(value: min(100, max(0, window.usedPercent)), total: 100).tint(window.usedPercent >= 95 ? .orange : .blue)
+                    if store.status.usage.first(where: { $0.accountId == account.id })?.fresh == true, let reset = window.resetAt, reset > Date() {
+                        ProgressView(value: min(100, max(0, 100 - window.usedPercent)), total: 100).tint(window.usedPercent >= 85 ? .orange : .blue)
+                    }
+                }
+            }
+            if let usage = store.status.usage.first(where: { $0.accountId == account.id }) {
+                if usage.windows?.isEmpty != false { Text(usage.fresh && usage.windowState == "not_reported" ? "未提供固定额度窗口" : "额度窗口未知").font(.caption) }
+                if let credits = usage.credits {
+                    Text(credits.unlimited ? "Credits 无额度上限" : credits.balance.map { "Credits \($0.formatted())" } ?? (credits.hasCredits ? "Credits 可用" : "Credits 不可用")).font(.caption)
                 }
             }
             if !compact, let date = store.status.usage.first(where: { $0.accountId == account.id })?.updatedAt {

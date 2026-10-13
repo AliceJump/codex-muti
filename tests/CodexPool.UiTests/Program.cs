@@ -217,7 +217,44 @@ internal static class Program
             }
             finally { Environment.SetEnvironmentVariable("CODEX_POOL_DATA_DIR", previous); }
         });
-        Console.WriteLine($"{9 - failed}/9 passed; no shown windows, credentials, real tray registration or proxy processes");
+        Run("All three layouts render 7h, 9h and additional windows without fixed placeholders", () =>
+        {
+            var previous = Environment.GetEnvironmentVariable("CODEX_POOL_DATA_DIR");
+            Environment.SetEnvironmentVariable("CODEX_POOL_DATA_DIR", System.IO.Path.GetFullPath(".research/ui-dynamic-windows"));
+            try
+            {
+                var window = new FloatingWindow(); const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+                typeof(FloatingWindow).GetField("connected", flags)!.SetValue(window, true);
+                var render = typeof(FloatingWindow).GetMethod("Render", flags)!;
+                var state = JsonSerializer.SerializeToElement(new
+                {
+                    automaticSwitching = false, inFlightRequests = Array.Empty<object>(),
+                    accounts = new[] { new { id = "a", name = "测试账户", active = true, enabled = true, paused = false, drain = false, state = "active", auth = "ready", plan = "Pro" } },
+                    usage = new[] { new { accountId = "a", updatedAt = DateTimeOffset.UtcNow, windows = new[] {
+                        new { kind = "primary_window", windowSeconds = 25200, limitId = "codex", remainingPercent = 66, resetAt = DateTimeOffset.UtcNow.AddHours(2) },
+                        new { kind = "secondary_window", windowSeconds = 32400, limitId = "codex", remainingPercent = 95, resetAt = DateTimeOffset.UtcNow.AddHours(3) },
+                        new { kind = "primary_window", windowSeconds = 3600, limitId = "additional_0", remainingPercent = 40, resetAt = DateTimeOffset.UtcNow.AddHours(1) } } } }
+                });
+                foreach (var mode in new[] { 0, 1, 2 })
+                {
+                    typeof(FloatingWindow).GetField("preferences", flags)!.SetValue(window, new WindowPreferences(Mode: mode)); render.Invoke(window, new object[] { state });
+                    var account = ((Dictionary<string, AccountElements>)typeof(FloatingWindow).GetField("accountElements", flags)!.GetValue(window)!)["a"];
+                    var surface = (Border)window.FindName("Surface"); surface.Measure(new Size(window.Width, double.PositiveInfinity)); surface.Arrange(new Rect(surface.DesiredSize));
+                    Check(account.Windows.Count == 3 && account.Windows.Values.Select(x => x.Heading.Text).SequenceEqual(new[] { "7h", "9h", "附加额度 · 1h" }));
+                    Check(account.Windows.Values.Select(x => x.Value.Text).SequenceEqual(new[] { "66%", "95%", "40%" }));
+                    foreach (var row in account.Windows.Values)
+                        if (!surface.IsAncestorOf(row.Value)) throw new InvalidOperationException("missing window in layout " + mode + ": " + row.Heading.Text);
+                    if (surface.IsAncestorOf(account.FiveValue) || surface.IsAncestorOf(account.WeekValue)) throw new InvalidOperationException("fixed placeholder in layout " + mode);
+                }
+                var none = JsonSerializer.SerializeToElement(new { accountId = "a", updatedAt = DateTimeOffset.UtcNow, windows = Array.Empty<object>(),
+                    windowState = "not_reported", credits = new { hasCredits = true, unlimited = false, balance = 12.5 } });
+                Check(QuotaDisplay.Windows(none).Length == 0 && QuotaDisplay.State(none).StartsWith("Credits "));
+                var optional = JsonSerializer.SerializeToElement(new { updatedAt = DateTimeOffset.UtcNow, windows = new[] { new { kind = "primary_window", windowSeconds = (int?)null, resetAt = (DateTimeOffset?)null, remainingPercent = 20 } } });
+                Check(QuotaDisplay.Windows(optional).Single().Remaining is null && QuotaDisplay.Windows(optional).Single().Label == "额度窗口");
+            }
+            finally { Environment.SetEnvironmentVariable("CODEX_POOL_DATA_DIR", previous); }
+        });
+        Console.WriteLine($"{10 - failed}/10 passed; no shown windows, credentials, real tray registration or proxy processes");
         return failed == 0 ? 0 : 1;
     }
     private static void Check(bool value) { if (!value) throw new InvalidOperationException(); }

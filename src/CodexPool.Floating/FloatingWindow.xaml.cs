@@ -243,13 +243,9 @@ public partial class FloatingWindow : Window
                 };
             }
             var usage = state.GetProperty("usage").EnumerateArray().FirstOrDefault(x => x.GetProperty("accountId").GetString() == id);
-            var freshUsage = usage.ValueKind == JsonValueKind.Object && usage.TryGetProperty("updatedAt", out var quotaUpdated)
-                && quotaUpdated.TryGetDateTimeOffset(out var quotaDate) && DateTimeOffset.UtcNow - quotaDate <= TimeSpan.FromMinutes(2)
-                && quotaDate <= DateTimeOffset.UtcNow.AddSeconds(30);
-            JsonElement Window(string kind) => freshUsage && usage.TryGetProperty("windows", out var windows)
-                ? windows.EnumerateArray().FirstOrDefault(x => x.GetProperty("kind").GetString() == kind
-                    && x.GetProperty("resetAt").GetDateTimeOffset() > DateTimeOffset.UtcNow) : default;
-            var five = Window("5h"); var week = Window("weekly");
+            var quotaWindows = QuotaDisplay.Windows(usage);
+            var keys = quotaWindows.Select(x => x.Key).ToHashSet(StringComparer.Ordinal);
+            foreach (var key in shared.Windows.Keys.Where(key => !keys.Contains(key)).ToArray()) shared.Windows.Remove(key);
             var canActivate = account.GetProperty("enabled").GetBoolean() && !account.GetProperty("paused").GetBoolean() && !account.GetProperty("drain").GetBoolean()
                 && account.GetProperty("state").GetString() != "cooldown" && auth is not ("reauth_required" or "refresh_pending");
             if (capsule)
@@ -258,7 +254,7 @@ public partial class FloatingWindow : Window
                     : account.GetProperty("drain").GetBoolean() ? "排空"
                     : auth == "reauth_required" ? "需登录" : auth == "refresh_pending" ? "认证中"
                     : !canActivate ? AccountState(account.GetProperty("state").GetString()) : null;
-                wrap.Children.Add(CapsuleChip(id, name, five, week, active, canActivate, status, accent, edge, shared));
+                wrap.Children.Add(CapsuleChip(name, quotaWindows, QuotaDisplay.State(usage), active, canActivate, status, accent, edge, shared));
                 continue;
             }
             var body = new StackPanel { Margin = new Thickness(0, 0, active ? 18 : 0, 0) };
@@ -275,8 +271,9 @@ public partial class FloatingWindow : Window
                 shared.Plan.Foreground = (System.Windows.Media.Brush)Resources["ForegroundBrush"];
                 shared.Plan.Margin = new Thickness(0, 4, 0, 2); body.Children.Add(shared.Plan);
             }
-            body.Children.Add(QuotaBar("5h", five, shared.FiveHeading, shared.FiveValue, shared.FiveReset, shared.FiveTrack));
-            body.Children.Add(QuotaBar("周", week, shared.WeekHeading, shared.WeekValue, shared.WeekReset, shared.WeekTrack));
+            foreach (var window in quotaWindows) body.Children.Add(QuotaBar(window, shared.Window(window)));
+            if (quotaWindows.Length == 0 || usage.TryGetProperty("credits", out var creditState) && creditState.ValueKind == JsonValueKind.Object)
+                body.Children.Add(Label(QuotaDisplay.State(usage), 10, .6, new Thickness(0, 7, 0, 0)));
             if (preferences.Mode == 0 && state.TryGetProperty("tokenStatistics", out var statistics)
                 && statistics.TryGetProperty("today", out var today) && today.TryGetProperty("accounts", out var tokenAccounts))
             {
@@ -371,21 +368,14 @@ public partial class FloatingWindow : Window
                 var name = account.GetProperty("name").GetString() ?? "Codex Pool";
                 if (name.Length > 20) name = name[..10] + "…" + name[^9..];
                 var quota = snapshot.GetProperty("usage").EnumerateArray().FirstOrDefault(x => x.GetProperty("accountId").GetString() == id);
-                var fresh = quota.ValueKind == JsonValueKind.Object && quota.TryGetProperty("updatedAt", out var updated)
-                    && updated.TryGetDateTimeOffset(out var date) && DateTimeOffset.UtcNow - date <= TimeSpan.FromMinutes(2)
-                    && date <= DateTimeOffset.UtcNow.AddSeconds(30);
-                JsonElement Window(string kind) => fresh && quota.TryGetProperty("windows", out var windows)
-                    ? windows.EnumerateArray().FirstOrDefault(x => x.GetProperty("kind").GetString() == kind
-                        && x.GetProperty("resetAt").GetDateTimeOffset() > DateTimeOffset.UtcNow) : default;
-                var five = Window("5h"); var week = Window("weekly");
-                var fiveRemaining = RemainingValue(five);
-                var weekRemaining = RemainingValue(week);
-                // Icon number: 5h remaining when known, else weekly. Exhausted binding window → X overlay.
-                remaining = fiveRemaining ?? weekRemaining;
-                exhausted = QuotaIndicator.IsExhausted(fiveRemaining, weekRemaining);
-                tooltip = name + "\n5h " + RemainingLabel(five) + " · " + ResetLeft(five)
-                    + "\n周 " + RemainingLabel(week) + " · " + ResetLeft(week);
-                if (!fresh) tooltip = name + "\n额度未知或已过期\n打开面板查看服务状态";
+                var windows = QuotaDisplay.Windows(quota);
+                var accountWindows = windows.Where(w => w.Key.StartsWith("codex:", StringComparison.Ordinal) && w.Remaining is not null
+                    && !(w.Remaining <= 0 && QuotaDisplay.AllowsContinuation(quota))).ToArray();
+                // The icon represents the tightest account-wide window; model-only limits stay in the panel.
+                remaining = accountWindows.Length > 0 ? accountWindows.Min(w => w.Remaining) : null;
+                exhausted = accountWindows.Any(w => w.Remaining <= 0);
+                tooltip = name + (accountWindows.Length == 0 ? "\n" + QuotaDisplay.State(quota)
+                    : "\n" + string.Join("\n", accountWindows.Select(w => w.Label + " " + QuotaDisplay.Percent(w) + " · " + ResetLeft(w.Window))));
             }
             else tooltip = "Codex Pool\n尚未选择账户";
         }
@@ -397,37 +387,20 @@ public partial class FloatingWindow : Window
         tray.Icon = icon; tray.Text = tooltip; trayStateKey = key;
         previous?.Dispose();
     }
-    private static double? RemainingValue(JsonElement window)
-    {
-        if (window.ValueKind != JsonValueKind.Object) return null;
-        if (window.TryGetProperty("remainingPercent", out var remaining) && remaining.TryGetDouble(out var value) && double.IsFinite(value))
-            return Math.Clamp(value, 0, 100);
-        if (window.TryGetProperty("usedPercent", out var used) && used.TryGetDouble(out var usedValue) && double.IsFinite(usedValue))
-            return Math.Clamp(100 - usedValue, 0, 100);
-        return null;
-    }
     private static string AccountState(string? state) => state switch
     {
         "active" => "使用中", "standby" => "待命", "paused" => "已暂停", "draining" => "排空中", "disabled" => "已禁用", "cooldown" => "冷却中", _ => "待确认"
     };
-    private Border CapsuleChip(string id, string name, JsonElement five, JsonElement week, bool active, bool canActivate, string? status, MediaColor accent, System.Windows.Media.Brush edge, AccountElements shared)
+    private Border CapsuleChip(string name, DisplayQuotaWindow[] windows, string quotaState, bool active, bool canActivate, string? status, MediaColor accent, System.Windows.Media.Brush edge, AccountElements shared)
     {
-        var detail = status ?? "5h " + Percent(five) + " · 周 " + Percent(week);
-        var tooltip = name + "\n5h " + RemainingLabel(five) + " · " + ResetLeft(five)
-            + "\n周 " + RemainingLabel(week) + " · " + ResetLeft(week)
+        var detail = status ?? quotaState;
+        var tooltip = name + "\n" + (windows.Length == 0 ? quotaState : string.Join("\n", windows.Select(w => w.Label + " " + QuotaDisplay.Percent(w) + " · " + ResetLeft(w.Window))))
             + (status is null ? "" : "\n" + status)
             + (string.IsNullOrEmpty(Notice.Text) ? "" : "\n" + Notice.Text) + "\nCtrl+M 切换布局";
         var chip = CapsuleLayout.Account(name, detail, tooltip, active, canActivate && connected,
             (System.Windows.Media.Brush)Resources["ForegroundBrush"], new Brush(accent), edge, shared,
-            status is null ? Percent(five) : null, status is null ? Percent(week) : null);
+            status is null ? windows : null);
         return chip;
-    }
-    private static string Percent(JsonElement window) => RemainingValue(window) is { } value ? value.ToString("0") + "%" : "—";
-
-    private static string RemainingLabel(JsonElement window)
-    {
-        var remaining = RemainingValue(window);
-        return remaining is { } value ? "剩 " + value.ToString("0") + "%" : "—";
     }
     private static MediaColor QuotaTone(double? remaining) => remaining switch
     {
@@ -438,28 +411,32 @@ public partial class FloatingWindow : Window
     };
     private static string ResetLeft(JsonElement window)
     {
-        if (window.ValueKind != JsonValueKind.Object) return "待确认";
-        var span = window.GetProperty("resetAt").GetDateTimeOffset() - DateTimeOffset.UtcNow;
+        if (window.ValueKind != JsonValueKind.Object || !window.TryGetProperty("resetAt", out var reset)
+            || reset.ValueKind != JsonValueKind.String || !reset.TryGetDateTimeOffset(out var at)) return "重置时间未知";
+        var span = at - DateTimeOffset.UtcNow;
+        if (span <= TimeSpan.Zero) return "等待新额度";
         return span.TotalDays >= 1 ? $"{(int)span.TotalDays}d {span.Hours}h" : span.TotalHours >= 1 ? $"{(int)span.TotalHours}h {span.Minutes}m" : $"{Math.Max(0, (int)span.TotalMinutes)}m";
     }
     private static TextBlock Label(string? value, double size, double opacity, Thickness margin) => new() { Text = value, FontSize = size, Opacity = opacity, Margin = margin };
-    private StackPanel QuotaBar(string title, JsonElement window, TextBlock heading, TextBlock value, TextBlock reset, ProgressBar track)
+    private StackPanel QuotaBar(DisplayQuotaWindow window, WindowElements row)
     {
         var foreground = (System.Windows.Media.Brush)Resources["ForegroundBrush"];
+        var heading = row.Heading; var value = row.Value; var reset = row.Reset; var track = row.Track;
         var root = new StackPanel { Margin = new Thickness(0, 7, 0, 0) };
         var head = new Grid();
-        head.ColumnDefinitions.Add(new() { Width = new GridLength(42) });
+        head.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
         head.ColumnDefinitions.Add(new()); head.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
-        heading.Text = title; heading.FontSize = 11; heading.Opacity = .65; heading.Foreground = foreground;
+        heading.Text = window.Label; heading.ToolTip = window.Label; heading.MaxWidth = 120; heading.TextTrimming = TextTrimming.CharacterEllipsis;
+        heading.FontSize = 11; heading.Opacity = .65; heading.Foreground = foreground; heading.Margin = new Thickness(0, 0, 8, 0);
         head.Children.Add(heading);
         var amount = new StackPanel { Orientation = Orientation.Horizontal };
         amount.Children.Add(Label("剩 ", 11, 1, new Thickness()));
-        value.Text = Percent(window); value.FontSize = 11; value.Opacity = 1; value.Foreground = foreground;
+        value.Text = QuotaDisplay.Percent(window); value.FontSize = 11; value.Opacity = 1; value.Foreground = foreground;
         amount.Children.Add(value); Grid.SetColumn(amount, 1); head.Children.Add(amount);
-        reset.Text = ResetLeft(window); reset.FontSize = 10; reset.Opacity = .55; reset.Foreground = foreground;
+        reset.Text = window.Remaining is null ? "额度待确认" : ResetLeft(window.Window); reset.FontSize = 10; reset.Opacity = .55; reset.Foreground = foreground;
         Grid.SetColumn(reset, 2); head.Children.Add(reset); root.Children.Add(head);
-        track.Height = 6; track.Minimum = 0; track.Maximum = 100; track.Value = RemainingValue(window) ?? 0;
-        track.Margin = new Thickness(0, 5, 0, 0); track.Foreground = new Brush(QuotaTone(RemainingValue(window)));
+        track.Height = 6; track.Minimum = 0; track.Maximum = 100; track.Value = window.Remaining ?? 0;
+        track.Margin = new Thickness(0, 5, 0, 0); track.Foreground = new Brush(QuotaTone(window.Remaining));
         track.Background = new Brush(MediaColor.FromArgb(45, 135, 150, 170)); track.BorderThickness = new Thickness(0);
         root.Children.Add(track); return root;
     }
