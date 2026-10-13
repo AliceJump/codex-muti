@@ -22,7 +22,7 @@ dotnet run --project src/CodexPool.Daemon --no-launch-profile -- serve
 .\scripts\pool.ps1 widget
 ```
 
-Dashboard 位于 `http://127.0.0.1:3210`，`dashboard` 命令建立短期安全浏览器会话。页面提供账户 Radio、额度、pause/drain/enable、阈值、请求与切换原因；悬浮窗通过 `/events` 同步状态，通过本地 API 切换账户。窗口支持 Acrylic、完整/紧凑/胶囊模式、系统/浅色/深色、置顶、拖动、托盘、`Ctrl+Alt+C`、位置保存、DPI 和工作区钳制。关闭窗口隐藏到托盘；托盘“退出悬浮窗”仅退出 UI，Daemon 继续运行。
+Dashboard 位于 `http://127.0.0.1:3210`，`dashboard` 命令建立短期安全浏览器会话。页面提供账户 Radio、额度、pause/drain/enable、阈值、请求与切换原因；悬浮窗通过 `/events` 同步状态，通过本地 API 切换账户。窗口支持 Acrylic、完整/紧凑/胶囊模式、系统/浅色/深色、置顶、拖动、托盘、`Ctrl+Alt+C`、位置保存、DPI 和工作区钳制。独立悬浮窗的 × 或 Alt+F4 只关闭该 UI；托盘状态面板由独立进程提供，隐藏后可从图标唤醒，Daemon 始终继续运行。
 
 桌面悬浮窗快捷方式（`scripts/open-floating.ps1`）和悬浮窗本身会在代理未运行时自动启动代理，并携带 `--live-boundary-probe`，允许网页开启自动切换。自动切换开关及阈值由 Dashboard 保存，后续启动沿用设置；首次安装仍默认关闭。已有代理会继续运行，启动器不会中断其请求或修改启动模式。此启动方式用于当前用户的迁移实验，完整真实账户验收仍以验收报告为准。
 
@@ -61,6 +61,8 @@ openai_base_url = "http://127.0.0.1:3210/v1"
 原生客户端的 WebSocket 探测返回 426，让 Codex 回落到 HTTP/SSE；`/v1/models` 返回原生模型目录。Codex 请求 `/v1/models?client_version=...` 时，Daemon 优先转发该查询参数到上游 `backend-api/codex/models`，使选择器目录与当前 CLI 一致（例如 `gpt-6.1-sol`）；无查询参数时回退到启动时解析的本机 `codex --version`，也可通过 `CODEX_POOL_CLIENT_VERSION=0.162.1` 手动指定，失败则回退到已验证的 `0.157.1`。升级 CLI 后建议重启 Daemon。支持原生请求的 zstd 压缩，解压正文和解码窗口均限制为 32 MiB，解压后原样转发 JSON 字节。官方/native 登录凭据仅能调用这些模型接口，控制 API 继续使用本地密钥或 Dashboard 安全会话。模型调用仍受账户额度和切换阈值约束，两个账户均不可用时返回 503。验收范围见 [docs/local-provider-acceptance.md](docs/local-provider-acceptance.md)。
 
 ## 桌面小组件
+
+账户名称现在可在 Web 卡片操作区点击 **改名**，也可执行 `pool.ps1 rename <account-id> "新名称"`。改名仅修改显示标签，登录、额度和路由保持不变，详见 [账户改名](docs/account-rename.md)。
 
 手动构建并启动新版本（构建到独立目录，已有代理时保留原进程）：
 
