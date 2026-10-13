@@ -12,7 +12,7 @@
           <Button x:Name="PinButton" Content="○" Click="TogglePin" ToolTip="置顶 / 取消置顶" Visibility="Collapsed" Padding="6,5"/>
           <Button Content="◫" Click="CycleMode" ToolTip="完整 / 紧凑 / 胶囊" Padding="6,5"/>
           <Button Content="◐" Click="CycleTheme" ToolTip="自动 / 浅色 / 深色" Padding="6,5"/>
-          <Button Content="—" Click="HideWindow" ToolTip="隐藏窗口" Padding="6,5"/>
+          <Button x:Name="DismissButton" Content="—" Click="DismissWindow" ToolTip="隐藏窗口" Padding="6,5"/>
         </StackPanel>
       </Grid>
       <Border x:Name="WidgetSummary" Visibility="Collapsed" Padding="12" Margin="0,0,0,12" CornerRadius="12" Background="#1867A2F3">

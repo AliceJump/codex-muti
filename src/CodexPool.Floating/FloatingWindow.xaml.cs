@@ -56,6 +56,8 @@ public partial class FloatingWindow : Window
         WidgetSummary.Visibility = widget ? Visibility.Visible : Visibility.Collapsed;
         WidgetActions.Visibility = widget ? Visibility.Visible : Visibility.Collapsed;
         PinButton.Visibility = Visibility.Collapsed;
+        DismissButton.Content = widget ? "—" : "×";
+        DismissButton.ToolTip = widget ? "隐藏到账户托盘" : "关闭悬浮窗（代理继续运行）";
         HeaderTitle.Text = "Codex Pool";
         PinButton.Content = Topmost ? "●" : "○";
         var shortcut = widget ? "Ctrl+Alt+W" : "Ctrl+Alt+C";
@@ -94,7 +96,7 @@ public partial class FloatingWindow : Window
                 && DwmSetWindowAttribute(handle, 38, ref acrylic, 4) == 0;
             var corners = 2; _ = DwmSetWindowAttribute(handle, 33, ref corners, 4);
             var registered = RegisterHotKey(handle, 1, 0x0001 | 0x0002 | 0x4000, widget ? 0x57u : 0x43u);
-            if (!registered) SetNotice(shortcut + " 已被其他应用使用。可从托盘显示窗口。");
+            if (!registered) SetNotice(shortcut + " 已被其他应用使用。" + (widget ? "可从托盘显示窗口。" : "可再次点击悬浮窗快捷方式显示。"));
             ApplyTheme(); if (!widget) RestorePosition(); _ = WatchAsync(); timer.Start();
         };
         if (widget)
@@ -320,7 +322,7 @@ if (Accounts.Children.Count == 0) Accounts.Children.Add(Label("没有启用的�
                 var weekRemaining = RemainingValue(week);
                 // Icon number: 5h remaining when known, else weekly. Exhausted binding window → X overlay.
                 remaining = fiveRemaining ?? weekRemaining;
-                exhausted = IsExhausted(weekRemaining) || (weekRemaining is null && IsExhausted(fiveRemaining));
+                exhausted = QuotaIndicator.IsExhausted(fiveRemaining, weekRemaining);
                 tooltip = name + "\n5h " + RemainingLabel(five) + " · " + ResetLeft(five)
                     + "\n周 " + RemainingLabel(week) + " · " + ResetLeft(week);
                 if (!fresh) tooltip = name + "\n额度未知或已过期\n打开面板查看服务状态";
@@ -335,7 +337,6 @@ if (Accounts.Children.Count == 0) Accounts.Children.Add(Label("没有启用的�
         tray.Icon = icon; tray.Text = tooltip; trayStateKey = key;
         previous?.Dispose();
     }
-    private static bool IsExhausted(double? remaining) => remaining is { } value && value <= 0.5;
     private static double? RemainingValue(JsonElement window)
     {
         if (window.ValueKind != JsonValueKind.Object) return null;
@@ -433,19 +434,7 @@ if (Accounts.Children.Count == 0) Accounts.Children.Add(Label("没有启用的�
         root.Children.Add(track);
         if (remaining is not null && value > 0.5)
         {
-            var geo = new StreamGeometry();
-            using (var ctx = geo.Open())
-            {
-                var radius = (size - thickness) / 2;
-                var center = new System.Windows.Point(size / 2, size / 2);
-                var startAngle = new System.Windows.Point(center.X, center.Y - radius);
-                var sweep = Math.Clamp(value, 0, 100) / 100.0 * 360.0;
-                var rad = (sweep - 90) * Math.PI / 180.0;
-                var endAngle = new System.Windows.Point(center.X + radius * Math.Cos(rad), center.Y + radius * Math.Sin(rad));
-                ctx.BeginFigure(startAngle, false, false);
-                ctx.ArcTo(endAngle, new System.Windows.Size(radius, radius), 0, sweep > 180, SweepDirection.Clockwise, true, false);
-            }
-            geo.Freeze();
+            var geo = QuotaIndicator.Ring(value, size, thickness);
             root.Children.Add(new System.Windows.Shapes.Path
             {
                 Data = geo,
@@ -596,7 +585,7 @@ if (Accounts.Children.Count == 0) Accounts.Children.Add(Label("没有启用的�
     private void DragHeader(object sender, System.Windows.Input.MouseButtonEventArgs e) { if (!widget && e.LeftButton == System.Windows.Input.MouseButtonState.Pressed) DragMove(); }
     private void CycleMode(object sender, RoutedEventArgs e) { preferences = preferences with { Mode = (preferences.Mode + 1) % 3 }; if (snapshot is { } state) Render(state); SavePosition(); }
     private void CycleTheme(object sender, RoutedEventArgs e) { preferences = preferences with { Theme = (preferences.Theme + 1) % 3 }; ApplyTheme(); SavePosition(); }
-    private void HideWindow(object sender, RoutedEventArgs e) { SavePosition(); Hide(); }
+    private void DismissWindow(object sender, RoutedEventArgs e) { if (widget) { SavePosition(); Hide(); } else Close(); }
     private async void OpenDashboard(object sender, RoutedEventArgs e) => await DashboardAsync();
     private void OpenFloating(object sender, RoutedEventArgs e) => LaunchFloating();
     private async void RefreshQuota(object sender, RoutedEventArgs e) => await RefreshQuotaAsync(notify: true);
@@ -654,7 +643,7 @@ if (Accounts.Children.Count == 0) Accounts.Children.Add(Label("没有启用的�
     }
     private void OnClosing(object? sender, CancelEventArgs e)
     {
-        SavePosition(); if (!exiting) { e.Cancel = true; Hide(); return; }
+        SavePosition(); if (widget && !exiting) { e.Cancel = true; Hide(); return; }
         lifetime.Cancel(); timer.Stop(); SystemEvents.UserPreferenceChanged -= PreferenceChanged;
         _ = UnregisterHotKey(handle, 1);
         if (tray is not null) { tray.Visible = false; tray.Icon?.Dispose(); tray.Dispose(); }

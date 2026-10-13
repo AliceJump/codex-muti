@@ -8,5 +8,6 @@
     <Project Path="tests/CodexPool.Probe/CodexPool.Probe.csproj" />
     <Project Path="tests/CodexPool.SecurityTests/CodexPool.SecurityTests.csproj" />
     <Project Path="tests/CodexPool.Tests/CodexPool.Tests.csproj" />
+    <Project Path="tests/CodexPool.UiTests/CodexPool.UiTests.csproj" />
   </Folder>
 </Solution>
