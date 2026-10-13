@@ -9,6 +9,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Threading;
 using CodexPool.Daemon;
 using Microsoft.Win32;
@@ -28,7 +29,7 @@ public partial class FloatingWindow : Window
         ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodexPool");
     private readonly CancellationTokenSource lifetime = new();
     private readonly HttpClient http = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = Timeout.InfiniteTimeSpan };
-    private readonly Forms.NotifyIcon? tray;
+    private readonly StableTrayIcon? tray;
     private readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromSeconds(20) };
     private WindowPreferences preferences = new();
     private JsonElement? snapshot;
@@ -36,6 +37,7 @@ public partial class FloatingWindow : Window
     private readonly bool widget;
     private readonly string preferencesFile;
     private Forms.Screen? flyoutScreen;
+    private System.Drawing.Rectangle? flyoutAnchor;
     private bool positioningFlyout;
     private string? trayStateKey;
     private string? lastActiveAccountId;
@@ -43,11 +45,23 @@ public partial class FloatingWindow : Window
     private long dismissedAt;
     private System.Drawing.Point dismissedPoint;
     private nint handle;
+    private readonly ScaleTransform revealScale = new(1, 1);
+    private readonly TranslateTransform revealOffset = new();
+    private int shapeGeneration;
+    private bool changingShape;
+    private bool preparingShape;
+    private bool pendingState;
+    private bool backdropSuspended;
+    private readonly Dictionary<string, AccountElements> accountElements = new();
+    private IEnumerable<FrameworkElement> SharedParts => accountElements.Values.SelectMany(x => x.Parts)
+        .Concat(new FrameworkElement[] { Header, Footer, WidgetSummary });
     public FloatingWindow(bool widget = false)
     {
         this.widget = widget;
         preferencesFile = widget ? "widget.json" : "window.json";
         InitializeComponent();
+        var reveal = new TransformGroup(); reveal.Children.Add(revealScale); reveal.Children.Add(revealOffset);
+        Surface.RenderTransform = reveal;
         if (widget) preferences = new(120, 120, Pinned: false);
         try { preferences = JsonSerializer.Deserialize<WindowPreferences>(File.ReadAllText(Path.Combine(directory, preferencesFile))) ?? preferences; } catch { }
         preferences = preferences with { Mode = Math.Clamp(preferences.Mode, 0, 2), Theme = Math.Clamp(preferences.Theme, 0, 2) };
@@ -64,13 +78,18 @@ public partial class FloatingWindow : Window
         // One tray icon only: owned by --tray / widget. Floating window reuses that entry via menu.
         if (widget)
         {
-            tray = new Forms.NotifyIcon { Text = "Codex Pool · 账户状态 · " + shortcut, Icon = CreateIcon(), Visible = true };
+            tray = new StableTrayIcon(CreateIcon(), "Codex Pool · 账户状态 · " + shortcut);
             UpdateTrayQuota(null);
             var menu = new Forms.ContextMenuStrip();
             menu.Items.Add("显示账户面板", null, (_, _) => Dispatcher.Invoke(ToggleVisibility));
             menu.Items.Add("打开悬浮窗", null, (_, _) => Dispatcher.Invoke(LaunchFloating));
             menu.Items.Add("打开 Dashboard", null, (_, _) => Dispatcher.Invoke(async () => await DashboardAsync()));
             menu.Items.Add("刷新额度", null, (_, _) => Dispatcher.Invoke(async () => await RefreshQuotaAsync(notify: true)));
+            menu.Items.Add("任务栏图标显示设置", null, (_, _) => Dispatcher.Invoke(() =>
+            {
+                try { Process.Start(new ProcessStartInfo("ms-settings:taskbar") { UseShellExecute = true }); }
+                catch { SetNotice("请打开 Windows 设置 → 个性化 → 任务栏 → 其他系统托盘图标。"); }
+            }));
             menu.Items.Add("退出托盘面板", null, (_, _) => Dispatcher.Invoke(() => { exiting = true; Close(); }));
             tray.ContextMenuStrip = menu;
             tray.MouseClick += (_, e) =>
@@ -82,11 +101,16 @@ public partial class FloatingWindow : Window
                     // should dismiss the visible flyout, rather than reopen it after Deactivated.
                     var cursor = Forms.Cursor.Position;
                     if (Environment.TickCount64 - dismissedAt < 500 && Math.Abs(cursor.X - dismissedPoint.X) <= 2 && Math.Abs(cursor.Y - dismissedPoint.Y) <= 2) return;
-                    ToggleVisibility();
+                    ToggleVisibility(new System.Drawing.Point(e.X, e.Y));
                 });
             };
         }
         else tray = null;
+        PreviewKeyDown += (_, e) =>
+        {
+            if (e.Key == System.Windows.Input.Key.M && System.Windows.Input.Keyboard.Modifiers == System.Windows.Input.ModifierKeys.Control)
+            { CycleMode(this, new RoutedEventArgs()); e.Handled = true; }
+        };
         SourceInitialized += (_, _) =>
         {
             handle = new WindowInteropHelper(this).Handle;
@@ -110,7 +134,7 @@ public partial class FloatingWindow : Window
         SystemEvents.UserPreferenceChanged += PreferenceChanged;
         ApplyTheme();
     }
-    private void PreferenceChanged(object sender, UserPreferenceChangedEventArgs e) => Dispatcher.BeginInvoke(ApplyTheme);
+    private void PreferenceChanged(object sender, UserPreferenceChangedEventArgs e) => Dispatcher.BeginInvoke(() => { ApplyTheme(); if (snapshot is { } state) Render(state); });
     private nint WindowMessage(nint hwnd, int message, nint wParam, nint lParam, ref bool handled)
     {
         if (message == 0x0312 && wParam == 1) { ToggleVisibility(); handled = true; }
@@ -155,7 +179,8 @@ public partial class FloatingWindow : Window
     private void SetOffline()
     {
         connected = false; Connection.Text = "服务离线 · 正在重新连接"; Accounts.IsEnabled = false;
-        if (widget) UpdateTrayQuota(null);
+        if (snapshot is { } state) Render(state);
+        else if (widget) UpdateTrayQuota(null);
     }
     internal async void ShowFromLauncher()
     {
@@ -166,13 +191,23 @@ public partial class FloatingWindow : Window
     }
     private void Render(JsonElement state)
     {
+        if (changingShape && IsVisible) { snapshot = state; pendingState = true; return; }
+        if (changingShape) StopShapeAnimation();
+        foreach (var elements in accountElements.Values) elements.Detach();
         if (widget) UpdateTrayQuota(connected ? state : null);
         NotifyActiveSwitch(state);
         snapshot = state; Accounts.IsEnabled = !busy && connected; Accounts.Children.Clear();
-        var capsule = preferences.Mode == 2; Width = capsule ? 420 : widget ? 380 : 336;
+        var capsule = preferences.Mode == 2;
+        if (!capsule) SetLayoutWidth(widget ? 380 : 336);
         Header.Visibility = capsule ? Visibility.Collapsed : Visibility.Visible;
-        Surface.Padding = capsule ? new Thickness(14, 10, 8, 10) : new Thickness(18, 14, 18, 14);
-        Footer.Visibility = capsule && !widget ? Visibility.Collapsed : Visibility.Visible;
+        Surface.Padding = capsule ? new Thickness(6, 5, 6, 5) : new Thickness(18, 14, 18, 14);
+        Surface.CornerRadius = new CornerRadius(capsule ? 20 : 16);
+        Surface.ToolTip = capsule ? (connected ? "额度为剩余百分比" : "服务离线 · 正在重新连接")
+            + (string.IsNullOrEmpty(Notice.Text) ? "" : "\n" + Notice.Text)
+            + "\nCtrl+M 切换布局；拖动空白区域移动悬浮窗" : null;
+        Footer.Visibility = capsule ? Visibility.Collapsed : Visibility.Visible;
+        if (capsule) Notice.Visibility = Visibility.Collapsed;
+        else if (!string.IsNullOrEmpty(Notice.Text)) Notice.Visibility = Visibility.Visible;
         WidgetSummary.Visibility = widget && !capsule ? Visibility.Visible : Visibility.Collapsed;
         AutoStatus.Text = state.GetProperty("automaticSwitching").GetBoolean() ? "自动切换 · 开启" : "自动切换 · 关闭";
         if (widget)
@@ -188,25 +223,25 @@ public partial class FloatingWindow : Window
         var wrap = new WrapPanel { ItemHeight = double.NaN };
         if (capsule)
         {
-            // Slim chrome above chips: drag + mode cycle stay out of the account row.
-            var chrome = new DockPanel { Margin = new Thickness(0, 0, 0, 8), LastChildFill = true };
-            var expand = new System.Windows.Controls.Button { Content = "◫", Padding = new Thickness(7, 2, 7, 2), ToolTip = "展开", VerticalAlignment = VerticalAlignment.Center };
-            expand.Click += CycleMode;
-            DockPanel.SetDock(expand, Dock.Right);
-            chrome.Children.Add(expand);
-            var grip = Label("⠿  胶囊", 12, .5, new Thickness(0, 0, 10, 0));
-            grip.Cursor = System.Windows.Input.Cursors.SizeAll;
-            grip.MouseLeftButtonDown += DragHeader;
-            grip.VerticalAlignment = VerticalAlignment.Center;
-            chrome.Children.Add(grip);
-            Accounts.Children.Add(chrome);
             Accounts.Children.Add(wrap);
         }
         foreach (var account in state.GetProperty("accounts").EnumerateArray())
         {
-            if (widget && !account.GetProperty("enabled").GetBoolean() && !account.GetProperty("active").GetBoolean()) continue;
+            if ((widget || capsule) && !account.GetProperty("enabled").GetBoolean() && !account.GetProperty("active").GetBoolean()) continue;
             var id = account.GetProperty("id").GetString()!; var active = account.GetProperty("active").GetBoolean();
             var name = account.GetProperty("name").GetString() ?? "Account"; var auth = account.GetProperty("auth").GetString();
+            if (!accountElements.TryGetValue(id, out var shared))
+            {
+                shared = new AccountElements(); accountElements[id] = shared;
+                var accountId = id;
+                shared.Card.MouseLeftButtonUp += async (_, e) =>
+                {
+                    if (busy || !connected || snapshot is not { } current) return;
+                    var selected = current.GetProperty("accounts").EnumerateArray().FirstOrDefault(x => x.GetProperty("id").GetString() == accountId);
+                    if (selected.ValueKind != JsonValueKind.Object || selected.GetProperty("active").GetBoolean()) return;
+                    e.Handled = true; await ActivateAsync(accountId);
+                };
+            }
             var usage = state.GetProperty("usage").EnumerateArray().FirstOrDefault(x => x.GetProperty("accountId").GetString() == id);
             JsonElement Window(string kind) => usage.ValueKind == JsonValueKind.Object && usage.TryGetProperty("windows", out var windows)
                 ? windows.EnumerateArray().FirstOrDefault(x => x.GetProperty("kind").GetString() == kind) : default;
@@ -215,29 +250,43 @@ public partial class FloatingWindow : Window
                 && account.GetProperty("state").GetString() != "cooldown" && auth is not ("reauth_required" or "refresh_pending");
             if (capsule)
             {
-                wrap.Children.Add(CapsuleChip(id, name, five, week, active, canActivate, accent, edge));
+                var fresh = usage.ValueKind == JsonValueKind.Object && usage.TryGetProperty("updatedAt", out var capsuleUpdated)
+                    && capsuleUpdated.TryGetDateTimeOffset(out var date) && DateTimeOffset.UtcNow - date <= TimeSpan.FromMinutes(2)
+                    && date <= DateTimeOffset.UtcNow.AddSeconds(30);
+                if (!fresh) { five = default; week = default; }
+                if (five.ValueKind == JsonValueKind.Object && five.GetProperty("resetAt").GetDateTimeOffset() <= DateTimeOffset.UtcNow) five = default;
+                if (week.ValueKind == JsonValueKind.Object && week.GetProperty("resetAt").GetDateTimeOffset() <= DateTimeOffset.UtcNow) week = default;
+                var status = !connected ? "离线" : account.GetProperty("paused").GetBoolean() ? "暂停"
+                    : account.GetProperty("drain").GetBoolean() ? "排空"
+                    : auth == "reauth_required" ? "需登录" : auth == "refresh_pending" ? "认证中"
+                    : !canActivate ? AccountState(account.GetProperty("state").GetString()) : null;
+                wrap.Children.Add(CapsuleChip(id, name, five, week, active, canActivate, status, accent, edge, shared));
                 continue;
             }
             var body = new StackPanel { Margin = new Thickness(0, 0, active ? 18 : 0, 0) };
-            body.Children.Add(new TextBlock
-            {
-                Text = name,
-                FontSize = 13,
-                FontWeight = active ? FontWeights.SemiBold : FontWeights.Normal,
-                TextWrapping = TextWrapping.NoWrap,
-                TextTrimming = TextTrimming.CharacterEllipsis
-            });
+            shared.Name.Text = name; shared.Name.FontSize = 13; shared.Name.MaxWidth = double.PositiveInfinity;
+            shared.Name.FontWeight = active ? FontWeights.SemiBold : FontWeights.Normal;
+            shared.Name.Foreground = (System.Windows.Media.Brush)Resources["ForegroundBrush"];
+            shared.Name.TextTrimming = TextTrimming.CharacterEllipsis;
+            body.Children.Add(shared.Name);
             if (preferences.Mode == 0)
             {
                 var status = account.GetProperty("state").GetString();
                 var plan = account.GetProperty("plan").ValueKind == JsonValueKind.String ? account.GetProperty("plan").GetString() : "Plan 待确认";
-                body.Children.Add(Label(plan + " · " + AccountState(status), 11, .55, new Thickness(0, 4, 0, 2)));
+                shared.Plan.Text = plan + " · " + AccountState(status); shared.Plan.FontSize = 11; shared.Plan.Opacity = .55;
+                shared.Plan.Foreground = (System.Windows.Media.Brush)Resources["ForegroundBrush"];
+                shared.Plan.Margin = new Thickness(0, 4, 0, 2); body.Children.Add(shared.Plan);
             }
-            body.Children.Add(QuotaBar("5h", five));
-            body.Children.Add(QuotaBar("Week", week));
+            body.Children.Add(QuotaBar("5h", five, shared.FiveHeading, shared.FiveValue, shared.FiveReset, shared.FiveTrack));
+            body.Children.Add(QuotaBar("周", week, shared.WeekHeading, shared.WeekValue, shared.WeekReset, shared.WeekTrack));
             if (preferences.Mode == 0 && usage.ValueKind == JsonValueKind.Object && usage.TryGetProperty("updatedAt", out var updated))
-                body.Children.Add(Label("更新 " + updated.GetDateTimeOffset().ToLocalTime().ToString("HH:mm:ss")
-                    + (DateTimeOffset.UtcNow - updated.GetDateTimeOffset() > TimeSpan.FromMinutes(2) ? " · 已过期" : ""), 10, .45, new Thickness(0, 6, 0, 0)));
+            {
+                shared.Updated.Text = "更新 " + updated.GetDateTimeOffset().ToLocalTime().ToString("HH:mm:ss")
+                    + (DateTimeOffset.UtcNow - updated.GetDateTimeOffset() > TimeSpan.FromMinutes(2) ? " · 已过期" : "");
+                shared.Updated.FontSize = 10; shared.Updated.Opacity = .45;
+                shared.Updated.Foreground = (System.Windows.Media.Brush)Resources["ForegroundBrush"];
+                shared.Updated.Margin = new Thickness(0, 6, 0, 0); body.Children.Add(shared.Updated);
+            }
             var grid = new Grid();
             grid.Children.Add(body);
             if (active)
@@ -253,31 +302,29 @@ public partial class FloatingWindow : Window
                     Margin = new Thickness(0, -1, 0, 0)
                 });
             }
-            var card = new Border
-            {
-                Child = grid,
-                Padding = new Thickness(12, 10, 12, 10),
-                Margin = new Thickness(0, 0, 0, 10),
-                CornerRadius = new CornerRadius(12),
-                BorderThickness = new Thickness(1.2),
-                BorderBrush = active ? new Brush(MediaColor.FromArgb(200, accent.R, accent.G, accent.B)) : edge,
-                Background = new Brush(active ? MediaColor.FromArgb(48, accent.R, accent.G, accent.B) : MediaColor.FromArgb(32, 135, 150, 170)),
-                Cursor = canActivate || active ? System.Windows.Input.Cursors.Hand : System.Windows.Input.Cursors.Arrow,
-                Opacity = canActivate || active ? 1 : 0.55
-            };
-            if (canActivate && !active)
-            {
-                var accountId = id;
-                card.MouseLeftButtonUp += async (_, e) =>
-                {
-                    if (busy) return;
-                    e.Handled = true;
-                    await ActivateAsync(accountId);
-                };
-            }
+            var card = shared.Card;
+            card.Child = grid; card.Padding = new Thickness(12, 10, 12, 10); card.Margin = new Thickness(0, 0, 0, 10);
+            card.CornerRadius = new CornerRadius(12); card.BorderThickness = new Thickness(1.2);
+            card.BorderBrush = active ? new Brush(MediaColor.FromArgb(200, accent.R, accent.G, accent.B)) : edge;
+            card.Background = new Brush(active ? MediaColor.FromArgb(48, accent.R, accent.G, accent.B) : MediaColor.FromArgb(32, 135, 150, 170));
+            card.Cursor = canActivate || active ? System.Windows.Input.Cursors.Hand : System.Windows.Input.Cursors.Arrow;
+            card.IsEnabled = canActivate; card.Opacity = canActivate || active ? 1 : .55;
             Accounts.Children.Add(card);
         }
-if (Accounts.Children.Count == 0) Accounts.Children.Add(Label("没有启用的账户。请在 Web 面板添加或启用。", 12, .7, new Thickness(0, 12, 0, 12)));
+        if (capsule)
+        {
+            if (wrap.Children.Count == 0) wrap.Children.Add(Label("无可用账户", 12, .7, new Thickness(8, 4, 8, 4)));
+            var screen = widget ? flyoutScreen ?? Forms.Screen.FromPoint(Forms.Cursor.Position) : Forms.Screen.FromHandle(handle);
+            var workWidth = screen.WorkingArea.Width / VisualTreeHelper.GetDpi(this).DpiScaleX;
+            var maxWidth = Math.Min(600, workWidth);
+            var chromeWidth = Surface.Padding.Left + Surface.Padding.Right + 4;
+            wrap.Measure(new System.Windows.Size(Math.Max(0, maxWidth - chromeWidth), double.PositiveInfinity));
+            var capsuleWidth = Math.Ceiling(wrap.DesiredSize.Width + chromeWidth);
+            SetLayoutWidth(Math.Min(maxWidth, capsuleWidth));
+        }
+        else if (Accounts.Children.Count == 0) Accounts.Children.Add(Label("没有启用的账户。请在 Web 面板添加或启用。", 12, .7, new Thickness(0, 12, 0, 12)));
+        var accountIds = state.GetProperty("accounts").EnumerateArray().Select(x => x.GetProperty("id").GetString()).ToHashSet();
+        foreach (var id in accountElements.Keys.Where(x => !accountIds.Contains(x)).ToArray()) accountElements.Remove(id);
     }
     private void NotifyActiveSwitch(JsonElement state)
     {
@@ -350,127 +397,19 @@ if (Accounts.Children.Count == 0) Accounts.Children.Add(Label("没有启用的�
     {
         "active" => "使用中", "standby" => "待命", "paused" => "已暂停", "draining" => "排空中", "disabled" => "已禁用", "cooldown" => "冷却中", _ => "待确认"
     };
-    private Border CapsuleChip(string id, string name, JsonElement five, JsonElement week, bool active, bool canActivate, MediaColor accent, System.Windows.Media.Brush edge)
+    private Border CapsuleChip(string id, string name, JsonElement five, JsonElement week, bool active, bool canActivate, string? status, MediaColor accent, System.Windows.Media.Brush edge, AccountElements shared)
     {
-        var column = new StackPanel { Width = 108 };
-        var titleRow = new Grid { Margin = new Thickness(0, 0, 0, 6) };
-        titleRow.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
-        titleRow.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
-        var title = new TextBlock
-        {
-            Text = name,
-            FontSize = 11,
-            FontWeight = active ? FontWeights.SemiBold : FontWeights.Normal,
-            TextTrimming = TextTrimming.CharacterEllipsis,
-            VerticalAlignment = VerticalAlignment.Center,
-            Foreground = active ? new Brush(MediaColor.FromRgb(255, 255, 255)) : (System.Windows.Media.Brush)Resources["ForegroundBrush"]
-        };
-        titleRow.Children.Add(title);
-        if (active)
-        {
-            var mark = new TextBlock
-            {
-                Text = "✓",
-                FontSize = 12,
-                FontWeight = FontWeights.SemiBold,
-                Margin = new Thickness(4, 0, 0, 0),
-                VerticalAlignment = VerticalAlignment.Center,
-                Foreground = new Brush(MediaColor.FromRgb(255, 255, 255))
-            };
-            Grid.SetColumn(mark, 1);
-            titleRow.Children.Add(mark);
-        }
-        column.Children.Add(titleRow);
-        var gauges = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = System.Windows.HorizontalAlignment.Center };
-        gauges.Children.Add(MiniGauge("5h", five, active));
-        gauges.Children.Add(MiniGauge("W", week, active));
-        column.Children.Add(gauges);
-        var chip = new Border
-        {
-            Child = column,
-            Padding = new Thickness(10, 8, 10, 8),
-            Margin = new Thickness(0, 0, 8, 8),
-            CornerRadius = new CornerRadius(14),
-            BorderThickness = new Thickness(1),
-            BorderBrush = active ? new Brush(MediaColor.FromArgb(220, accent.R, accent.G, accent.B)) : edge,
-            Background = active ? new Brush(accent) : new Brush(MediaColor.FromArgb(40, 135, 150, 170)),
-            Cursor = canActivate || active ? System.Windows.Input.Cursors.Hand : System.Windows.Input.Cursors.Arrow,
-            Opacity = canActivate || active ? 1 : 0.55
-        };
-        if (canActivate && !active)
-        {
-            var accountId = id;
-            chip.MouseLeftButtonUp += async (_, e) =>
-            {
-                if (busy) return;
-                e.Handled = true;
-                await ActivateAsync(accountId);
-            };
-        }
+        var detail = status ?? "5h " + Percent(five) + " · 周 " + Percent(week);
+        var tooltip = name + "\n5h " + RemainingLabel(five) + " · " + ResetLeft(five)
+            + "\n周 " + RemainingLabel(week) + " · " + ResetLeft(week)
+            + (status is null ? "" : "\n" + status)
+            + (string.IsNullOrEmpty(Notice.Text) ? "" : "\n" + Notice.Text) + "\nCtrl+M 切换布局";
+        var chip = CapsuleLayout.Account(name, detail, tooltip, active, canActivate && connected,
+            (System.Windows.Media.Brush)Resources["ForegroundBrush"], new Brush(accent), edge, shared,
+            status is null ? Percent(five) : null, status is null ? Percent(week) : null);
         return chip;
     }
-    private FrameworkElement MiniGauge(string label, JsonElement window, bool activeOnChip)
-    {
-        var remaining = RemainingValue(window);
-        var value = remaining ?? 0;
-        var tone = remaining is null
-            ? (activeOnChip ? MediaColor.FromRgb(255, 255, 255) : MediaColor.FromRgb(150, 161, 177))
-            : activeOnChip && remaining >= 30
-                ? MediaColor.FromRgb(255, 255, 255)
-                : QuotaTone(remaining);
-        const double size = 44;
-        const double thickness = 3.5;
-        var root = new Grid { Width = size + 8, Height = size + 18, Margin = new Thickness(2, 0, 2, 0) };
-        var track = new System.Windows.Shapes.Ellipse
-        {
-            Width = size,
-            Height = size,
-            StrokeThickness = thickness,
-            Stroke = new Brush(activeOnChip ? MediaColor.FromArgb(90, 255, 255, 255) : MediaColor.FromArgb(55, 135, 150, 170)),
-            Fill = System.Windows.Media.Brushes.Transparent,
-            HorizontalAlignment = System.Windows.HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Top
-        };
-        root.Children.Add(track);
-        if (remaining is not null && value > 0.5)
-        {
-            var geo = QuotaIndicator.Ring(value, size, thickness);
-            root.Children.Add(new System.Windows.Shapes.Path
-            {
-                Data = geo,
-                Stroke = new Brush(tone),
-                StrokeThickness = thickness,
-                StrokeStartLineCap = PenLineCap.Round,
-                StrokeEndLineCap = PenLineCap.Round,
-                Width = size,
-                Height = size,
-                HorizontalAlignment = System.Windows.HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Top
-            });
-        }
-        var centerLabel = new TextBlock
-        {
-            Text = remaining is { } r ? r.ToString("0") : "—",
-            FontSize = 11,
-            FontWeight = FontWeights.SemiBold,
-            HorizontalAlignment = System.Windows.HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Top,
-            Margin = new Thickness(0, 12, 0, 0),
-            Foreground = activeOnChip ? new Brush(MediaColor.FromRgb(255, 255, 255)) : (System.Windows.Media.Brush)Resources["ForegroundBrush"]
-        };
-        root.Children.Add(centerLabel);
-        var caption = new TextBlock
-        {
-            Text = label,
-            FontSize = 9,
-            Opacity = 0.7,
-            HorizontalAlignment = System.Windows.HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Bottom,
-            Foreground = activeOnChip ? new Brush(MediaColor.FromRgb(255, 255, 255)) : (System.Windows.Media.Brush)Resources["ForegroundBrush"]
-        };
-        root.Children.Add(caption);
-        return root;
-    }
+    private static string Percent(JsonElement window) => RemainingValue(window) is { } value ? value.ToString("0") + "%" : "—";
 
     private static string RemainingLabel(JsonElement window)
     {
@@ -491,36 +430,25 @@ if (Accounts.Children.Count == 0) Accounts.Children.Add(Label("没有启用的�
         return span.TotalDays >= 1 ? $"{(int)span.TotalDays}d {span.Hours}h" : span.TotalHours >= 1 ? $"{(int)span.TotalHours}h {span.Minutes}m" : $"{Math.Max(0, (int)span.TotalMinutes)}m";
     }
     private static TextBlock Label(string? value, double size, double opacity, Thickness margin) => new() { Text = value, FontSize = size, Opacity = opacity, Margin = margin };
-    private static StackPanel QuotaBar(string title, JsonElement window)
+    private StackPanel QuotaBar(string title, JsonElement window, TextBlock heading, TextBlock value, TextBlock reset, ProgressBar track)
     {
+        var foreground = (System.Windows.Media.Brush)Resources["ForegroundBrush"];
         var root = new StackPanel { Margin = new Thickness(0, 7, 0, 0) };
         var head = new Grid();
         head.ColumnDefinitions.Add(new() { Width = new GridLength(42) });
-        head.ColumnDefinitions.Add(new());
-        head.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
-        var titleLabel = Label(title, 11, .65, new Thickness());
-        head.Children.Add(titleLabel);
-        var remainingLabel = Label(RemainingLabel(window), 11, 1, new Thickness());
-        Grid.SetColumn(remainingLabel, 1);
-        head.Children.Add(remainingLabel);
-        var reset = Label(ResetLeft(window), 10, .55, new Thickness());
-        Grid.SetColumn(reset, 2);
-        head.Children.Add(reset);
-        root.Children.Add(head);
-        var remaining = RemainingValue(window) ?? 0;
-        var tone = QuotaTone(RemainingValue(window));
-        root.Children.Add(new ProgressBar
-        {
-            Height = 6,
-            Minimum = 0,
-            Maximum = 100,
-            Value = remaining,
-            Margin = new Thickness(0, 5, 0, 0),
-            Foreground = new Brush(tone),
-            Background = new Brush(MediaColor.FromArgb(45, 135, 150, 170)),
-            BorderThickness = new Thickness(0)
-        });
-        return root;
+        head.ColumnDefinitions.Add(new()); head.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
+        heading.Text = title; heading.FontSize = 11; heading.Opacity = .65; heading.Foreground = foreground;
+        head.Children.Add(heading);
+        var amount = new StackPanel { Orientation = Orientation.Horizontal };
+        amount.Children.Add(Label("剩 ", 11, 1, new Thickness()));
+        value.Text = Percent(window); value.FontSize = 11; value.Opacity = 1; value.Foreground = foreground;
+        amount.Children.Add(value); Grid.SetColumn(amount, 1); head.Children.Add(amount);
+        reset.Text = ResetLeft(window); reset.FontSize = 10; reset.Opacity = .55; reset.Foreground = foreground;
+        Grid.SetColumn(reset, 2); head.Children.Add(reset); root.Children.Add(head);
+        track.Height = 6; track.Minimum = 0; track.Maximum = 100; track.Value = RemainingValue(window) ?? 0;
+        track.Margin = new Thickness(0, 5, 0, 0); track.Foreground = new Brush(QuotaTone(RemainingValue(window)));
+        track.Background = new Brush(MediaColor.FromArgb(45, 135, 150, 170)); track.BorderThickness = new Thickness(0);
+        root.Children.Add(track); return root;
     }
     private async Task ActivateAsync(string id)
     {
@@ -530,7 +458,7 @@ if (Accounts.Children.Count == 0) Accounts.Children.Add(Label("没有启用的�
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token); timeout.CancelAfter(TimeSpan.FromSeconds(10));
             using var response = await http.PostAsJsonAsync("http://127.0.0.1:3210/accounts/" + id + "/activate", new { }, timeout.Token);
             if (!response.IsSuccessStatusCode) { SetNotice("账户切换未完成。请在 Dashboard 检查账户状态。"); }
-            else Notice.Visibility = Visibility.Collapsed;
+            else { Notice.Text = ""; Notice.Visibility = Visibility.Collapsed; }
             using var status = await http.GetAsync("http://127.0.0.1:3210/status", timeout.Token); status.EnsureSuccessStatusCode();
             using var json = JsonDocument.Parse(await status.Content.ReadAsStringAsync(timeout.Token)); Render(json.RootElement.Clone());
         }
@@ -562,10 +490,7 @@ if (Accounts.Children.Count == 0) Accounts.Children.Add(Label("没有启用的�
         if (tray is null) return;
         try
         {
-            tray.BalloonTipTitle = title;
-            tray.BalloonTipText = text;
-            tray.BalloonTipIcon = Forms.ToolTipIcon.Info;
-            tray.ShowBalloonTip(2500);
+            tray.ShowBalloon(title, text);
         }
         catch { }
     }
@@ -581,10 +506,115 @@ if (Accounts.Children.Count == 0) Accounts.Children.Add(Label("没有启用的�
         }
         catch { SetNotice("无法打开 Dashboard，请先启动 Proxy。"); }
     }
-    private void SetNotice(string value) { Notice.Text = value; Notice.Visibility = Visibility.Visible; }
+    private void SetNotice(string value)
+    {
+        Notice.Text = value;
+        Notice.Visibility = preferences.Mode == 2 ? Visibility.Collapsed : Visibility.Visible;
+        if (preferences.Mode == 2) Surface.ToolTip = value + "\nCtrl+M 展开查看";
+    }
+    private void DragCapsule(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (preferences.Mode == 2 && ReferenceEquals(e.OriginalSource, Surface)) DragHeader(sender, e);
+    }
     private void DragHeader(object sender, System.Windows.Input.MouseButtonEventArgs e) { if (!widget && e.LeftButton == System.Windows.Input.MouseButtonState.Pressed) DragMove(); }
-    private void CycleMode(object sender, RoutedEventArgs e) { preferences = preferences with { Mode = (preferences.Mode + 1) % 3 }; if (snapshot is { } state) Render(state); SavePosition(); }
-    private void CycleTheme(object sender, RoutedEventArgs e) { preferences = preferences with { Theme = (preferences.Theme + 1) % 3 }; ApplyTheme(); SavePosition(); }
+    private void SetLayoutWidth(double value)
+    {
+        if (preparingShape) Surface.Width = value;
+        else Width = value;
+    }
+    private void CycleMode(object sender, RoutedEventArgs e)
+    {
+        if (changingShape) return;
+        var previousWidth = ActualWidth; var previousHeight = ActualHeight;
+        var previous = LayoutMotion.Capture(Surface, SharedParts);
+        var cards = CardMotion.Capture(Surface, accountElements.Values.Select(x => x.Card));
+        var animate = IsVisible && previousWidth > 0 && previousHeight > 0 && SystemParameters.ClientAreaAnimation && !SystemParameters.HighContrast;
+        preferences = preferences with { Mode = (preferences.Mode + 1) % 3 };
+        if (snapshot is { } state)
+        {
+            if (animate)
+            {
+                // Native acrylic HWND stays fixed during every animation frame. Measure the target
+                // content explicitly instead of first letting SizeToContent resize it to the end state.
+                SizeToContent = SizeToContent.Manual; Width = previousWidth; Height = previousHeight;
+                preparingShape = true;
+                try { Render(state); } finally { preparingShape = false; }
+                var targetWidth = Surface.Width;
+                Surface.Measure(new System.Windows.Size(targetWidth, double.PositiveInfinity));
+                var targetHeight = Surface.DesiredSize.Height;
+                LayoutContent.Width = Math.Max(0, targetWidth - Surface.Padding.Left - Surface.Padding.Right - Surface.BorderThickness.Left - Surface.BorderThickness.Right);
+                LayoutContent.Height = Math.Max(0, targetHeight - Surface.Padding.Top - Surface.Padding.Bottom - Surface.BorderThickness.Top - Surface.BorderThickness.Bottom);
+                LayoutContent.HorizontalAlignment = System.Windows.HorizontalAlignment.Left;
+                LayoutContent.VerticalAlignment = VerticalAlignment.Top;
+                Surface.Measure(new System.Windows.Size(targetWidth, targetHeight));
+                Surface.Arrange(new System.Windows.Rect(0, 0, targetWidth, targetHeight));
+                CardMotion.Play(Surface, MotionBackdrops, cards, new Duration(TimeSpan.FromMilliseconds(380)));
+                LayoutMotion.Play(Surface, MotionLayer, previous, new Duration(TimeSpan.FromMilliseconds(380)), SharedParts);
+                AnimateShape(previousWidth, previousHeight, targetWidth, targetHeight);
+            }
+            else { Render(state); UpdateLayout(); }
+        }
+        SavePosition();
+    }
+    private void StopShapeAnimation()
+    {
+        shapeGeneration++; changingShape = false;
+        Surface.BeginAnimation(WidthProperty, null); Surface.BeginAnimation(HeightProperty, null);
+        Surface.Width = double.NaN; Surface.Height = double.NaN;
+        Surface.HorizontalAlignment = System.Windows.HorizontalAlignment.Stretch;
+        Surface.VerticalAlignment = VerticalAlignment.Stretch;
+        LayoutContent.Width = double.NaN; LayoutContent.Height = double.NaN;
+        LayoutContent.HorizontalAlignment = System.Windows.HorizontalAlignment.Stretch;
+        LayoutContent.VerticalAlignment = VerticalAlignment.Stretch;
+        MotionLayer.Width = double.NaN; MotionLayer.Height = double.NaN;
+        MotionLayer.Children.Clear(); CardMotion.Clear(MotionBackdrops);
+        foreach (var part in SharedParts) part.RenderTransform = Transform.Identity;
+        SizeToContent = SizeToContent.Height;
+        if (backdropSuspended)
+        {
+            backdropSuspended = false;
+            var acrylic = 3; _ = DwmSetWindowAttribute(handle, 38, ref acrylic, 4); ApplyTheme();
+        }
+    }
+    private ClockGroup AnimateShape(double fromWidth, double fromHeight, double toWidth, double toHeight)
+    {
+        var generation = shapeGeneration; changingShape = true; pendingState = false;
+        if (backdrop && handle != 0)
+        {
+            // Acrylic paints the whole native client area. Suspend it while the fixed host is
+            // larger than the visible surface, otherwise a rectangular backdrop flashes behind it.
+            var none = 1; _ = DwmSetWindowAttribute(handle, 38, ref none, 4);
+            backdropSuspended = true;
+            if (Resources["SurfaceBrush"] is Brush background)
+                Resources["SurfaceBrush"] = new Brush(MediaColor.FromRgb(background.Color.R, background.Color.G, background.Color.B));
+        }
+        SizeToContent = SizeToContent.Manual;
+        Width = Math.Max(fromWidth, toWidth); Height = Math.Max(fromHeight, toHeight);
+        Surface.HorizontalAlignment = System.Windows.HorizontalAlignment.Center;
+        Surface.VerticalAlignment = VerticalAlignment.Bottom;
+        Surface.Width = toWidth; Surface.Height = toHeight;
+        MotionLayer.Width = toWidth; MotionLayer.Height = toHeight;
+        var duration = new Duration(TimeSpan.FromMilliseconds(380));
+        var ease = new SineEase { EasingMode = EasingMode.EaseInOut };
+        var timeline = new ParallelTimeline { Duration = duration, FillBehavior = FillBehavior.HoldEnd };
+        timeline.Children.Add(new DoubleAnimation(fromWidth, toWidth, duration) { EasingFunction = ease });
+        timeline.Children.Add(new DoubleAnimation(fromHeight, toHeight, duration) { EasingFunction = ease });
+        var clock = (ClockGroup)timeline.CreateClock();
+        clock.Completed += (_, _) =>
+        {
+            if (generation != shapeGeneration) return;
+            Width = toWidth; Height = toHeight;
+            StopShapeAnimation();
+            if (pendingState && snapshot is { } latest) Render(latest);
+            pendingState = false;
+            UpdateLayout(); ClampPosition();
+        };
+        Surface.ApplyAnimationClock(WidthProperty, (AnimationClock)clock.Children[0]);
+        Surface.ApplyAnimationClock(HeightProperty, (AnimationClock)clock.Children[1]);
+        if (widget) PositionFlyout();
+        return clock;
+    }
+    private void CycleTheme(object sender, RoutedEventArgs e) { preferences = preferences with { Theme = (preferences.Theme + 1) % 3 }; ApplyTheme(); if (snapshot is { } state) Render(state); SavePosition(); }
     private void DismissWindow(object sender, RoutedEventArgs e) { if (widget) { SavePosition(); Hide(); } else Close(); }
     private async void OpenDashboard(object sender, RoutedEventArgs e) => await DashboardAsync();
     private void OpenFloating(object sender, RoutedEventArgs e) => LaunchFloating();
@@ -600,11 +630,35 @@ if (Accounts.Children.Count == 0) Accounts.Children.Add(Label("没有启用的�
     {
         Topmost = !Topmost; preferences = preferences with { Pinned = Topmost }; PinButton.Content = Topmost ? "●" : "○"; SavePosition();
     }
-    private void ToggleVisibility() { if (IsVisible) { SavePosition(); Hide(); } else if (widget) ShowFlyout(); else { Show(); ClampPosition(); Activate(); } }
-    private void ShowFlyout()
+    private void ToggleVisibility(System.Drawing.Point? clicked = null) { if (IsVisible) { SavePosition(); Hide(); } else if (widget) ShowFlyout(clicked); else { Show(); ClampPosition(); Activate(); } }
+    private void ShowFlyout(System.Drawing.Point? clicked = null)
     {
-        flyoutScreen = Forms.Screen.FromPoint(Forms.Cursor.Position);
+        var opening = !IsVisible;
+        if (changingShape) { StopShapeAnimation(); if (snapshot is { } latest) Render(latest); }
+        if (tray?.TryGetBounds(out var iconBounds) == true && (clicked is null || iconBounds.Contains(clicked.Value))) flyoutAnchor = iconBounds;
+        else flyoutAnchor = new System.Drawing.Rectangle(clicked ?? Forms.Cursor.Position, System.Drawing.Size.Empty);
+        flyoutScreen = Forms.Screen.FromPoint(new System.Drawing.Point(flyoutAnchor.Value.Left + flyoutAnchor.Value.Width / 2, flyoutAnchor.Value.Top + flyoutAnchor.Value.Height / 2));
         Show(); UpdateLayout(); PositionFlyout(); Activate();
+        if (opening) AnimateReveal();
+    }
+    private void AnimateReveal()
+    {
+        // Honour Windows' accessibility preference. Animate the content, never the hit-test HWND.
+        if (!SystemParameters.ClientAreaAnimation || SystemParameters.HighContrast) return;
+        Surface.RenderTransformOrigin = new System.Windows.Point(1, 1);
+        if (tray?.TryGetBounds(out var iconRect) == true && GetWindowRect(handle, out var rect) && rect.Right > rect.Left && rect.Bottom > rect.Top)
+            Surface.RenderTransformOrigin = new System.Windows.Point(
+                Math.Clamp((iconRect.Left + iconRect.Width / 2d - rect.Left) / (rect.Right - rect.Left), 0, 1),
+                Math.Clamp((iconRect.Top + iconRect.Height / 2d - rect.Top) / (rect.Bottom - rect.Top), 0, 1));
+        var capsule = preferences.Mode == 2;
+        var duration = TimeSpan.FromMilliseconds(capsule ? 220 : 170);
+        var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
+        DoubleAnimation Reveal(double from, double to) => new(from, to, new Duration(duration))
+            { EasingFunction = ease, FillBehavior = FillBehavior.Stop };
+        revealScale.BeginAnimation(ScaleTransform.ScaleXProperty, Reveal(capsule ? .25 : .97, 1));
+        revealScale.BeginAnimation(ScaleTransform.ScaleYProperty, Reveal(capsule ? .65 : .97, 1));
+        revealOffset.BeginAnimation(TranslateTransform.YProperty, Reveal(capsule ? 4 : 12, 0));
+        BeginAnimation(OpacityProperty, Reveal(0, 1));
     }
     private void PositionFlyout()
     {
@@ -618,9 +672,9 @@ if (Accounts.Children.Count == 0) Accounts.Children.Add(Label("没有启用的�
             UpdateLayout();
             if (!GetWindowRect(handle, out var rect)) return;
             var gap = (int)Math.Round(12 * dpi.DpiScaleX);
-            var x = Math.Max(area.Left, area.Right - (rect.Right - rect.Left) - gap);
-            var y = Math.Max(area.Top, area.Bottom - (rect.Bottom - rect.Top) - gap);
-            _ = SetWindowPos(handle, 0, x, y, 0, 0, 0x0001 | 0x0004 | 0x0010);
+            var anchor = flyoutAnchor ?? new System.Drawing.Rectangle(Forms.Cursor.Position, System.Drawing.Size.Empty);
+            var position = FlyoutPlacement.Above(area, anchor, rect.Right - rect.Left, rect.Bottom - rect.Top, gap);
+            _ = SetWindowPos(handle, 0, position.X, position.Y, 0, 0, 0x0001 | 0x0004 | 0x0010);
         }
         finally { positioningFlyout = false; }
     }
@@ -646,7 +700,7 @@ if (Accounts.Children.Count == 0) Accounts.Children.Add(Label("没有启用的�
         SavePosition(); if (widget && !exiting) { e.Cancel = true; Hide(); return; }
         lifetime.Cancel(); timer.Stop(); SystemEvents.UserPreferenceChanged -= PreferenceChanged;
         _ = UnregisterHotKey(handle, 1);
-        if (tray is not null) { tray.Visible = false; tray.Icon?.Dispose(); tray.Dispose(); }
+        tray?.Dispose();
         http.Dispose();
         System.Windows.Application.Current.Shutdown();
     }

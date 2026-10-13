@@ -76,9 +76,18 @@ try
         try { await next(); }
         catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested) { }
         catch (AuthFailure ex)
-        { if (!context.Response.HasStarted) { context.Response.StatusCode = 503; await context.Response.WriteAsJsonAsync(new { error = new { code = ex.Code } }); } else context.Abort(); }
+        {
+            if (context.Response.HasStarted) context.Abort();
+            else if (path.StartsWith("/v1/", StringComparison.Ordinal))
+            {
+                var error = PoolAvailability.Auth(ex.Code); context.Response.StatusCode = error.Status; context.Response.ContentType = "application/json";
+                if (error.RetryAfter is not null) context.Response.Headers["Retry-After"] = error.RetryAfter;
+                await context.Response.Body.WriteAsync(error.Body(), context.RequestAborted);
+            }
+            else { context.Response.StatusCode = 503; await context.Response.WriteAsJsonAsync(new { error = new { code = ex.Code } }); }
+        }
         catch (NoEligibleAccountException)
-        { if (!context.Response.HasStarted) { context.Response.StatusCode = 503; await context.Response.WriteAsJsonAsync(new { error = new { code = "no_eligible_account" } }); } else context.Abort(); }
+        { if (!context.Response.HasStarted) { var error = pool.Unavailable(); context.Response.StatusCode = error.Status; context.Response.ContentType = "application/json"; if (error.RetryAfter is not null) context.Response.Headers["Retry-After"] = error.RetryAfter; await context.Response.Body.WriteAsync(error.Body(), context.RequestAborted); } else context.Abort(); }
         catch (JsonException)
         { if (!context.Response.HasStarted) { context.Response.StatusCode = 400; await context.Response.WriteAsJsonAsync(new { error = new { code = "invalid_json" } }); } else context.Abort(); }
         catch (RequestBodyFailure ex)
@@ -88,7 +97,7 @@ try
     });
     app.MapGet("/health", () => new { status = "running", stage = "acceptance", automaticSwitching = pool.Settings.AutoSwitch });
     object Status() => new { activeAccountId = vault.ActiveId, stage = "acceptance", automaticSwitching = pool.Settings.AutoSwitch, settings = pool.Settings,
-        boundaryProbe, distinctUsers = vault.DistinctUsers, nativeDistinctUsers = vault.NativeDistinctUsers, liveMigrationValidated = false, quotaSource = "per_registration", accounts = vault.Views(auth.Health),
+        boundaryProbe, distinctUsers = vault.DistinctUsers, nativeDistinctUsers = vault.NativeDistinctUsers, liveMigrationValidated = false, quotaSource = "per_registration", accounts = vault.Views(auth.Health), accountAvailability = pool.Availability(),
         nativeLoginAttempts = nativeLogin.PublicAttempts, usage = quota.Views, inFlightRequests = inFlight.ToArray(), recentRequests = recent.ToArray(), recentSwitches = pool.History };
     app.MapGet("/status", () => Status());
     app.MapGet("/events", (HttpContext context) => events.StreamAsync(context, Status));
@@ -131,27 +140,39 @@ try
     });
     async Task<IResult> ModelCatalog(HttpContext context)
     {
-        var selected = vault.Selected ?? throw new AuthFailure("no_authorized_account");
-        using var use = vault.AcquireUse(selected.Id);
-        var account = await auth.ReadyAsync(selected.Id, context.RequestAborted);
+        using var reservation = pool.ReserveCatalog();
+        var candidates = await pool.PrepareAsync(reservation, context.RequestAborted);
         // Forward Codex's client_version so the picker catalog matches the installed CLI (e.g. gpt-6.1-sol).
         var catalogVersion = CodexClientVersion.FromQueryOrFallback(context.Request.Query["client_version"], modelClientVersion);
-        using var request = new HttpRequestMessage(HttpMethod.Get, account.ProviderKind == "native"
-            ? $"https://chatgpt.com/backend-api/codex/models?client_version={Uri.EscapeDataString(catalogVersion)}" : "https://api.openai.com/v1/models");
-        request.Headers.Authorization = new("Bearer", account.AccessToken);
-        if (account.ProviderKind == "native") request.Headers.TryAddWithoutValidation("ChatGPT-Account-Id", account.BackendAccountId);
-        using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, context.RequestAborted);
-        if (!response.IsSuccessStatusCode) return Results.Json(new { error = new { code = "model_catalog_unavailable" } }, statusCode: (int)response.StatusCode);
-        await using var stream = await response.Content.ReadAsStreamAsync(context.RequestAborted);
-        using var content = new MemoryStream(); var buffer = new byte[8192];
-        while (true) { var count = await stream.ReadAsync(buffer, context.RequestAborted); if (count == 0) break; if (content.Length + count > 2 * 1024 * 1024) throw new AuthFailure("oversized_model_catalog"); content.Write(buffer, 0, count); }
-        using var json = JsonDocument.Parse(content.ToArray());
-        if (json.RootElement.ValueKind != JsonValueKind.Object || !json.RootElement.TryGetProperty("models", out var models) || models.ValueKind != JsonValueKind.Array)
-            throw new AuthFailure("unrecognized_model_catalog");
-        if (context.Request.Path == "/v1/models") return Results.Json(json.RootElement.Clone());
-        var visible = models.EnumerateArray().Where(x => x.TryGetProperty("visibility", out var visibility) && visibility.GetString() == "list")
-            .Select(x => new { slug = x.GetProperty("slug").GetString(), displayName = x.GetProperty("display_name").GetString() }).ToArray();
-        return Results.Json(new { accountId = account.Id, models = visible });
+        for (var index = 0; index < candidates.Length; index++)
+        {
+            var account = candidates[index]; var native = account.Endpoint.Host == "chatgpt.com";
+            using var request = new HttpRequestMessage(HttpMethod.Get, native
+                ? $"https://chatgpt.com/backend-api/codex/models?client_version={Uri.EscapeDataString(catalogVersion)}" : "https://api.openai.com/v1/models");
+            request.Headers.Authorization = new("Bearer", account.AccessToken);
+            if (native) request.Headers.TryAddWithoutValidation("ChatGPT-Account-Id", account.BackendAccountId);
+            using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, context.RequestAborted);
+            if (!response.IsSuccessStatusCode)
+            {
+                var error = await ModelErrors.FromResponseAsync(response, context.RequestAborted);
+                pool.RecordFailure(account.AccountId, error);
+                if (error.FailoverReason is not null && index + 1 < candidates.Length) continue;
+                if (error.FailoverReason is not null) error = pool.Unavailable(error, reservation.CandidateIds.ToArray(), reservation.AutoSwitch);
+                if (error.RetryAfter is not null) context.Response.Headers["Retry-After"] = error.RetryAfter;
+                return Results.Content(Encoding.UTF8.GetString(error.Body()), "application/json", statusCode: error.Status);
+            }
+            await using var stream = await response.Content.ReadAsStreamAsync(context.RequestAborted);
+            using var content = new MemoryStream(); var buffer = new byte[8192];
+            while (true) { var count = await stream.ReadAsync(buffer, context.RequestAborted); if (count == 0) break; if (content.Length + count > 2 * 1024 * 1024) throw new AuthFailure("oversized_model_catalog"); content.Write(buffer, 0, count); }
+            using var json = JsonDocument.Parse(content.ToArray());
+            if (json.RootElement.ValueKind != JsonValueKind.Object || !json.RootElement.TryGetProperty("models", out var models) || models.ValueKind != JsonValueKind.Array)
+                throw new AuthFailure("unrecognized_model_catalog");
+            if (context.Request.Path == "/v1/models") return Results.Json(json.RootElement.Clone());
+            var visible = models.EnumerateArray().Where(x => x.TryGetProperty("visibility", out var visibility) && visibility.GetString() == "list")
+                .Select(x => new { slug = x.GetProperty("slug").GetString(), displayName = x.GetProperty("display_name").GetString() }).ToArray();
+            return Results.Json(new { accountId = account.AccountId, models = visible });
+        }
+        throw new NoEligibleAccountException();
     }
     app.MapGet("/models", (Func<HttpContext, Task<IResult>>)ModelCatalog);
     app.MapGet("/v1/models", (Func<HttpContext, Task<IResult>>)ModelCatalog);
@@ -235,31 +256,23 @@ try
         { context.Response.StatusCode = 400; await context.Response.WriteAsJsonAsync(new { error = new { code = "server_continuation_unsupported" } }); return; }
         using var reservation = pool.ReserveModelRequest();
         var selection = reservation.Selection;
-        var account = await auth.ReadyAsync(selection.AccountId, context.RequestAborted);
-        var candidates = new List<ModelLease>();
-        ModelLease Lease(AccountCredential credential) => new(credential.Id, new(credential.ProviderKind == "native"
-            ? "https://chatgpt.com/backend-api/codex/responses" : "https://api.openai.com/v1/responses"), credential.AccessToken, credential.BackendAccountId);
-        candidates.Add(Lease(account));
-        foreach (var id in reservation.CandidateIds.Skip(1))
-        {
-            try { candidates.Add(Lease(await auth.ReadyAsync(id, context.RequestAborted))); }
-            catch (AuthFailure) { } // No model bytes were sent; this candidate cannot be used.
-        }
+        var candidates = await pool.PrepareAsync(reservation, context.RequestAborted);
+        var account = candidates[0];
         var headers = context.Request.Headers.ToDictionary(x => x.Key, x => x.Value.ToString(), StringComparer.OrdinalIgnoreCase);
         headers.Remove("ChatGPT-Account-Id"); // Backend account routing is supplied only by validated credentials.
         if (headers.TryGetValue("session_id", out var session))
         {
             var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(session)));
-            if (!sessionOwners.TryGetValue(hash, out var prior) || prior != account.Id) headers.Remove("x-codex-turn-state");
+            if (!sessionOwners.TryGetValue(hash, out var prior) || prior != account.AccountId) headers.Remove("x-codex-turn-state");
             // Bounded transport ownership hints, never conversation contents or Codex workflow state.
             if (sessionOwners.Count >= 1024) sessionOwners.Clear();
-            sessionOwners[hash] = account.Id;
+            sessionOwners[hash] = account.AccountId;
         }
         else headers.Remove("x-codex-turn-state");
         var started = Stopwatch.GetTimestamp(); var requestId = Guid.NewGuid().ToString("N");
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted); lifetime.CancelAfter(TimeSpan.FromMinutes(10));
         RelayResult result;
-        var sink = new WebSink(context); var attemptedAccount = account.Id; var attemptCount = 0;
+        var sink = new WebSink(context); var attemptedAccount = account.AccountId; var attemptCount = 0;
         var upstreamCompleted = false;
         var rejections = new List<object>(); string? failoverReason = null;
         try
@@ -270,7 +283,8 @@ try
                 {
                     if (entering) { attemptedAccount = lease.AccountId; attemptCount++; }
                     inFlight.AddOrUpdate(lease.AccountId, entering ? 1 : 0, (_, count) => Math.Max(0, count + (entering ? 1 : -1)));
-                }, _ => upstreamCompleted = true);
+                }, lease => { upstreamCompleted = true; pool.RecordSuccess(lease.AccountId); },
+                (lease, error) => pool.RecordFailure(lease.AccountId, error), error => pool.Unavailable(error, reservation.CandidateIds.ToArray(), reservation.AutoSwitch));
         }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
         { result = new(attemptedAccount, upstreamCompleted ? 200 : context.RequestAborted.IsCancellationRequested ? 499 : 504, attemptCount, sink.Started,
@@ -286,7 +300,7 @@ try
         while (recent.Count > 100) recent.TryDequeue(out _);
         if (context.RequestAborted.IsCancellationRequested) return;
         if (result.Committed && result.Outcome is "stream_interrupted" or "request_deadline") context.Abort();
-        else if (!result.Committed) { context.Response.StatusCode = 502; await context.Response.WriteAsJsonAsync(new { error = new { code = result.Outcome } }); }
+        else if (!result.Committed) { context.Response.StatusCode = result.StatusCode; await context.Response.WriteAsJsonAsync(new { error = new { type = "proxy_transport_error", code = result.Outcome, message = "模型传输未能完成。" } }); }
     });
     app.MapFallback(() => Results.NotFound(new { error = new { code = "endpoint_not_supported_in_phase0" } }));
     Console.WriteLine("Codex Pool listening at http://127.0.0.1:3210 (live migration acceptance gate applies).");
@@ -316,6 +330,7 @@ sealed record LoginInput(string Name, string? AccountId);
 sealed record RenameInput(string? Name);
 sealed class WebSink(HttpContext context) : IResponseSink
 {
+    public void SetHeader(string name, string value) { if (!context.Response.HasStarted && name == "Retry-After") context.Response.Headers[name] = value; }
     public bool Started { get; private set; }
     public void Start(int statusCode, string contentType) { Started = true; context.Response.StatusCode = statusCode; context.Response.ContentType = contentType; }
     public async ValueTask WriteAsync(ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken)

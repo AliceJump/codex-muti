@@ -1,0 +1,57 @@
+# 模型错误与账户池汇总
+
+Codex 仍负责重试、任务恢复和工具执行。代理只管理模型入口、账户选择及错误协议，不实现 Agent Loop。
+
+## 多账户判定
+
+模型目录读取也会在当前账户授权失效时尝试同 provider 备用，读取本身不改变 sticky/epoch，额度耗尽不禁止读取目录。
+
+首次向 Codex 输出前，单个账户明确额度、套餐权限或认证拒绝时，先记录这个账户，再尝试已预留的可用备用账户。A 失败、B 成功就返回 B 的正常结果；A 额度失败、B 授权失败、C 成功，也返回 C 的正常结果并保持 sticky 使用 C。
+
+最终错误根据同一 provider 的完整账户池判断，包括请求开始前已经因额度或授权失效而排除的账户。预留列表只限制本次可以尝试哪些账户，不用来删减最终诊断证据。暂停、禁用、排空的账户不参与上游调度，但状态仍可查看；不能为了成功混用 Native 与 SIWC grant。
+
+`GET /status` 和 `/events` 增加每账户 `accountAvailability`：`accountId`、`available`、`reason`、`errorCode` 和可知的 `resetAt`。Web 卡片展示单账户模型访问状态。此状态不包含凭据或错误原文。
+
+自动切换关闭时仍尊重用户选择：当前账户不可用但有正常 standby 时，提示 `account_auto_switch_disabled`，由用户手动选择或开启自动切换，不伪称全池额度耗尽。
+
+## 对 Codex 的响应
+
+| 全池/请求状态 | HTTP | type / code | Codex 0.162.1 行为 |
+| --- | --- | --- | --- |
+| 所有参与账户确实额度耗尽 | 429 | `usage_limit_reached`（type 与 code 同名） | `usageLimitExceeded`，终止重试 |
+| 所有参与账户消费余额/支出额度不足 | 429 | `insufficient_quota` | 额度终止类错误 |
+| 所有参与账户均需重新授权 | 400 | `invalid_request_error` / `account_pool_auth_required` | 终止当前请求，提示池内授权，不触发客户端自身 401 恢复 |
+| 全池套餐均不含模型权限 | 429 | `usage_not_included` | 终止类错误 |
+| 只有自设额度阈值阻止，没有全部真正用尽 | 400 | `account_pool_threshold_reached` | 终止当前请求，提示检查阈值 |
+| 全部禁用/暂停/排空 | 400 | `account_pool_disabled` | 终止当前请求，提示账户控制状态 |
+| 额度、授权、套餐权限、冷却等混合不可用 | 400 | `account_pool_unavailable` | 终止当前请求，逐账户查看原因 |
+| 所有授权服务临时不可用 | 503 | `server_is_overloaded` + `Retry-After: 30` | 允许有节奏的临时故障恢复 |
+| 没有注册账户 | 400 | `account_pool_empty` | 终止当前请求 |
+| 上游模型过载 | 503 | 保留可信 `server_is_overloaded` / `slow_down` | 保留官方过载/限速语义 |
+| 普通速率限制 | 上游 429 | 保留可信 `rate_limit_exceeded` / `slow_down` 与有效 Retry-After | 不冒充额度耗尽，不透明切号 |
+| 已知策略拒绝 | 上游 400/403 | 保留策略 code，使用固定安全 message | 保留终止分类 |
+| 请求超时且未输出 | 504 | `request_deadline` | 对外状态与日志一致 |
+| 未知网络失败/无效上游内容且未输出 | 502 | 对应 transport code | Codex 控制恢复，代理不切号重放 |
+
+进入代理的客户端凭据不合法仍返回正常的 401；这里的 400 只用于已认证请求的池内永久故障。不会把池内账户失效当成客户端 ChatGPT 登录失效。
+
+`usage_limit_reached` 必须出现在 HTTP 429 的 `error.type` 中；仅写自定义 `quota_rejected` 或只有同名 code 都不能得到正确的原生额度提示。内部日志继续用 `quota_rejected/auth_rejected/access_rejected` 记录处理原因，内部 outcome 与对外协议分开。
+
+达到 95% 等配置阈值不等于真实 100% 耗尽。真实耗尽依据新鲜且未越过 reset 的额度快照，或上游结构化的明确额度拒绝；未知/过期数据不伪装为 0%。已知重置时间按每账户阻止窗口的最晚重置计算，全池返回最早可能恢复的账户时间；缺少可靠重置信息时不编造。
+
+## 安全边界
+
+- 一旦向 Codex 输出任何流内容，不重写 SSE、不改 HTTP 状态、不把同一个请求重新发给另一账户。
+- 未知网络错误、取消和不确定的 refresh 结果不授权切号重放。若不确定失败仅发生在备用凭据准备阶段，而首选账户已经 ready，则保留该正常账户，不让备用账户拖垮它。
+- 只保留已知 type/code、规范 plan、经过校验的 Unix 秒重置和窗口长度，不返回上游 message、附加 JSON、Cookie、token、身份诊断头或 prompt。
+- `Retry-After` 仅接受单个整数秒或 HTTP-date，最长等待一小时；非法、重复或更长的值丢弃，不采信毫秒私有头。
+- 每账户拒绝记录是有界运行态元数据：与账户数绑定、成功完成时清除、账户删除时清除、冷却/重置到期后失效；token 和额度持久化仍由现有 Vault 管理。
+
+## 验证范围
+
+合成凭据回归覆盖：N 账户候选逐次失败后成功、sticky 更新、全部额度/全部 auth/混合故障汇总、请求前已排除账户纳入汇总、阈值不冒充额度、备用未知 refresh 不阻断正常账户、首账户未知失败不切号、响应事件后不重放、取消、错误原文不泄漏与 Retry-After 校验。
+
+官方安装的 Codex 0.162.1 app-server 隔离探测使用实际 C# 映射生成的响应。验证全池额度、auth、混合、阈值、禁用均只发一次请求；A 额度拒绝/B 成功返回正常 completed；过载分类、策略拒绝、Flex 和限速等待保持对应行为。探测仅使用动态 localhost mock 和独立 CODEX_HOME，不消耗真实账户额度。
+
+报告与实验仅位于主仓库忽略目录 `.research/`。这些协议探测不扩大真实长 Session/Compact/跨账户验收范围，也不等于其它内置工具的 401 已解决。
+

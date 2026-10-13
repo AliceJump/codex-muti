@@ -35,6 +35,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Delete refuses active handover beyond the migration gate and preserves eligible routing", DeleteMigrationGate),
     ("Delete coordinates refresh, quota, catalog and reauthorization with deterministic barriers", DeleteBackgroundOperations),
     ("Rename preserves credentials, quotas, controls and active epoch through refresh and reauthorization", AccountRename),
+    ("Pool errors describe all accounts and distinguish quota, policy, auth and mixed failures", PoolErrors),
+    ("A failed refresh can use B, whole-pool rejection is terminal, ambiguous failures never switch", PreparedPoolErrors),
     ("Catalog client_version prefers Codex query and keeps visibility=list Sol slugs", CatalogClientVersion)
 };
 if (args.Length != 0)
@@ -358,12 +360,115 @@ async Task LocalApi()
         using var hostRequest = new HttpRequestMessage(HttpMethod.Get, "http://127.0.0.1:3210/status"); hostRequest.Headers.Host = "localhost:3210";
         using var host = await http.SendAsync(hostRequest); Check(host.StatusCode == HttpStatusCode.Forbidden);
         using var noAccount = await http.PostAsJsonAsync("http://127.0.0.1:3210/v1/responses", new { model = "gpt-6-luna", input = Array.Empty<object>(), stream = true, store = false });
-        Check(noAccount.StatusCode == HttpStatusCode.ServiceUnavailable);
+        Check(noAccount.StatusCode == HttpStatusCode.BadRequest);
         using var callback = await http.GetAsync("http://127.0.0.1:3210/auth/callback?state=invalid&code=CODE-CANARY");
         Check(callback.StatusCode == HttpStatusCode.BadRequest && !(await callback.Content.ReadAsStringAsync()).Contains("CODE-CANARY"));
         using var second = Start(); await second.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)); Check(second.ExitCode != 0);
     }
     finally { if (!server.HasExited) { server.Kill(true); await server.WaitForExitAsync(); } }
+}
+Task PoolErrors()
+{
+    var reset = DateTimeOffset.UtcNow.AddHours(1);
+    var quota = PoolAvailability.Aggregate([new("A", "quota_exhausted", ResetAt: reset, Plan: "plus", WindowMinutes: 300), new("B", "quota_exhausted", ResetAt: reset.AddHours(1))]);
+    Check(quota.Status == 429 && quota.Type == "usage_limit_reached" && quota.ResetsAt == reset.ToUnixTimeSeconds());
+    Check(PoolAvailability.Aggregate([new("A","quota_exhausted","credit_balance_exhausted"),new("B","quota_exhausted","project_spend_limit_exceeded")]).Type == "insufficient_quota");
+    Check(PoolAvailability.Aggregate([new("A", "auth_unavailable"), new("B", "auth_unavailable")]).Code == "account_pool_auth_required");
+    Check(PoolAvailability.Aggregate([new("A", "quota_exhausted"), new("B", "auth_unavailable")]).Code == "account_pool_unavailable");
+    Check(PoolAvailability.Aggregate([new("A", "5h_threshold"), new("B", "weekly_threshold")]).Code == "account_pool_threshold_reached");
+    Check(PoolAvailability.Aggregate([new("A", "paused"), new("B", "disabled")]).Code == "account_pool_disabled");
+    Check(PoolAvailability.Aggregate([new("A", "quota_exhausted"), new("B", null)]).Code == "request_accounts_unavailable");
+    Check(PoolAvailability.Aggregate([new("A", "auth_temporarily_unavailable"), new("B", "auth_temporarily_unavailable")]).RetryAfter == "30");
+    Check(PoolAvailability.Auth("reauth_required").Status == 400 && PoolAvailability.Auth("auth_temporarily_unavailable").Status == 503);
+    return Task.CompletedTask;
+}
+async Task PreparedPoolErrors()
+{
+    var vault = Store("prepared-pool-errors"); vault.Add(Account("A")); vault.Add(Account("B"));
+    using var issuer = new FakeIssuer { RejectRefreshAOnly = true }; using var authHttp = new HttpClient(issuer);
+    var auth = new OAuth(authHttp, vault); var quota = new Quota(authHttp, auth, vault); var pool = new PoolRuntime(vault, auth, quota, true); pool.UpdateSettings(new(true));
+    using (var request = pool.ReserveModelRequest())
+    {
+        var leases = await pool.PrepareAsync(request, default);
+        Check(leases.Length == 1 && leases[0].AccountId == "B" && vault.Find("A")!.AuthStatus == "reauth_required");
+        pool.Complete(request.Selection, new("B", 200, 1, true, "stream_forwarded"));
+        Check(pool.Active == "B");
+    }
+    Check(pool.Availability().Single(x => x.AccountId == "A").Reason == "auth_unavailable");
+    var catalogVault = Store("catalog-auth-fallback"); catalogVault.Add(Account("A")); catalogVault.Add(Account("B"));
+    var catalogAuth = new OAuth(authHttp, catalogVault); var catalogPool = new PoolRuntime(catalogVault,catalogAuth,new Quota(authHttp,catalogAuth,catalogVault),true);
+    using (var catalog = catalogPool.ReserveCatalog())
+    {
+        var catalogLeases = await catalogPool.PrepareAsync(catalog,default);
+        Check(catalogLeases.Length==1 && catalogLeases[0].AccountId=="B" && catalogPool.Active=="A" && catalogVault.ActiveId=="A");
+        try{catalogPool.Delete("B",out _);Check(false);}catch(AccountDeletionRejected ex){Check(ex.Code=="account_busy");}
+    }
+    var errors = new[] { ModelErrors.FromUpstream(HttpStatusCode.TooManyRequests, "{\"error\":{\"type\":\"usage_limit_reached\"}}"u8.ToArray(), null),
+        ModelErrors.FromUpstream(HttpStatusCode.Unauthorized, "{\"error\":{\"code\":\"invalid_token\"}}"u8.ToArray(), null) };
+    var mixture = Store("mixed-error-pool"); var a = Account("A"); a.ExpiresAt = DateTimeOffset.UtcNow.AddHours(1); mixture.Add(a); var b = Account("B"); b.ExpiresAt = a.ExpiresAt; mixture.Add(b);
+    var mixtureAuth = new OAuth(authHttp, mixture); var mixturePool = new PoolRuntime(mixture, mixtureAuth, new Quota(authHttp, mixtureAuth, mixture), true); mixturePool.UpdateSettings(new(true));
+    for (var trial = 0; trial < 2; trial++)
+    {
+        // In trial 0 A fails but B succeeds; no error reaches downstream and sticky follows B.
+        using var reserved = mixturePool.ReserveModelRequest(); var leases = await mixturePool.PrepareAsync(reserved, default);
+        var count = 0;
+        using var modelHttp = new HttpClient(new AsyncHandler((_, _) =>
+        {
+            var index = count++;
+            return Task.FromResult(index == 1 && trial == 0 ? new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("data: {\"type\":\"response.completed\"}\n\n", Encoding.UTF8, "text/event-stream") }
+                : new HttpResponseMessage(index == 0 ? HttpStatusCode.TooManyRequests : HttpStatusCode.Unauthorized) { Content = new StringContent(index == 0 ? "{\"error\":{\"type\":\"usage_limit_reached\"}}" : "{\"error\":{\"code\":\"invalid_token\"}}") });
+        }));
+        var sink = new ProbeSink();
+        var result = await new ResponsesRelay(modelHttp).ForwardAsync("{}"u8.ToArray(), "application/json", leases, new Dictionary<string,string>(), sink, default,
+            mixturePool.Rejected, classified: (lease, error) => mixturePool.RecordFailure(lease.AccountId, error), exhausted: error => mixturePool.Unavailable(error, reserved.CandidateIds.ToArray()));
+        mixturePool.Complete(reserved.Selection, result);
+        if (trial == 0)
+        {
+            Check(result.StatusCode == 200 && sink.Text.Contains("response.completed") && !sink.Text.Contains("usage_limit_reached") && count == 2 && mixturePool.Active == "B");
+            mixturePool.RecordSuccess("A"); mixture.Cooldown("A", DateTimeOffset.UtcNow.AddSeconds(-1)); mixturePool.Activate("A");
+        }
+        else Check(result.StatusCode == 400 && sink.Text.Contains("account_pool_unavailable") && count == 2);
+    }
+    var allQuota = Store("all-quota-pool"); allQuota.Add(Account("A")); allQuota.Add(Account("B"));
+    var allAuth = new OAuth(authHttp, allQuota); var whole = new PoolRuntime(allQuota, allAuth, new Quota(authHttp, allAuth, allQuota), true); whole.UpdateSettings(new(true));
+    whole.RecordFailure("A", errors[0]); whole.RecordFailure("B", errors[0]);
+    Check(whole.Unavailable().Status == 429 && whole.Unavailable().Type == "usage_limit_reached");
+    try { whole.ReserveModelRequest(); Check(false); } catch (NoEligibleAccountException) { }
+    var thresholdVault = Store("threshold-error-pool"); thresholdVault.Add(Account("A")); thresholdVault.Add(Account("B"));
+    foreach (var id in new[] { "A", "B" }) thresholdVault.SaveQuota(new(id, "native_codex_usage", "plus", DateTimeOffset.UtcNow,[new("5h",18000,96,4,DateTimeOffset.UtcNow.AddHours(1))]));
+    var thresholdAuth = new OAuth(authHttp, thresholdVault); var thresholds = new PoolRuntime(thresholdVault, thresholdAuth, new Quota(authHttp, thresholdAuth, thresholdVault), true); thresholds.UpdateSettings(new(true));
+    Check(thresholds.Unavailable().Code == "account_pool_threshold_reached");
+    thresholds.UpdateSettings(new(false)); Check(thresholds.Select().AccountId == "A");
+    var unknown = Store("unknown-refresh-error"); unknown.Add(Account("A")); unknown.Add(Account("B"));
+    using var uncertainIssuer = new FakeIssuer { Barrier = _ => throw new HttpRequestException("SYNTHETIC-NETWORK-CANARY") }; using var uncertainHttp = new HttpClient(uncertainIssuer);
+    var uncertainAuth = new OAuth(uncertainHttp, unknown); var uncertainPool = new PoolRuntime(unknown, uncertainAuth, new Quota(uncertainHttp, uncertainAuth, unknown), true); uncertainPool.UpdateSettings(new(true));
+    using var pending = uncertainPool.ReserveModelRequest();
+    try { await uncertainPool.PrepareAsync(pending, default); Check(false); } catch (AuthFailure ex) { Check(ex.Code == "refresh_outcome_unknown"); }
+    Check(uncertainIssuer.RefreshCalls == 0 && unknown.Find("B")!.RefreshToken == "REFRESH-CANARY-B");
+    var standby = Store("unknown-standby-refresh"); var healthy = Account("A"); healthy.ExpiresAt = DateTimeOffset.UtcNow.AddHours(1); standby.Add(healthy); standby.Add(Account("B"));
+    var standbyAuth = new OAuth(uncertainHttp, standby); var standbyPool = new PoolRuntime(standby, standbyAuth, new Quota(uncertainHttp, standbyAuth, standby), true); standbyPool.UpdateSettings(new(true));
+    using var protectedReady = standbyPool.ReserveModelRequest();
+    var preserved = await standbyPool.PrepareAsync(protectedReady, default);
+    Check(preserved.Length == 1 && preserved[0].AccountId == "A" && standbyPool.Active == "A" && standby.Find("B")!.AuthStatus == "reauth_required");
+    var excluded = Store("preexcluded-account-summary"); excluded.Add(Account("A")); excluded.Add(Account("B")); excluded.RequireReauthorization("A");
+    var excludedAuth = new OAuth(authHttp, excluded); var excludedPool = new PoolRuntime(excluded, excludedAuth, new Quota(authHttp, excludedAuth, excluded), true); excludedPool.UpdateSettings(new(true));
+    using var onlyB = excludedPool.ReserveModelRequest(); Check(onlyB.CandidateIds.SequenceEqual(new[]{"B"}));
+    excludedPool.RecordFailure("B", errors[0]);
+    Check(excludedPool.Unavailable(errors[0], onlyB.CandidateIds.ToArray(), onlyB.AutoSwitch).Code == "account_pool_unavailable");
+    var three = Store("three-account-serving");
+    foreach (var id in new[]{"A","B","C"}) { var credential = Account(id); credential.ExpiresAt=DateTimeOffset.UtcNow.AddHours(1); three.Add(credential); }
+    var threeAuth = new OAuth(authHttp, three); var threePool = new PoolRuntime(three, threeAuth, new Quota(authHttp, threeAuth, three), true); threePool.UpdateSettings(new(true));
+    using var threeRequest = threePool.ReserveModelRequest(); var threeLeases = await threePool.PrepareAsync(threeRequest, default); var threeCount=0;
+    using var threeHttp=new HttpClient(new AsyncHandler((_,_)=>Task.FromResult<HttpResponseMessage>(++threeCount switch {
+        1 => new(HttpStatusCode.TooManyRequests){Content=new StringContent("{\"error\":{\"type\":\"usage_limit_reached\"}}")},
+        2 => new(HttpStatusCode.Unauthorized){Content=new StringContent("{\"error\":{\"code\":\"invalid_token\"}}")},
+        _ => new(HttpStatusCode.OK){Content=new StringContent("data: {\"type\":\"response.completed\"}\n\n",Encoding.UTF8,"text/event-stream")}
+    })));
+    var threeSink=new ProbeSink();
+    var threeResult=await new ResponsesRelay(threeHttp).ForwardAsync("{}"u8.ToArray(),"application/json",threeLeases,new Dictionary<string,string>(),threeSink,default,
+        threePool.Rejected,classified:(lease,error)=>threePool.RecordFailure(lease.AccountId,error),exhausted:error=>threePool.Unavailable(error,threeRequest.CandidateIds.ToArray(),threeRequest.AutoSwitch));
+    threePool.Complete(threeRequest.Selection,threeResult);
+    Check(threeCount==3 && threeResult.StatusCode==200 && threePool.Active=="C" && threeSink.Text.Contains("response.completed") && !threeSink.Text.Contains("usage_limit_reached"));
 }
 async Task AccountRename()
 {
@@ -567,6 +672,7 @@ sealed class FakeIssuer : HttpMessageHandler
     public string? ExpectedChallenge { get; set; }
     public bool GrantPlan { get; set; } = true;
     public bool RejectRefresh { get; set; }
+    public bool RejectRefreshAOnly { get; set; }
     public bool OmitNativeRefresh { get; set; }
     public Func<CancellationToken, Task>? Barrier { get; set; }
     public int RefreshCalls { get; private set; }
@@ -611,7 +717,7 @@ sealed class FakeIssuer : HttpMessageHandler
         if (fields["grant_type"] == "refresh_token")
         {
             RefreshCalls++; UsedRefreshTokens.Add(fields["refresh_token"]); await Task.Delay(20, cancellationToken);
-            if (RejectRefresh) return Json(new { error = "invalid_grant" }, 400);
+            if (RejectRefresh || RejectRefreshAOnly && fields["client_id"] == "client-A") return Json(new { error = "invalid_grant" }, 400);
         }
         else
         {
@@ -633,4 +739,12 @@ sealed class FakeIssuer : HttpMessageHandler
 sealed class AsyncHandler(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> handle) : HttpMessageHandler
 {
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) => handle(request, cancellationToken);
+}
+
+sealed class ProbeSink : IResponseSink
+{
+    private readonly MemoryStream bytes = new();
+    public string Text => Encoding.UTF8.GetString(bytes.ToArray());
+    public void Start(int statusCode, string contentType) { }
+    public ValueTask WriteAsync(ReadOnlyMemory<byte> data, CancellationToken token) => bytes.WriteAsync(data, token);
 }

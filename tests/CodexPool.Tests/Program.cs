@@ -29,7 +29,9 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Native retries use each lease account header and balance in-flight observers", NativeRouting),
     ("Streaming quota failure excludes future routing without replay", StreamQuota),
     ("Failed durable selection never changes active owner or epoch", PersistenceFailure),
-    ("Completed metadata requires a delivered event and cannot reopen replay", CompletedMetadata)
+    ("Completed metadata requires a delivered event and cannot reopen replay", CompletedMetadata),
+    ("Wire errors preserve known semantic codes without leaking upstream data", WireErrors),
+    ("Retry advice is validated and delivered without authorizing failover", RetryAdvice)
 };
 var failed = 0;
 foreach (var (name, run) in tests)
@@ -54,6 +56,55 @@ static async Task Scenario(int status, string code, int attempts)
 }
 static Task<RelayResult> Relay(HttpClient client, IResponseSink sink, CancellationToken token = default) =>
     new ResponsesRelay(client).ForwardAsync("{}"u8.ToArray(), "application/json", Candidates(), new Dictionary<string, string>(), sink, token);
+static async Task WireErrors()
+{
+    foreach (var (status, code, expectedType, expectedStatus) in new[]
+    {
+        (429,"usage_limit_reached","usage_limit_reached",429),
+        (429,"quota_exhausted","usage_limit_reached",429),
+        (429,"credit_balance_exhausted","insufficient_quota",429),
+        (429,"usage_not_included","usage_not_included",429),
+        (429,"flex_unavailable","flex_unavailable",429),
+        (401,"invalid_token","invalid_request_error",400),
+        (503,"server_is_overloaded","server_is_overloaded",503),
+        (503,"slow_down","slow_down",503),
+        (403,"misalignment_policy_violation","invalid_request_error",403),
+        (400,"invalid_prompt","invalid_request_error",400),
+        (400,"cyber_policy","invalid_request_error",400)
+    })
+    {
+        var handler = new FixtureHandler((_, _) => Task.FromResult(Response(status, Error(code))));
+        using var client = new HttpClient(handler); var sink = new MemorySink();
+        var result = await new ResponsesRelay(client).ForwardAsync("{}"u8.ToArray(), "application/json", Candidates()[..1], new Dictionary<string,string>(), sink, default);
+        using var json = System.Text.Json.JsonDocument.Parse(sink.Text);
+        Check(json.RootElement.GetProperty("error").GetProperty("type").GetString() == expectedType && result.StatusCode == expectedStatus);
+        Check(!sink.Text.Contains("SECRET-CANARY") && handler.Count == 1);
+    }
+    var malformedMetadata = System.Text.Encoding.UTF8.GetBytes("{\"error\":{\"type\":\"usage_limit_reached\",\"plan_type\":\"SECRET-CANARY\",\"resets_at\":999999999999,\"limit_window_minutes\":999999,\"message\":\"SECRET-CANARY\",\"debug\":\"SECRET-CANARY\"}}");
+    var safe = ModelErrors.FromUpstream(HttpStatusCode.TooManyRequests, malformedMetadata, "SECRET-CANARY");
+    Check(safe.Type == "usage_limit_reached" && safe.Plan is null && safe.ResetsAt is null && safe.WindowMinutes is null && safe.RetryAfter is null);
+    Check(!Encoding.UTF8.GetString(safe.Body()).Contains("SECRET-CANARY"));
+    var reset = DateTimeOffset.UtcNow.AddHours(1).ToUnixTimeSeconds();
+    var valid = ModelErrors.FromUpstream(HttpStatusCode.TooManyRequests, Encoding.UTF8.GetBytes($"{{\"error\":{{\"type\":\"usage_limit_reached\",\"plan_type\":\"plus\",\"resets_at\":{reset},\"limit_window_minutes\":300}}}}"), "1");
+    Check(valid.Plan == "plus" && valid.ResetsAt == reset && valid.WindowMinutes == 300 && valid.RetryAfter is null);
+    foreach (var code in new[] { "credit_balance_exhausted", "organization_spend_limit_exceeded", "project_spend_limit_exceeded", "organization_usage_limit_exceeded", "usage_not_included" })
+        await Scenario(429, code, 2);
+}
+static async Task RetryAdvice()
+{
+    foreach (var header in new[] { "2", DateTimeOffset.UtcNow.AddMinutes(1).UtcDateTime.ToString("r", System.Globalization.CultureInfo.InvariantCulture) })
+    {
+        var handler = new FixtureHandler((_, _) => Task.FromResult(Response(429, Error("rate_limit_exceeded"))))
+            { Decorate = response => response.Headers.TryAddWithoutValidation("Retry-After", header) };
+        using var http = new HttpClient(handler); var sink = new MemorySink();
+        var result = await Relay(http, sink);
+        Check(handler.Count == 1 && result.StatusCode == 429 && sink.Headers["Retry-After"] == header);
+    }
+    foreach (var header in new[] { "1.5", "-1", "86400", "SECRET-CANARY", "2\r\nAuthorization: SECRET-CANARY" })
+        Check(ModelErrors.ValidateRetryAfter(header) is null);
+    Check(ModelErrors.FromUpstream(HttpStatusCode.Unauthorized, Encoding.UTF8.GetBytes(Error("unknown")), "1").Status == 401);
+    Check(ModelErrors.FromUpstream(HttpStatusCode.ServiceUnavailable, Encoding.UTF8.GetBytes(Error("usage_limit_reached")), "1").FailoverReason is null);
+}
 static async Task NetworkFailure()
 {
     var handler = new FixtureHandler((_, _) => throw new HttpRequestException("secret-do-not-log"));
@@ -94,10 +145,10 @@ static async Task StreamQuota()
 {
     const string events = "data: {\"type\":\"response.created\"}\n\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"usage_limit_reached\"}}}\n\n";
     var handler = new FixtureHandler((_, _) => Task.FromResult(Response(200, events, "text/event-stream")));
-    using var client = new HttpClient(handler); var sink = new MemorySink(); var rejected = new List<string>();
+    using var client = new HttpClient(handler); var sink = new MemorySink(); var rejected = new List<string>(); ModelError? observed = null;
     var result = await new ResponsesRelay(client).ForwardAsync("{}"u8.ToArray(), "application/json", Candidates(), new Dictionary<string, string>(), sink, default,
-        (lease, reason) => rejected.Add(lease.AccountId + ":" + reason));
-    Check(result.Committed && handler.Count == 1 && sink.Text == events && rejected.SequenceEqual(new[] { "A:quota_rejected" }));
+        (lease, reason) => rejected.Add(lease.AccountId + ":" + reason), classified: (_, error) => observed = error);
+    Check(result.Committed && handler.Count == 1 && sink.Text == events && rejected.SequenceEqual(new[] { "A:quota_rejected" }) && observed?.Type == "usage_limit_reached");
 }
 static async Task CompletedMetadata()
 {
@@ -256,6 +307,8 @@ sealed class FixtureHandler(Func<int, HttpRequestMessage, Task<HttpResponseMessa
 }
 sealed class MemorySink : IResponseSink
 {
+    public Dictionary<string,string> Headers { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public void SetHeader(string name, string value) => Headers[name] = value;
     private readonly MemoryStream bytes = new();
     public string Text => Encoding.UTF8.GetString(bytes.ToArray());
     public Action? OnWrite { get; init; }
