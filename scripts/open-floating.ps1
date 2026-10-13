@@ -24,4 +24,5 @@ if (-not $taskOnline) {
     # The desktop launcher opts into account migration; the saved AutoSwitch setting still controls scheduling.
     Start-Process -FilePath $taskDaemon -ArgumentList @('serve', '--live-boundary-probe') -WorkingDirectory (Split-Path $taskDaemon -Parent) -WindowStyle Hidden
 }
-Start-Process -FilePath $taskWindow -WorkingDirectory (Split-Path $taskWindow -Parent) -WindowStyle Normal
+. (Join-Path $PSScriptRoot 'desktop-client.ps1')
+Start-PoolDesktopClient -BuildDirectory $taskBuild

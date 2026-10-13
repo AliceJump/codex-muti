@@ -1,5 +1,12 @@
 using CodexPool.Floating;
 using System.Windows.Media;
+using System.Windows;
+using System.Windows.Controls;
+using System.Runtime.InteropServices;
+using System.Reflection;
+using System.Windows.Threading;
+using System.Windows.Media.Animation;
+using System.Text.Json;
 
 internal static class Program
 {
@@ -10,7 +17,7 @@ internal static class Program
         void Run(string name, Action test)
         {
             try { test(); Console.WriteLine("PASS " + name); }
-            catch { failed++; Console.WriteLine("FAIL " + name); }
+            catch (Exception ex) { failed++; Console.WriteLine("FAIL " + name + " " + ex.GetType().Name + ": " + ex.Message); }
         }
         Run("Either quota window exhausted marks the account, unknown alone does not", () =>
         {
@@ -33,8 +40,135 @@ internal static class Program
             Check(QuotaIndicator.Ring(0, 44, 3.5).IsEmpty());
             Check(QuotaIndicator.Ring(double.NaN, 44, 3.5).IsEmpty());
         });
-        Console.WriteLine($"{2 - failed}/2 passed; no windows, credentials or proxy processes opened");
+        Run("Unavailable capsule visibly disables both current and standby accounts", () =>
+        {
+            foreach (var active in new[] { false, true })
+            {
+                var chip = CapsuleLayout.Account("账户", "冷却中", "冷却中", active, false, Brushes.Black, Brushes.Blue, Brushes.Gray);
+                Check(!chip.IsEnabled && chip.Opacity < .6);
+                Check(ToolTipService.GetShowOnDisabled(chip));
+                var text = (TextBlock)((StackPanel)chip.Child).Children[0];
+                Check(text.Foreground == SystemColors.GrayTextBrush);
+                Check(chip.Background != Brushes.Blue);
+            }
+            var ready = CapsuleLayout.Account("账户", "5h 20%", "待命", false, true, Brushes.Black, Brushes.Blue, Brushes.Gray);
+            Check(ready.IsEnabled && ready.Opacity == 1);
+        });
+        Run("Tray GUID survives updates, version 4 callbacks and Explorer restart", () =>
+        {
+            var calls = new List<(uint Operation, StableTrayIcon.NotifyData Data)>();
+            bool Record(uint operation, ref StableTrayIcon.NotifyData data) { calls.Add((operation, data)); return true; }
+            using var tray = new StableTrayIcon(QuotaTrayIcon.Create(50), "预览", Record);
+            var clicks = new List<(int X, int Y)>(); tray.MouseClick += (_, e) => clicks.Add((e.X, e.Y));
+            var packed = ((900 & 0xffff) << 16) | (-1200 & 0xffff);
+            _ = SendMessage(tray.Handle, 0x8001, packed, (1 << 16) | 0x400);
+            _ = SendMessage(tray.Handle, 0x8001, packed, (1 << 16) | 0x401);
+            Check(clicks.Count == 2 && clicks.All(x => x == (-1200, 900)));
+            tray.Text = "额度更新";
+            tray.ShowBalloon("账户切换", "已切换");
+            _ = SendMessage(tray.Handle, RegisterWindowMessage("TaskbarCreated"), 0, 0);
+            tray.Dispose();
+            Check(calls.Count(x => x.Operation == 0) == 2);
+            Check(calls.Count(x => x.Operation == 4 && x.Data.Version == 4) == 2);
+            Check(calls.All(x => x.Data.Guid == StableTrayIcon.Identity && (x.Data.Flags & 0x20) != 0));
+            Check(calls.Last().Operation == 2);
+            Check(Marshal.SizeOf<StableTrayIcon.NotifyData>() == (IntPtr.Size == 8 ? 976 : 956));
+        });
+        Run("Flyout centers above icon and stays in the clicked monitor work area", () =>
+        {
+            var work = new System.Drawing.Rectangle(0, 0, 1920, 1040);
+            var icon = new System.Drawing.Rectangle(1400, 1050, 24, 24);
+            var point = FlyoutPlacement.Above(work, icon, 206, 53, 12);
+            Check(point.X + 103 == 1412 && point.Y + 53 + 12 == icon.Top);
+            var edge = FlyoutPlacement.Above(work, new(1890, 1050, 24, 24), 380, 400, 12);
+            Check(edge.X == 1540 && edge.Y + 400 <= work.Bottom);
+            var other = FlyoutPlacement.Above(new(-1920, -100, 1920, 1040), new(-800, 950, 24, 24), 206, 53, 12);
+            Check(other.X + 103 == -788 && other.Y + 53 == 938);
+            var top = FlyoutPlacement.Above(work, new(500, 0, 24, 24), 380, 400, 12);
+            Check(top.Y == 36);
+            var overflow = FlyoutPlacement.Above(work, new(1600, 850, 24, 24), 206, 53, 12);
+            Check(overflow.Y + 53 + 12 == 850);
+        });
+        Run("Shape transition keeps the native host fixed and animates only its surface", () =>
+        {
+            var previous = Environment.GetEnvironmentVariable("CODEX_POOL_DATA_DIR");
+            Environment.SetEnvironmentVariable("CODEX_POOL_DATA_DIR", System.IO.Path.GetFullPath(".research/ui-animation-fixture"));
+            try
+            {
+                var window = new FloatingWindow(); // Not shown: SourceInitialized/network startup never runs.
+                var method = typeof(FloatingWindow).GetMethod("AnimateShape", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.DeclaredOnly)!;
+                var clock = (ClockGroup)method.Invoke(window, new object[] { 206d, 53d, 380d, 330d })!;
+                Check(window.SizeToContent == SizeToContent.Manual);
+                var surface = (Border)window.FindName("Surface");
+                clock.Controller!.SeekAlignedToLastTick(TimeSpan.FromMilliseconds(190), TimeSeekOrigin.BeginTime);
+                Check(window.Width == 380 && window.Height == 330);
+                Check(surface.Width > 206 && surface.Width < 380 && surface.Height > 53 && surface.Height < 330);
+                clock.Controller.SeekAlignedToLastTick(TimeSpan.FromMilliseconds(381), TimeSeekOrigin.BeginTime);
+                Pump(30);
+                Check(window.SizeToContent == SizeToContent.Height && window.Width == 380);
+            }
+            finally { Environment.SetEnvironmentVariable("CODEX_POOL_DATA_DIR", previous); }
+        });
+        Run("Three layouts reuse account controls and hidden windows cancel unfinished motion", () =>
+        {
+            var previous = Environment.GetEnvironmentVariable("CODEX_POOL_DATA_DIR");
+            Environment.SetEnvironmentVariable("CODEX_POOL_DATA_DIR", System.IO.Path.GetFullPath(".research/ui-layout-fixture"));
+            try
+            {
+                var window = new FloatingWindow();
+                const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+                var render = typeof(FloatingWindow).GetMethod("Render", flags)!;
+                typeof(FloatingWindow).GetField("connected", flags)!.SetValue(window, true);
+                var state = JsonSerializer.SerializeToElement(new
+                {
+                    automaticSwitching = true, inFlightRequests = Array.Empty<object>(),
+                    accounts = new[] {
+                        new { id = "a", name = "yyds26309", active = true, enabled = true, paused = false, drain = false, state = "active", auth = "ready", plan = "Plus" },
+                        new { id = "b", name = "hpst26309", active = false, enabled = true, paused = false, drain = false, state = "standby", auth = "ready", plan = "Plus" }
+                    },
+                    usage = new[] { new { accountId = "a", updatedAt = DateTimeOffset.UtcNow, windows = new[] {
+                        new { kind = "5h", remainingPercent = 66, resetAt = DateTimeOffset.UtcNow.AddHours(2) },
+                        new { kind = "weekly", remainingPercent = 95, resetAt = DateTimeOffset.UtcNow.AddDays(2) } } } }
+                });
+                AccountElements? original = null;
+                for (var mode = 0; mode <= 2; mode++)
+                {
+                    typeof(FloatingWindow).GetField("preferences", flags)!.SetValue(window, new WindowPreferences(Mode: mode));
+                    render.Invoke(window, new object[] { state });
+                    var current = ((Dictionary<string, AccountElements>)typeof(FloatingWindow).GetField("accountElements", flags)!.GetValue(window)!)["a"];
+                    original ??= current;
+                    Check(ReferenceEquals(original, current) && ReferenceEquals(original.Card, current.Card));
+                    var root = (Border)window.FindName("Surface");
+                    root.Measure(new Size(window.Width, double.PositiveInfinity)); root.Arrange(new Rect(root.DesiredSize));
+                    Check(root.IsAncestorOf(original.Name) && root.IsAncestorOf(original.FiveValue) && root.IsAncestorOf(original.WeekValue));
+                    Check(original.FiveValue.Text == "66%" && original.WeekValue.Text == "95%");
+                    if (mode == 2)
+                    {
+                        var all = (Dictionary<string, AccountElements>)typeof(FloatingWindow).GetField("accountElements", flags)!.GetValue(window)!;
+                        var first = original.Card.TransformToAncestor(root).Transform(new Point());
+                        var second = all["b"].Card.TransformToAncestor(root).Transform(new Point());
+                        Check(Math.Abs(first.Y - second.Y) < .1 && second.X > first.X);
+                    }
+                }
+                // Simulate a pending native transition; network/render must keep those clocks alive.
+                typeof(FloatingWindow).GetField("changingShape", flags)!.SetValue(window, true);
+                // Hidden windows cancel motion by design. The visible-path contract is covered by the live UI.
+                render.Invoke(window, new object[] { state });
+                Check(!(bool)typeof(FloatingWindow).GetField("changingShape", flags)!.GetValue(window)!);
+            }
+            finally { Environment.SetEnvironmentVariable("CODEX_POOL_DATA_DIR", previous); }
+        });
+        Console.WriteLine($"{7 - failed}/7 passed; no shown windows, credentials, real tray registration or proxy processes");
         return failed == 0 ? 0 : 1;
     }
     private static void Check(bool value) { if (!value) throw new InvalidOperationException(); }
+    private static void Pump(int milliseconds)
+    {
+        var frame = new DispatcherFrame();
+        var timer = new DispatcherTimer(DispatcherPriority.Send) { Interval = TimeSpan.FromMilliseconds(milliseconds) };
+        timer.Tick += (_, _) => { timer.Stop(); frame.Continue = false; };
+        timer.Start(); Dispatcher.PushFrame(frame);
+    }
+    [DllImport("user32.dll")] private static extern nint SendMessage(nint window, uint message, nint wParam, nint lParam);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern uint RegisterWindowMessage(string name);
 }

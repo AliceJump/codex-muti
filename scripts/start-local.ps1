@@ -22,10 +22,10 @@ if (-not $taskOnline) {
     if (-not $taskOnline) { throw '代理尚未就绪，请检查本机运行环境。脚本未终止任何进程。' }
     Write-Host '新构建的代理已启动，Web 服务已启用。'
 } else { Write-Host '代理已经运行，保留现有代理，不替换进程。新代理修复需你手动退出旧代理后再启动。' }
-Start-Process -FilePath $taskTray -ArgumentList '--tray' -WorkingDirectory (Split-Path $taskTray -Parent) -WindowStyle Hidden
+. (Join-Path $PSScriptRoot 'desktop-client.ps1')
+Start-PoolDesktopClient -BuildDirectory $taskBuild -Tray
 Write-Host '托盘客户端已启动。若旧客户端仍在运行，请从其托盘菜单退出界面后重试；这不会停止代理。'
 if ($Floating) {
-    $taskWindow = Join-Path $taskBuild 'Floating\CodexPool.Floating.exe'
-    Start-Process -FilePath $taskWindow -WorkingDirectory (Split-Path $taskWindow -Parent) -WindowStyle Normal
+    Start-PoolDesktopClient -BuildDirectory $taskBuild
 }
 if ($Dashboard) { & $taskDaemon dashboard }

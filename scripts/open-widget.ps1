@@ -11,4 +11,5 @@ if (-not (Test-Path -LiteralPath $taskWindow)) {
     throw '请先运行 scripts\build-widget.ps1。'
 }
 # The widget starts the adjacent daemon if needed; Web is already part of that daemon.
-Start-Process -FilePath $taskWindow -ArgumentList '--tray' -WorkingDirectory (Split-Path $taskWindow -Parent) -WindowStyle Hidden
+. (Join-Path $PSScriptRoot 'desktop-client.ps1')
+Start-PoolDesktopClient -BuildDirectory $taskBuild -Tray

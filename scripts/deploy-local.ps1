@@ -104,8 +104,9 @@ try {
     Move-Item -LiteralPath ($taskPointer + '.tmp') -Destination $taskPointer -Force
     Write-Host '4/4 新代理已就绪，启动托盘界面。'
     try {
-        Start-PoolUi $taskNewTray $true
-        if ($Floating -or @($taskOldUi | Where-Object { -not $_.Tray }).Count) { Start-PoolUi $taskNewFloating $false }
+        . (Join-Path $PSScriptRoot 'desktop-client.ps1')
+        Start-PoolDesktopClient -BuildDirectory $taskBuild -Tray
+        if ($Floating -or @($taskOldUi | Where-Object { -not $_.Tray }).Count) { Start-PoolDesktopClient -BuildDirectory $taskBuild }
         if ($Dashboard) { & $taskNewExe dashboard }
     } catch { Write-Warning '代理已部署成功，UI 可使用 start-local.ps1 手动打开。' }
     Write-Host "部署完成：$taskBuild"
