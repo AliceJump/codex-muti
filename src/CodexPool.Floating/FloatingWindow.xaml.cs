@@ -16,6 +16,8 @@ using Forms = System.Windows.Forms;
 using MediaColor = System.Windows.Media.Color;
 using Brush = System.Windows.Media.SolidColorBrush;
 using SystemColors = System.Windows.SystemColors;
+using ProgressBar = System.Windows.Controls.ProgressBar;
+using Orientation = System.Windows.Controls.Orientation;
 
 namespace CodexPool.Floating;
 
@@ -170,7 +172,7 @@ public partial class FloatingWindow : Window
                     FontSize = 15,
                     FontWeight = FontWeights.SemiBold,
                     Foreground = new Brush(accent),
-                    HorizontalAlignment = HorizontalAlignment.Right,
+                    HorizontalAlignment = System.Windows.HorizontalAlignment.Right,
                     VerticalAlignment = VerticalAlignment.Top,
                     Margin = new Thickness(0, -1, 0, 0)
                 });

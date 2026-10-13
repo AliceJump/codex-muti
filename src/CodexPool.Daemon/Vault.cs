@@ -7,6 +7,9 @@ using CodexPool.Core;
 
 namespace CodexPool.Daemon;
 
+public sealed class AccountDeletionRejected(string code) : Exception(code)
+{ public string Code { get; } = code; }
+
 public sealed class AccountCredential
 {
     public required string Id { get; init; }
@@ -52,6 +55,7 @@ public sealed class Vault
     private readonly string directory;
     private readonly string path;
     private readonly object gate = new();
+    private readonly Dictionary<string, (int Model, int Background)> uses = new(StringComparer.Ordinal);
     private VaultDocument document;
     public Vault(string directory)
     {
@@ -68,6 +72,31 @@ public sealed class Vault
         if (!File.Exists(path)) Persist(document);
     }
     public string LocalKey { get { lock (gate) return document.LocalKey; } }
+    public IDisposable AcquireUse(string id, bool model = false)
+    {
+        lock (gate)
+        {
+            if (!document.Accounts.Any(x => x.Id == id)) throw new AuthFailure("account_not_found");
+            var count = uses.GetValueOrDefault(id);
+            uses[id] = model ? (count.Model + 1, count.Background) : (count.Model, count.Background + 1);
+            return new AccountUse(this, id, model);
+        }
+    }
+    private void ReleaseUse(string id, bool model)
+    {
+        lock (gate)
+        {
+            var count = uses[id];
+            count = model ? (count.Model - 1, count.Background) : (count.Model, count.Background - 1);
+            if (count == (0, 0)) uses.Remove(id); else uses[id] = count;
+        }
+    }
+    private sealed class AccountUse(Vault vault, string id, bool model) : IDisposable
+    {
+        private Vault? owner = vault;
+        public void Dispose() => Interlocked.Exchange(ref owner, null)?.ReleaseUse(id, model);
+        public override string ToString() => "AccountUse [REDACTED]";
+    }
     public bool AcceptsNativeModelBearer(string bearer)
     {
         // Ingress proof is independent of sticky scheduling. Pausing a route does not log the user out.
@@ -173,11 +202,11 @@ public sealed class Vault
     }
     /// <summary>
     /// Permanently removes credentials, control flags and quota for the account.
-    /// When the deleted account was active, newActiveId is the first remaining eligible
-    /// account (auto-pick standby), else null when the vault is empty. Returns false if id unknown.
-    /// Caller must sync PoolRuntime when newActiveId is set. Never logs tokens.
+    /// The same lock coordinates deletion and all upstream-operation reservations.
+    /// PoolRuntime must synchronize its owner after durable removal, including an empty pool.
     /// </summary>
-    public bool Delete(string id, out string? newActiveId)
+    public bool Delete(string id, out string? newActiveId, bool allowMigration = true,
+        Func<AccountCredential, bool>? eligible = null)
     {
         lock (gate)
         {
@@ -185,12 +214,21 @@ public sealed class Vault
             var next = CloneDocument(document);
             var index = next.Accounts.FindIndex(x => x.Id == id);
             if (index < 0) return false;
+            var use = uses.GetValueOrDefault(id);
+            if (use.Model > 0) throw new AccountDeletionRejected("account_in_flight");
+            if (use.Background > 0) throw new AccountDeletionRejected("account_busy");
             var wasActive = next.ActiveAccountId == id;
+            AccountCredential? standby = null;
+            if (wasActive && next.Accounts.Count > 1)
+            {
+                if (!allowMigration) throw new AccountDeletionRejected("live_migration_gate_pending");
+                standby = next.Accounts.FirstOrDefault(x => x.Id != id && (eligible ?? IsEligible)(x));
+                if (standby is null) throw new AccountDeletionRejected("activate_another_first");
+            }
             next.Accounts.RemoveAt(index);
             next.Quotas.RemoveAll(x => x.AccountId == id);
             if (wasActive)
             {
-                var standby = next.Accounts.FirstOrDefault(IsEligible) ?? next.Accounts.FirstOrDefault();
                 next.ActiveAccountId = standby?.Id;
                 newActiveId = next.ActiveAccountId;
             }

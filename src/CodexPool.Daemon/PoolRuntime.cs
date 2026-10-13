@@ -6,6 +6,7 @@ namespace CodexPool.Daemon;
 public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool boundaryProbe)
 {
     private readonly object gate = new();
+    private long requestsStarted;
     private readonly StickyScheduler scheduler = new(vault.ActiveId, id =>
     { if (!vault.ActivateForProbe(id)) throw new NoEligibleAccountException(); });
     public PoolSettings Settings => boundaryProbe ? vault.Settings : vault.Settings with { AutoSwitch = false };
@@ -32,7 +33,36 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
     {
         lock (gate)
         {
+            if (scheduler.Active != id && requestsStarted > 0 && !boundaryProbe) throw new AuthFailure("live_migration_gate_pending");
             scheduler.Activate(id, Accounts(), Settings, DateTimeOffset.UtcNow);
+        }
+    }
+    public ModelReservation ReserveModelRequest()
+    {
+        lock (gate)
+        {
+            var selection = Select();
+            var ids = Candidates(selection);
+            var uses = new List<IDisposable>();
+            try
+            {
+                foreach (var id in ids) uses.Add(vault.AcquireUse(id, model: true));
+                requestsStarted++;
+                return new(selection, ids, uses);
+            }
+            catch { foreach (var use in uses) use.Dispose(); throw; }
+        }
+    }
+    public bool Delete(string id, out string? newActiveId)
+    {
+        lock (gate)
+        {
+            var provider = vault.Find(id)?.ProviderKind;
+            if (!vault.Delete(id, out newActiveId, boundaryProbe || requestsStarted == 0,
+                x => Vault.IsEligible(x) && auth.Health(x.Id) != "reauth_required" && x.ProviderKind == provider)) return false;
+            scheduler.AccountDeleted(id, newActiveId, DateTimeOffset.UtcNow);
+            quota.Forget(id);
+            return true;
         }
     }
     public void UpdateSettings(PoolSettings settings)
@@ -70,4 +100,12 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
                 try { Select(); } catch (NoEligibleAccountException) { }
         }
     }
+}
+
+public sealed class ModelReservation(AccountSelection selection, string[] candidateIds, List<IDisposable> uses) : IDisposable
+{
+    public AccountSelection Selection { get; } = selection;
+    public IReadOnlyList<string> CandidateIds { get; } = candidateIds;
+    public void Dispose() { foreach (var use in uses) use.Dispose(); }
+    public override string ToString() => "ModelReservation [REDACTED]";
 }

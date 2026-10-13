@@ -49,6 +49,7 @@ public sealed class OAuth(HttpClient http, Vault vault)
         if (!pending.TryRemove(state, out var login) || login.ExpiresAt < DateTimeOffset.UtcNow) throw new AuthFailure("invalid_login_state");
         if (error is not null) throw new AuthFailure("authorization_denied");
         if (string.IsNullOrEmpty(code)) throw new AuthFailure("missing_authorization_code");
+        using var use = login.AccountId is null ? null : vault.AcquireUse(login.AccountId);
         var clientId = login.ClientId == "dynamic_agent_client" ? issuedClientId : login.ClientId;
         if (string.IsNullOrWhiteSpace(clientId) || clientId == "dynamic_agent_client" || clientId.Length > 256 || clientId.Any(char.IsControl))
             throw new AuthFailure("missing_issued_client_id");
@@ -67,6 +68,7 @@ public sealed class OAuth(HttpClient http, Vault vault)
 
     public async Task<AccountCredential> ReadyAsync(string id, CancellationToken cancellationToken, bool forceRefresh = false)
     {
+        using var use = vault.AcquireUse(id);
         var refreshLock = refreshLocks.GetOrAdd(id, _ => new(1, 1)); await refreshLock.WaitAsync(cancellationToken);
         try
         {

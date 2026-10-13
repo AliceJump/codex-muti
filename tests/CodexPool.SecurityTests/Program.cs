@@ -31,12 +31,15 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Official model ingress accepts A/B, tracks rotation, excludes controls and never writes login", OfficialIngress),
     ("Native zstd request bytes survive decoding; corrupt, unsupported and oversized bodies fail safely", CompressedRequest),
     ("Delete removes vault entry and rejects unknown id", AccountDelete),
+    ("Delete protects selected and standby model reservations, releases on failure and clears empty scheduler", DeleteModelReservations),
+    ("Delete refuses active handover beyond the migration gate and preserves eligible routing", DeleteMigrationGate),
+    ("Delete coordinates refresh, quota, catalog and reauthorization with deterministic barriers", DeleteBackgroundOperations),
     ("Catalog client_version prefers Codex query and keeps visibility=list Sol slugs", CatalogClientVersion)
 };
 if (args.Length != 0)
 {
-    if (args.Length != 2 || args[0] != "--filter") return 2;
-    tests = tests.Where(x => x.Name.Contains(args[1], StringComparison.OrdinalIgnoreCase)).ToArray();
+    if (args.Length != 2 || args[0] is not ("--filter" or "--skip")) return 2;
+    tests = tests.Where(x => x.Name.Contains(args[1], StringComparison.OrdinalIgnoreCase) == (args[0] == "--filter")).ToArray();
     if (tests.Length == 0) return 2;
 }
 var failed = 0;
@@ -386,6 +389,118 @@ Task AccountDelete()
     return Task.CompletedTask;
 }
 
+static void DeleteRejected(Action delete, string code)
+{
+    try { delete(); throw new InvalidOperationException(); }
+    catch (AccountDeletionRejected ex) { Check(ex.Code == code); }
+}
+Task DeleteModelReservations()
+{
+    var vault = Store("delete-model-reservation"); vault.Add(Account("A")); vault.Add(Account("B"));
+    using var issuer = new FakeIssuer(); using var http = new HttpClient(issuer);
+    var quota = new Quota(http, new OAuth(http, vault), vault);
+    var pool = new PoolRuntime(vault, new OAuth(http, vault), quota, true); pool.UpdateSettings(new(true));
+    var reservation = pool.ReserveModelRequest();
+    Check(reservation.CandidateIds.SequenceEqual(new[] { "A", "B" }));
+    foreach (var id in reservation.CandidateIds) DeleteRejected(() => pool.Delete(id, out _), "account_in_flight");
+    // A standby that has not sent a byte is still part of this request's protected lease set.
+    pool.Rejected(new("A", new("https://fixture.invalid"), "synthetic"), "quota_rejected");
+    pool.Complete(reservation.Selection, new("B", 200, 2, true, "stream_forwarded"));
+    Check(pool.Active == "B");
+    reservation.Dispose(); reservation.Dispose();
+    Check(pool.Delete("A", out _) && pool.Active == "B");
+    Check(pool.Delete("B", out var empty) && empty is null && pool.Active is null && vault.ActiveId is null);
+    vault.Add(Account("C")); pool.UpdateSettings(new(false));
+    Check(pool.Select().AccountId == "C");
+    pool.Complete(reservation.Selection, new("A", 200, 2, true, "stream_forwarded"));
+    Check(pool.Active == "C" && vault.ActiveId == "C");
+    try { using var use = vault.AcquireUse("A"); Check(false); } catch (AuthFailure ex) { Check(ex.Code == "account_not_found"); }
+    // ABA: identical account IDs return, and the old request reports a valid failover target.
+    // Only the advanced epoch can stop that stale completion from replacing the new owner.
+    vault.Add(Account("A")); vault.Add(Account("B")); pool.UpdateSettings(new(true)); pool.Activate("A");
+    pool.Complete(reservation.Selection, new("B", 200, 2, true, "stream_forwarded"));
+    Check(pool.Active == "A" && vault.ActiveId == "A");
+    // Unwinding before a model send (e.g. auth failure/cancellation) releases every candidate.
+    vault.Add(Account("D")); pool.UpdateSettings(new(true));
+    try { using var pending = pool.ReserveModelRequest(); throw new OperationCanceledException(); } catch (OperationCanceledException) { }
+    Check(pool.Delete("D", out _));
+    return Task.CompletedTask;
+}
+Task DeleteMigrationGate()
+{
+    var vault = Store("delete-migration-gate"); vault.Add(Account("A")); vault.Add(Account("B"));
+    using var issuer = new FakeIssuer(); using var http = new HttpClient(issuer); var auth = new OAuth(http, vault);
+    var pool = new PoolRuntime(vault, auth, new Quota(http, auth, vault), false);
+    using (var request = pool.ReserveModelRequest()) Check(request.Selection.AccountId == "A");
+    DeleteRejected(() => pool.Delete("A", out _), "live_migration_gate_pending");
+    Check(pool.Active == "A" && vault.ActiveId == "A" && vault.Find("A") is not null);
+    try { pool.Activate("B"); Check(false); } catch (AuthFailure ex) { Check(ex.Code == "live_migration_gate_pending"); }
+    Check(pool.Delete("B", out _)); // Removing standby does not cross an account boundary.
+    Check(pool.Delete("A", out _) && pool.Active is null);
+    vault.Add(Account("C")); Check(pool.Select().AccountId == "C");
+    var excluded = Store("delete-excluded"); excluded.Add(Account("A")); excluded.Add(Account("B")); excluded.Control("B", "pause");
+    DeleteRejected(() => excluded.Delete("A", out _), "activate_another_first");
+    Check(excluded.Find("A") is not null && excluded.ActiveId == "A");
+    return Task.CompletedTask;
+}
+async Task DeleteBackgroundOperations()
+{
+    var vault = Store("delete-background"); vault.Add(Account("A")); vault.Add(Account("B"));
+    using var issuer = new FakeIssuer(); using var http = new HttpClient(issuer); var auth = new OAuth(http, vault);
+    var quota = new Quota(http, auth, vault); var pool = new PoolRuntime(vault, auth, quota, true);
+    var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    issuer.Barrier = async token => { entered.TrySetResult(); await release.Task.WaitAsync(token); };
+    var refresh = auth.ReadyAsync("A", default);
+    try
+    {
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        DeleteRejected(() => pool.Delete("A", out _), "account_busy");
+        Check(vault.Find("B")!.RefreshToken == "REFRESH-CANARY-B");
+    }
+    finally { release.TrySetResult(); }
+    await refresh;
+    issuer.Barrier = null;
+    var nativeA = Account("N1"); nativeA.ProviderKind = "native"; nativeA.BackendAccountId = "backend-N1"; nativeA.ExpiresAt = DateTimeOffset.UtcNow.AddHours(1); vault.Add(nativeA);
+    var nativeB = Account("N2"); nativeB.ProviderKind = "native"; nativeB.BackendAccountId = "backend-N2"; nativeB.ExpiresAt = DateTimeOffset.UtcNow.AddHours(1); vault.Add(nativeB);
+    var quotaEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var quotaRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    using var quotaHttp = new HttpClient(new AsyncHandler(async (_, token) =>
+    {
+        quotaEntered.TrySetResult(); await quotaRelease.Task.WaitAsync(token);
+        return new(HttpStatusCode.OK) { Content = new StringContent("{\"plan_type\":\"plus\",\"rate_limit\":{\"primary_window\":{\"limit_window_seconds\":18000,\"used_percent\":10,\"reset_at\":2000000000}}}") };
+    }));
+    var nativeQuota = new Quota(quotaHttp, auth, vault);
+    var nativePool = new PoolRuntime(vault, auth, nativeQuota, true);
+    var pendingQuota = nativeQuota.RefreshAsync("N1", default);
+    try { await quotaEntered.Task.WaitAsync(TimeSpan.FromSeconds(3)); DeleteRejected(() => nativePool.Delete("N1", out _), "account_busy"); }
+    finally { quotaRelease.TrySetResult(); }
+    await pendingQuota;
+    Check(nativePool.Delete("N1", out _) && nativeQuota.Snapshot("N1") is null);
+    await nativeQuota.RefreshAsync("N2", default); Check(nativeQuota.Snapshot("N2") is not null);
+    using (var catalog = vault.AcquireUse("B"))
+    {
+        await auth.ReadyAsync("B", default);
+        DeleteRejected(() => pool.Delete("B", out _), "account_busy");
+    }
+    var query = Query(new Uri(await auth.BeginAsync("A again", "A", default)).Query); issuer.Nonce = query["nonce"];
+    Check(pool.Delete("A", out _));
+    try { await auth.CompleteAsync(query["state"], "synthetic-code", "client-A", null, default); Check(false); }
+    catch (AuthFailure ex) { Check(ex.Code == "account_not_found"); }
+    Check(vault.Find("A") is null);
+    // A callback already in flight also pins the old registration through the final write.
+    var bQuery = Query(new Uri(await auth.BeginAsync("B again", "B", default)).Query); issuer.Nonce = bQuery["nonce"];
+    var callbackEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var callbackRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    issuer.Barrier = async token => { callbackEntered.TrySetResult(); await callbackRelease.Task.WaitAsync(token); };
+    var callback = auth.CompleteAsync(bQuery["state"], "synthetic-code", "client-B", null, default);
+    try { await callbackEntered.Task.WaitAsync(TimeSpan.FromSeconds(3)); DeleteRejected(() => pool.Delete("B", out _), "account_busy"); }
+    finally { callbackRelease.TrySetResult(); }
+    await callback;
+    vault.Add(Account("C")); // Keep a compatible standby for deleting the active SIWC account.
+    Check(pool.Delete("B", out _));
+}
+
 async Task CatalogClientVersion()
 {
     Check(CodexClientVersion.FromQueryOrFallback("0.162.1", "0.157.1") == "0.162.1");
@@ -414,6 +529,7 @@ sealed class FakeIssuer : HttpMessageHandler
     public bool GrantPlan { get; set; } = true;
     public bool RejectRefresh { get; set; }
     public bool OmitNativeRefresh { get; set; }
+    public Func<CancellationToken, Task>? Barrier { get; set; }
     public int RefreshCalls { get; private set; }
     public int CodeCalls { get; private set; }
     public bool ValidPkce { get; private set; }
@@ -439,6 +555,7 @@ sealed class FakeIssuer : HttpMessageHandler
         }
         if (path == "/oauth/token")
         {
+            if (Barrier is not null) await Barrier(cancellationToken);
             if (request.Content!.Headers.ContentType?.MediaType != "application/json") throw new InvalidOperationException();
             using var native = JsonDocument.Parse(await request.Content.ReadAsStringAsync(cancellationToken)); var nativeFields = native.RootElement;
             if (nativeFields.GetProperty("client_id").GetString() != NativeLogin.NativeClientId || nativeFields.TryGetProperty("resource", out _)) throw new InvalidOperationException();
@@ -451,6 +568,7 @@ sealed class FakeIssuer : HttpMessageHandler
         var fields = (await request.Content!.ReadAsStringAsync(cancellationToken)).Split('&').Select(x => x.Split('=', 2)).ToDictionary(x => WebUtility.UrlDecode(x[0]), x => WebUtility.UrlDecode(x[1]));
         var clientId = fields["client_id"];
         CheckForm(request, fields);
+        if (Barrier is not null) await Barrier(cancellationToken);
         if (fields["grant_type"] == "refresh_token")
         {
             RefreshCalls++; UsedRefreshTokens.Add(fields["refresh_token"]); await Task.Delay(20, cancellationToken);
@@ -471,4 +589,9 @@ sealed class FakeIssuer : HttpMessageHandler
     }
     private static HttpResponseMessage Json(object value, int status = 200) => new((HttpStatusCode)status) { Content = new StringContent(JsonSerializer.Serialize(value), Encoding.UTF8, "application/json") };
     protected override void Dispose(bool disposing) { if (disposing) signing.Dispose(); base.Dispose(disposing); }
+}
+
+sealed class AsyncHandler(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> handle) : HttpMessageHandler
+{
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) => handle(request, cancellationToken);
 }
