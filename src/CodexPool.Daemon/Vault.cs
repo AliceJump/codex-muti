@@ -171,6 +171,34 @@ public sealed class Vault
             Persist(next); document = next; return true;
         }
     }
+    /// <summary>
+    /// Permanently removes credentials, control flags and quota for the account.
+    /// When the deleted account was active, newActiveId is the first remaining eligible
+    /// account (auto-pick standby), else null when the vault is empty. Returns false if id unknown.
+    /// Caller must sync PoolRuntime when newActiveId is set. Never logs tokens.
+    /// </summary>
+    public bool Delete(string id, out string? newActiveId)
+    {
+        lock (gate)
+        {
+            newActiveId = null;
+            var next = CloneDocument(document);
+            var index = next.Accounts.FindIndex(x => x.Id == id);
+            if (index < 0) return false;
+            var wasActive = next.ActiveAccountId == id;
+            next.Accounts.RemoveAt(index);
+            next.Quotas.RemoveAll(x => x.AccountId == id);
+            if (wasActive)
+            {
+                var standby = next.Accounts.FirstOrDefault(IsEligible) ?? next.Accounts.FirstOrDefault();
+                next.ActiveAccountId = standby?.Id;
+                newActiveId = next.ActiveAccountId;
+            }
+            else newActiveId = next.ActiveAccountId;
+            Persist(next); document = next; return true;
+        }
+    }
+
     public void ReplaceTokens(string id, string expectedRefreshToken, TokenResponse tokens)
     {
         lock (gate)

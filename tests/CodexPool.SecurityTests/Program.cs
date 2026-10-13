@@ -30,6 +30,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Native JSON refresh isolates A/B and accepts omitted replacement refresh token", NativeRefresh),
     ("Official model ingress accepts A/B, tracks rotation, excludes controls and never writes login", OfficialIngress),
     ("Native zstd request bytes survive decoding; corrupt, unsupported and oversized bodies fail safely", CompressedRequest),
+    ("Delete removes vault entry and rejects unknown id", AccountDelete),
     ("Catalog client_version prefers Codex query and keeps visibility=list Sol slugs", CatalogClientVersion)
 };
 if (args.Length != 0)
@@ -360,6 +361,31 @@ async Task LocalApi()
     }
     finally { if (!server.HasExited) { server.Kill(true); await server.WaitForExitAsync(); } }
 }
+Task AccountDelete()
+{
+    var vault = Store("account-delete");
+    vault.Add(Account("A")); vault.Add(Account("B"));
+    vault.SaveQuota(new("B", "native_codex_usage", "plus", DateTimeOffset.UtcNow,
+        [new("5h", 18000, 10, 90, DateTimeOffset.UtcNow.AddHours(1))]));
+    Check(!vault.Delete("missing", out _));
+    Check(vault.Find("missing") is null);
+    var beforeA = vault.Find("A")!.RefreshToken;
+    Check(vault.Delete("B", out var stillActive) && stillActive == "A");
+    Check(vault.Find("B") is null && vault.Quotas.All(x => x.AccountId != "B"));
+    Check(vault.Find("A")!.RefreshToken == beforeA && vault.ActiveId == "A");
+    Check(vault.Delete("A", out var cleared) && cleared is null);
+    Check(vault.Find("A") is null && vault.ActiveId is null && vault.PublicAccounts.Length == 0);
+    var reopened = Store("account-delete");
+    Check(reopened.PublicAccounts.Length == 0 && reopened.ActiveId is null);
+    // Active deleted with eligible standby auto-picked
+    var vault2 = Store("account-delete-active");
+    vault2.Add(Account("A")); vault2.Add(Account("B"));
+    Check(vault2.ActiveId == "A");
+    Check(vault2.Delete("A", out var promoted) && promoted == "B" && vault2.ActiveId == "B");
+    Check(vault2.Find("A") is null && vault2.Find("B") is not null);
+    return Task.CompletedTask;
+}
+
 async Task CatalogClientVersion()
 {
     Check(CodexClientVersion.FromQueryOrFallback("0.162.1", "0.157.1") == "0.162.1");

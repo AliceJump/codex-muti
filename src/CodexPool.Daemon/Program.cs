@@ -185,6 +185,22 @@ try
         app.MapPost("/accounts/{id}/" + operation, (string id) => vault.Control(id, operation)
             ? Results.Ok(new { accountId = id, operation, affects = "new_requests_only" })
             : Results.NotFound(new { error = new { code = "account_not_found" } }));
+    app.MapPost("/accounts/{id}/delete", (string id) =>
+    {
+        // Permanent vault removal. Never echoes tokens. Design: auto-pick eligible standby when deleting active.
+        if (vault.Find(id) is null) return Results.NotFound(new { error = new { code = "account_not_found" } });
+        if (inFlight.TryGetValue(id, out var flying) && flying > 0)
+            return Results.Conflict(new { error = new { code = "account_in_flight" } });
+        var deletingActive = vault.ActiveId == id;
+        var others = vault.Accounts.Where(x => x.Id != id).ToArray();
+        if (deletingActive && others.Length > 0 && !others.Any(Vault.IsEligible))
+            return Results.Conflict(new { error = new { code = "activate_another_first" } });
+        if (!vault.Delete(id, out var newActiveId))
+            return Results.NotFound(new { error = new { code = "account_not_found" } });
+        if (deletingActive && newActiveId is not null) pool.Activate(newActiveId);
+        return Results.Ok(new { deleted = id, activeAccountId = newActiveId, affects = "credentials_removed" });
+    });
+
     // Built-in OpenAI first probes WebSocket. 426 selects Codex's supported HTTP/SSE fallback.
     // No model request or upstream bytes are sent for this transport negotiation.
     app.MapGet("/v1/responses", () => Results.StatusCode(StatusCodes.Status426UpgradeRequired));
