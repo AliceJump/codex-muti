@@ -31,6 +31,11 @@ function Start-PoolDaemon([string]$Path, [bool]$BoundaryProbe) {
     if ($BoundaryProbe) { $taskArgs += '--live-boundary-probe' }
     Start-Process -FilePath $Path -ArgumentList $taskArgs -WorkingDirectory (Split-Path $Path -Parent) -WindowStyle Hidden -PassThru
 }
+function Get-PoolSettingsSnapshot($Settings) {
+    # Older daemons omit the new optional threshold. Compare its effective absence as null.
+    [ordered]@{autoSwitch=[bool]$Settings.autoSwitch;fiveHourThreshold=[double]$Settings.fiveHourThreshold;
+        weeklyThreshold=[double]$Settings.weeklyThreshold;windowThreshold=$Settings.windowThreshold} | ConvertTo-Json -Compress
+}
 function Wait-PoolDaemon($Process, [string]$Path) {
     for ($taskAttempt=0; $taskAttempt -lt 30; $taskAttempt++) {
         $Process.Refresh()
@@ -99,7 +104,7 @@ try {
     Write-Host '3/4 启动新版本并验证健康状态…'
     $taskNew = Start-PoolDaemon $taskNewExe $taskBoundary
     $taskNewStatus = Wait-PoolDaemon $taskNew $taskNewExe
-    if ($taskOld -and ($taskNewStatus.settings | ConvertTo-Json -Compress) -ne ($taskStatus.settings | ConvertTo-Json -Compress)) { throw '账户池设置校验失败。' }
+    if ($taskOld -and (Get-PoolSettingsSnapshot $taskNewStatus.settings) -ne (Get-PoolSettingsSnapshot $taskStatus.settings)) { throw '账户池设置校验失败。' }
     [IO.File]::WriteAllText($taskPointer + '.tmp', (@{path=$taskBuild;builtAt=[DateTimeOffset]::UtcNow.ToString('O')} | ConvertTo-Json -Compress))
     Move-Item -LiteralPath ($taskPointer + '.tmp') -Destination $taskPointer -Force
     Write-Host '4/4 新代理已就绪，启动托盘界面。'

@@ -95,7 +95,7 @@ macOS SwiftUI 客户端原型和构建脚本已提供，当前尚未通过 Mac �
 - 默认只监听 loopback，不提供 LAN 开关。精确 Host/Origin 检查、HttpOnly/SameSite 浏览器会话及 CSRF 校验保护控制 API；浏览器 cookie 不能调用模型或取得本地模型 key。
 - `/health` 为最小公开状态；`/status`、`/accounts`、`/usage`、`/models` 和控制/模型请求需要本地鉴权。`/auth/callback` 使用一次性 state、nonce、PKCE 和 ID token 校验。
 
-`/usage` 对 SIWC 明确返回未知。原生注册使用固定官方源码中的 usage endpoint，按实际窗口时长识别 5h/weekly，保存每账户独立快照并每 30 秒刷新；过期/缺失数据不伪装为 0%。阈值决策只使用新鲜且未过 reset 的窗口。两个原生账户的真实接口已通过；它是版本敏感的私有 Codex 接口。
+`/usage` 对 SIWC 明确返回未知。原生注册使用固定官方源码中的 usage endpoint，按实际秒数处理任意窗口时长（包括 5h、7h、9h、周），保存每账户独立快照并每 30 秒刷新。界面动态展示窗口和 credits，窗口缺失不解释为无限额度，过期/缺失数据不伪装为 0%。Web 的统一窗口阈值和 `pool.ps1 settings on 95` 适用于各时长，调度仅使用新鲜且未过 reset 的窗口，并独立处理上游许可、credits 与支出限制。两个原生账户的原有 5h/weekly 真实接口已通过，任意窗口扩展目前由合成测试验证；该接口是版本敏感的私有 Codex 接口。
 
 Web 提供今日／最近 7 天／累计 Token 统计、账户与模型汇总、每日趋势和请求明细；完整悬浮窗显示账户今日用量。`pool.ps1 statistics` 或本地鉴权的 `/statistics` 可读取同一汇总。数据独立加密保存，缓存／推理是输入／输出子集，缺少上游 usage 显示未报告。仅统计新版本启用后经过代理的请求，详见 [额度与 Token 统计](docs/usage-statistics.md)。
 

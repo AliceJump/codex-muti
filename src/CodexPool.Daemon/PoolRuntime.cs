@@ -23,8 +23,9 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
                 var usage = quota.Snapshot(x.Id);
                 var fresh = usage?.Fresh(now) == true;
                 var exhausted = fresh ? usage!.RoutingWindows(model, now).Where(w => w.UsedPercent >= 100).OrderByDescending(w => w.ResetAt).FirstOrDefault() : null;
-                var denied = fresh && (usage!.SpendControlReached == true || usage.Allowed == false && !usage.CreditsAvailable
-                    || usage.LimitReached == true && usage.Allowed != true && !usage.CreditsAvailable);
+                var allowanceCurrent = fresh && !usage!.Windows.Any(w => w.LimitId == "codex" && w.ResetAt <= now);
+                var denied = fresh && usage!.SpendControlReached == true || allowanceCurrent && !usage!.CreditsAvailable
+                    && (usage.Allowed == false || usage.LimitReached == true && usage.Allowed != true);
                 var reason = !x.Enabled ? "disabled" : x.Paused ? "paused" : x.Draining ? "draining"
                     : x.AuthStatus == "reauth_required" || auth.Health(x.Id) == "reauth_required" ? "auth_unavailable"
                     : x.AuthStatus == "refresh_pending" ? auth.IsRefreshing(x.Id) ? "auth_temporarily_unavailable" : "auth_unavailable"

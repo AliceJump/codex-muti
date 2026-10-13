@@ -14,8 +14,10 @@ internal sealed class AccountElements
     {
         if (!Windows.TryGetValue(display.Key, out var row))
         {
-            row = display.Kind == "5h" && display.Key.StartsWith("codex:", StringComparison.Ordinal) ? new(FiveHeading, FiveValue, FiveReset, FiveTrack)
-                : display.Kind == "weekly" && display.Key.StartsWith("codex:", StringComparison.Ordinal) ? new(WeekHeading, WeekValue, WeekReset, WeekTrack) : new();
+            row = display.Kind == "5h" && display.Key.StartsWith("codex:", StringComparison.Ordinal) && Windows.Values.All(x => !ReferenceEquals(x.Value, FiveValue))
+                ? new(FiveHeading, FiveValue, FiveReset, FiveTrack)
+                : display.Kind == "weekly" && display.Key.StartsWith("codex:", StringComparison.Ordinal) && Windows.Values.All(x => !ReferenceEquals(x.Value, WeekValue))
+                    ? new(WeekHeading, WeekValue, WeekReset, WeekTrack) : new();
             Windows[display.Key] = row;
         }
         return row;

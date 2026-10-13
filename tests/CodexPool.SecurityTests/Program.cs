@@ -367,6 +367,8 @@ Task DynamicQuotaParser()
     var none = Quota.Parse("A", "{\"rate_limit\":{\"allowed\":true,\"primary_window\":null}}"u8.ToArray());
     Check(none.Windows.Count == 0 && none.WindowState == "not_reported");
     Check(Quota.Parse("A", "{}"u8.ToArray()).WindowState == "unknown");
+    var third = Quota.Parse("A", "{\"rate_limit\":{\"monthly_window\":{\"used_percent\":20,\"limit_window_seconds\":2592000,\"reset_at\":253402300798}}}"u8.ToArray());
+    Check(third.Windows.Single().WindowSeconds == 2592000 && third.Windows.Single().Kind == "monthly_window");
     var optional = Quota.Parse("A", "{\"rate_limit\":{\"primary_window\":{\"used_percent\":20}}}"u8.ToArray()).Windows.Single();
     Check(optional.WindowSeconds is null && optional.ResetAt is null && optional.RemainingPercent == 80);
     Check(Quota.Parse("A", "{\"rate_limit\":{\"allowed\":true,\"primary_window\":{\"used_percent\":-1}}}"u8.ToArray()).WindowState == "unknown");
@@ -386,6 +388,7 @@ Task DynamicQuotaRouting()
     Check(Pool(baseline with { Windows = [], Allowed = false }).Availability()[0].Reason == "quota_exhausted");
     Check(Pool(baseline with { Windows = [], Credits = new(true, false, 10), SpendControlReached = true }).Availability()[0].ErrorCode == "insufficient_quota");
     Check(Pool(baseline with { Windows = [], Allowed = false, UpdatedAt = now.AddMinutes(-3) }).Availability()[0].Available);
+    Check(Pool(baseline with { Windows = [new("primary_window", 25200, 100, 0, now.AddSeconds(-1))], Allowed = false, LimitReached = true }).Availability()[0].Available);
     var scoped = baseline with { Windows = [new("primary_window", 32400, 100, 0, now.AddHours(1), "additional_0", "gpt-6-luna")] };
     var pool = Pool(scoped); Check(pool.Availability()[0].Available && pool.Availability("gpt-6.1-sol")[0].Available);
     Check(pool.Availability("gpt-6-luna")[0].Reason == "quota_exhausted");
@@ -449,6 +452,9 @@ async Task LocalApi()
         browser.DefaultRequestHeaders.Add("X-Codex-Pool-CSRF", sessionJson.RootElement.GetProperty("csrf").GetString());
         using var settings = await browser.PostAsJsonAsync("http://127.0.0.1:3210/settings", new { autoSwitch = false, fiveHourThreshold = 90, weeklyThreshold = 90 });
         Check(settings.IsSuccessStatusCode);
+        using var genericSettings = await browser.PostAsJsonAsync("http://127.0.0.1:3210/settings", new { autoSwitch = false, windowThreshold = 88 });
+        using var genericSettingsJson = JsonDocument.Parse(await genericSettings.Content.ReadAsStringAsync());
+        Check(genericSettings.IsSuccessStatusCode && genericSettingsJson.RootElement.GetProperty("windowThreshold").GetDouble() == 88);
         using var gated = await browser.PostAsJsonAsync("http://127.0.0.1:3210/settings", new { autoSwitch = true, fiveHourThreshold = 90, weeklyThreshold = 90 });
         Check(gated.StatusCode == HttpStatusCode.ServiceUnavailable);
         using var browserModel = await browser.PostAsJsonAsync("http://127.0.0.1:3210/v1/responses", new { }); Check(browserModel.StatusCode == HttpStatusCode.Unauthorized);

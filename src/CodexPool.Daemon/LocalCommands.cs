@@ -14,7 +14,7 @@ public static class LocalCommands
     {
         if (command == "help")
         {
-            Console.WriteLine("serve [--live-boundary-probe] | login/native-login <label> | dashboard | status | usage | statistics | models | settings [on/off 5h weekly] | rename <account-id> <name> | activate/pause/resume/drain/undrain/enable/disable/refresh/delete <account-id> | codex [official arguments]"); return 0;
+            Console.WriteLine("serve [--live-boundary-probe] | login/native-login <label> | dashboard | status | usage | statistics | models | settings [on/off threshold] | rename <account-id> <name> | activate/pause/resume/drain/undrain/enable/disable/refresh/delete <account-id> | codex [official arguments]"); return 0;
         }
         var key = Vault.ReadLocalKey(directory);
         if (command == "model-credential")

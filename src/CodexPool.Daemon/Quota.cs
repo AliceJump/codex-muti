@@ -63,7 +63,7 @@ public sealed class Quota(HttpClient http, OAuth auth, Vault vault)
         var windows = new List<QuotaWindow>(); var malformed = false;
         void AddWindows(JsonElement limit, string limitId, string? model = null, string? name = null)
         {
-            foreach (var field in new[] { "primary_window", "secondary_window" })
+            foreach (var field in limit.EnumerateObject().Where(p => Regex.IsMatch(p.Name, "^[a-zA-Z0-9_]{1,64}_window$")).Take(64).Select(p => p.Name))
             {
                 if (!limit.TryGetProperty(field, out var window) || window.ValueKind == JsonValueKind.Null) continue;
                 if (window.ValueKind != JsonValueKind.Object || !window.TryGetProperty("used_percent", out var usedValue)
@@ -105,7 +105,7 @@ public sealed class Quota(HttpClient http, OAuth auth, Vault vault)
             decimal? balance = null;
             if (creditValue.TryGetProperty("balance", out var amount))
             {
-                if (amount.ValueKind == JsonValueKind.String && decimal.TryParse(amount.GetString(), System.Globalization.NumberStyles.Number,
+                if (amount.ValueKind == JsonValueKind.String && decimal.TryParse(amount.GetString(), System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var textBalance) && textBalance >= 0) balance = textBalance;
                 else if (amount.ValueKind == JsonValueKind.Number && amount.TryGetDecimal(out var numberBalance) && numberBalance >= 0) balance = numberBalance;
             }

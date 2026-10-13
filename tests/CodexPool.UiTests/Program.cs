@@ -251,6 +251,11 @@ internal static class Program
                 Check(QuotaDisplay.Windows(none).Length == 0 && QuotaDisplay.State(none).StartsWith("Credits "));
                 var optional = JsonSerializer.SerializeToElement(new { updatedAt = DateTimeOffset.UtcNow, windows = new[] { new { kind = "primary_window", windowSeconds = (int?)null, resetAt = (DateTimeOffset?)null, remainingPercent = 20 } } });
                 Check(QuotaDisplay.Windows(optional).Single().Remaining is null && QuotaDisplay.Windows(optional).Single().Label == "额度窗口");
+                var duplicates = JsonSerializer.SerializeToElement(new { updatedAt = DateTimeOffset.UtcNow, windows = new[] {
+                    new { kind = "5h", windowSeconds = 18000, remainingPercent = 80, resetAt = DateTimeOffset.UtcNow.AddHours(1) },
+                    new { kind = "5h", windowSeconds = 18000, remainingPercent = 60, resetAt = DateTimeOffset.UtcNow.AddHours(2) } } });
+                var rows = QuotaDisplay.Windows(duplicates); var shared = new AccountElements();
+                Check(!ReferenceEquals(shared.Window(rows[0]).Value, shared.Window(rows[1]).Value));
             }
             finally { Environment.SetEnvironmentVariable("CODEX_POOL_DATA_DIR", previous); }
         });
