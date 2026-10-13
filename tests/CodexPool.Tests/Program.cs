@@ -31,7 +31,12 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Failed durable selection never changes active owner or epoch", PersistenceFailure),
     ("Completed metadata requires a delivered event and cannot reopen replay", CompletedMetadata),
     ("Wire errors preserve known semantic codes without leaking upstream data", WireErrors),
-    ("Retry advice is validated and delivered without authorizing failover", RetryAdvice)
+    ("Retry advice is validated and delivered without authorizing failover", RetryAdvice),
+    ("Token counters validate totals and preserve unknown detail subsets", TokenParser),
+    ("Fragmented terminal usage counts once on the serving lease and preserves SSE bytes", TerminalUsage),
+    ("Reported consumption survives downstream failure without reopening replay", UsageWriteFailure),
+    ("Missing, malformed, truncated and oversized usage remain unknown", UnknownUsage),
+    ("Large terminal events and multiline framing retain usage within the observer limit", LargeUsage)
 };
 var failed = 0;
 foreach (var (name, run) in tests)
@@ -238,6 +243,67 @@ static Task SecretRedaction()
     Check(!lease.ToString().Contains("upstream-a"));
     Check(!System.Text.Json.JsonSerializer.Serialize(lease).Contains("upstream-a"));
     return Task.CompletedTask;
+}
+static string UsageEvent(string type = "response.completed", string? usage = null, string extra = "") =>
+    "data: {\"type\":\"" + type + "\",\"response\":{\"id\":\"response-fixture\",\"usage\":"
+    + (usage ?? "{\"input_tokens\":120,\"output_tokens\":30,\"total_tokens\":150,\"input_tokens_details\":{\"cached_tokens\":80},\"output_tokens_details\":{\"reasoning_tokens\":20}}") + extra + "}}\n\n";
+static Task TokenParser()
+{
+    ResponseTokenUsage? Parse(string value)
+    { using var json = System.Text.Json.JsonDocument.Parse("{\"usage\":" + value + "}"); return ResponseTokenUsage.Parse(json.RootElement); }
+    Check(Parse("{\"input_tokens\":120,\"output_tokens\":30,\"total_tokens\":150}") == new ResponseTokenUsage(120, 30, 150, null, null));
+    Check(Parse("{\"input_tokens\":0,\"output_tokens\":0,\"total_tokens\":0,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens_details\":{\"reasoning_tokens\":0}}") == new ResponseTokenUsage(0, 0, 0, 0, 0));
+    foreach (var value in new[] { "null", "[]", "{}", "{\"input_tokens\":-1,\"output_tokens\":30,\"total_tokens\":29}",
+        "{\"input_tokens\":1.5,\"output_tokens\":30,\"total_tokens\":31}", "{\"input_tokens\":120,\"output_tokens\":30,\"total_tokens\":151}",
+        "{\"input_tokens\":9223372036854775807,\"output_tokens\":1,\"total_tokens\":0}" }) Check(Parse(value) is null);
+    Check(Parse("{\"input_tokens\":120,\"output_tokens\":30,\"total_tokens\":150,\"input_tokens_details\":{\"cached_tokens\":121},\"output_tokens_details\":{\"reasoning_tokens\":-1}}") == new ResponseTokenUsage(120, 30, 150, null, null));
+    return Task.CompletedTask;
+}
+static async Task TerminalUsage()
+{
+    foreach (var type in new[] { "response.completed", "response.incomplete", "response.failed" })
+    {
+        var events = UsageEvent(type) + UsageEvent(type);
+        var handler = new FixtureHandler((index, _) => Task.FromResult(index == 1 ? Response(429, Error("usage_limit_reached"))
+            : new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(new FragmentsStream(Encoding.UTF8.GetBytes(events))) }));
+        handler.Decorate = response => { if (response.IsSuccessStatusCode) response.Content.Headers.ContentType = new("text/event-stream"); };
+        using var client = new HttpClient(handler); var sink = new MemorySink(); var usages = new List<(string, ResponseTokenUsage)>();
+        var result = await new ResponsesRelay(client).ForwardAsync("{}"u8.ToArray(), "application/json", Candidates(), new Dictionary<string, string>(), sink, default,
+            usage: (lease, value) => usages.Add((lease.AccountId, value)));
+        Check(result.AccountId == "B" && handler.Count == 2 && sink.Text == events && usages.Count == 1
+            && usages[0] == ("B", new ResponseTokenUsage(120, 30, 150, 80, 20)));
+    }
+}
+static async Task UsageWriteFailure()
+{
+    var handler = new FixtureHandler((_, _) => Task.FromResult(Response(200, UsageEvent(), "text/event-stream")));
+    using var client = new HttpClient(handler); ResponseTokenUsage? tokens = null;
+    var result = await new ResponsesRelay(client).ForwardAsync("{}"u8.ToArray(), "application/json", Candidates(), new Dictionary<string, string>(),
+        new MemorySink { OnWrite = () => throw new IOException() }, default, usage: (_, value) => tokens = value);
+    Check(tokens?.TotalTokens == 150 && result.Outcome == "stream_interrupted" && result.Committed && handler.Count == 1);
+}
+static async Task UnknownUsage()
+{
+    foreach (var events in new[] { UsageEvent(usage: "null"), UsageEvent(usage: "{}"), "data: {not-json}\n\n", UsageEvent().TrimEnd('\n'),
+        UsageEvent("response.created"), UsageEvent(extra: ",\"output\":\"" + new string('x', 2 * 1024 * 1024) + "\"") })
+    {
+        var handler = new FixtureHandler((_, _) => Task.FromResult(Response(200, events, "text/event-stream")));
+        using var client = new HttpClient(handler); var sink = new MemorySink(); var count = 0;
+        await new ResponsesRelay(client).ForwardAsync("{}"u8.ToArray(), "application/json", Candidates(), new Dictionary<string, string>(), sink, default,
+            usage: (_, _) => count++);
+        Check(count == 0 && handler.Count == 1 && sink.Text == events);
+    }
+}
+static async Task LargeUsage()
+{
+    var oversized = "data: {\"padding\":\"" + new string('x', 2 * 1024 * 1024) + "\"\ndata: ,\"type\":\"response.completed\"}\n\n";
+    var events = oversized + ": heartbeat\r\nevent: response.completed\r\n"
+        + UsageEvent(extra: ",\"output\":\"" + new string('x', 200000) + "\"").Replace(",\"usage\":", ",\n data: \"usage\":").Replace("\n data:", "\ndata:").Replace("\n", "\r\n");
+    var handler = new FixtureHandler((_, _) => Task.FromResult(Response(200, events, "text/event-stream")));
+    using var client = new HttpClient(handler); var sink = new MemorySink(); var count = 0;
+    await new ResponsesRelay(client).ForwardAsync("{}"u8.ToArray(), "application/json", Candidates(), new Dictionary<string, string>(), sink, default,
+        usage: (_, value) => { Check(value.TotalTokens == 150); count++; });
+    Check(count == 1 && sink.Text == events && handler.Count == 1);
 }
 static async Task MissingContentType()
 {
