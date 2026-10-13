@@ -62,6 +62,14 @@ openai_base_url = "http://127.0.0.1:3210/v1"
 
 ## 桌面小组件
 
+需要一键中止旧版本并部署时，在系统 PowerShell 中运行（或双击仓库根目录 `deploy.cmd`）：
+
+```powershell
+pwsh -NoProfile -File .\scripts\deploy-local.ps1 -Dashboard
+```
+
+先构建独立新目录，成功后只停止本仓库及其 worktree 的 `.local` 目录下的代理与 UI，再启动新版本、校验健康、更新启动指针；新服务启动失败时尝试恢复旧版本。当前模型请求会中断，这不是无损热更新。脚本不会停止 Codex 本身，不修改账户凭据或阈值；检测到正在登录或 token 刷新时会拒绝中止。非默认数据目录请在与原代理一致的 `CODEX_POOL_DATA_DIR`、`CODEX_HOME` 环境中运行。
+
 账户名称现在可在 Web 卡片操作区点击 **改名**，也可执行 `pool.ps1 rename <account-id> "新名称"`。改名仅修改显示标签，登录、额度和路由保持不变，详见 [账户改名](docs/account-rename.md)。
 
 手动构建并启动新版本（构建到独立目录，已有代理时保留原进程）：
