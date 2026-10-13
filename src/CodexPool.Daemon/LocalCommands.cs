@@ -14,7 +14,7 @@ public static class LocalCommands
     {
         if (command == "help")
         {
-            Console.WriteLine("serve [--live-boundary-probe] | login/native-login <label> | dashboard | status | usage | models | settings [on/off 5h weekly] | activate/pause/resume/drain/undrain/enable/disable/refresh <account-id> | codex [official arguments]"); return 0;
+            Console.WriteLine("serve [--live-boundary-probe] | login/native-login <label> | dashboard | status | usage | models | settings [on/off 5h weekly] | activate/pause/resume/drain/undrain/enable/disable/refresh/delete <account-id> | codex [official arguments]"); return 0;
         }
         var key = Vault.ReadLocalKey(directory);
         if (command == "model-credential")
@@ -60,10 +60,16 @@ public static class LocalCommands
             using var response = await client.GetAsync("http://127.0.0.1:3210/" + command); response.EnsureSuccessStatusCode();
             Console.WriteLine(await response.Content.ReadAsStringAsync()); return 0;
         }
-        if (command is "activate" or "pause" or "resume" or "drain" or "undrain" or "enable" or "disable" or "refresh" && args.Length == 1 && Guid.TryParseExact(args[0], "N", out _))
+        if (command is "activate" or "pause" or "resume" or "drain" or "undrain" or "enable" or "disable" or "refresh" or "delete" && args.Length == 1 && Guid.TryParseExact(args[0], "N", out _))
         {
             using var response = await client.PostAsync("http://127.0.0.1:3210/accounts/" + args[0] + "/" + command, null);
             if (command == "refresh" && response.IsSuccessStatusCode) { Console.WriteLine(await response.Content.ReadAsStringAsync()); return 0; }
+            if (command == "delete")
+            {
+                if (response.IsSuccessStatusCode) { Console.WriteLine("Account permanently removed from the local vault."); return 0; }
+                Console.WriteLine("Delete rejected; check account id, in-flight requests, or activate another eligible account first.");
+                return 1;
+            }
             Console.WriteLine(response.IsSuccessStatusCode ? "Account control applied for new requests." : "Control rejected; check account and live migration gate.");
             return response.IsSuccessStatusCode ? 0 : 1;
         }

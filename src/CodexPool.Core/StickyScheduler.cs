@@ -18,6 +18,19 @@ public sealed class StickyScheduler(string? activeId, Action<string>? persistSel
     private long epoch;
     private readonly Queue<AccountSwitch> history = new();
     public string? Active { get { lock (gate) return active; } }
+    public void AccountDeleted(string id, string? replacement, DateTimeOffset now)
+    {
+        lock (gate)
+        {
+            if (active != id) return;
+            active = replacement; epoch++;
+            if (replacement is not null)
+            {
+                history.Enqueue(new(now, id, replacement, "account_deleted", epoch));
+                while (history.Count > 100) history.Dequeue();
+            }
+        }
+    }
     public AccountSwitch[] History { get { lock (gate) return history.ToArray(); } }
     public AccountSelection Activate(string id, IReadOnlyList<PoolAccount> accounts, PoolSettings settings, DateTimeOffset now)
     {

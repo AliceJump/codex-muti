@@ -16,6 +16,8 @@ using Forms = System.Windows.Forms;
 using MediaColor = System.Windows.Media.Color;
 using Brush = System.Windows.Media.SolidColorBrush;
 using SystemColors = System.Windows.SystemColors;
+using ProgressBar = System.Windows.Controls.ProgressBar;
+using Orientation = System.Windows.Controls.Orientation;
 
 namespace CodexPool.Floating;
 
@@ -112,11 +114,13 @@ public partial class FloatingWindow : Window
     private void Render(JsonElement state)
     {
         snapshot = state; Accounts.IsEnabled = !busy; Accounts.Children.Clear();
-        var capsule = preferences.Mode == 2; Width = capsule ? 360 : 336;
+        var capsule = preferences.Mode == 2; Width = capsule ? 380 : 336;
         Header.Visibility = capsule ? Visibility.Collapsed : Visibility.Visible;
         Surface.Padding = capsule ? new Thickness(14, 10, 8, 10) : new Thickness(18, 14, 18, 14);
         Footer.Visibility = capsule ? Visibility.Collapsed : Visibility.Visible;
         AutoStatus.Text = state.GetProperty("automaticSwitching").GetBoolean() ? "Auto Switch · ON" : "Auto Switch · OFF";
+        var edge = (System.Windows.Media.Brush)Resources["EdgeBrush"];
+        var accent = MediaColor.FromRgb(103, 162, 243);
         var wrap = new WrapPanel();
         if (capsule)
         {
@@ -131,43 +135,182 @@ public partial class FloatingWindow : Window
             JsonElement Window(string kind) => usage.ValueKind == JsonValueKind.Object && usage.TryGetProperty("windows", out var windows)
                 ? windows.EnumerateArray().FirstOrDefault(x => x.GetProperty("kind").GetString() == kind) : default;
             var five = Window("5h"); var week = Window("weekly");
-            var radio = new System.Windows.Controls.RadioButton { GroupName = "Accounts", IsChecked = active, Content = capsule ? name + " " + Percent(five) : name,
-                FontWeight = active ? FontWeights.SemiBold : FontWeights.Normal, Margin = new Thickness(0, 0, capsule ? 14 : 0, 0),
-                IsEnabled = account.GetProperty("enabled").GetBoolean() && !account.GetProperty("paused").GetBoolean() && !account.GetProperty("drain").GetBoolean()
-                    && account.GetProperty("state").GetString() != "cooldown" && auth is not ("reauth_required" or "refresh_pending") };
-            radio.Checked += async (_, _) => { if (!busy && !active) await ActivateAsync(id); };
-            if (capsule) { wrap.Children.Add(radio); continue; }
-            var card = new StackPanel(); card.Children.Add(radio);
+            var canActivate = account.GetProperty("enabled").GetBoolean() && !account.GetProperty("paused").GetBoolean() && !account.GetProperty("drain").GetBoolean()
+                && account.GetProperty("state").GetString() != "cooldown" && auth is not ("reauth_required" or "refresh_pending");
+            if (capsule)
+            {
+                wrap.Children.Add(CapsuleChip(id, name, five, active, canActivate, accent, edge));
+                continue;
+            }
+            var body = new StackPanel { Margin = new Thickness(0, 0, active ? 18 : 0, 0) };
+            body.Children.Add(new TextBlock
+            {
+                Text = name,
+                FontSize = 13,
+                FontWeight = active ? FontWeights.SemiBold : FontWeights.Normal,
+                TextWrapping = TextWrapping.NoWrap,
+                TextTrimming = TextTrimming.CharacterEllipsis
+            });
             if (preferences.Mode == 0)
             {
                 var status = account.GetProperty("state").GetString();
                 var plan = account.GetProperty("plan").ValueKind == JsonValueKind.String ? account.GetProperty("plan").GetString() : "Plan 待确认";
-                card.Children.Add(Label(plan + " · " + status, 11, .55, new Thickness(24, 5, 0, 10)));
+                body.Children.Add(Label(plan + " · " + status, 11, .55, new Thickness(0, 4, 0, 2)));
             }
-            card.Children.Add(QuotaRow("5h", five)); card.Children.Add(QuotaRow("Week", week));
+            body.Children.Add(QuotaBar("5h", five, accent));
+            body.Children.Add(QuotaBar("Week", week, accent));
             if (preferences.Mode == 0 && usage.ValueKind == JsonValueKind.Object && usage.TryGetProperty("updatedAt", out var updated))
-                card.Children.Add(Label("更新 " + updated.GetDateTimeOffset().ToLocalTime().ToString("HH:mm:ss")
-                    + (DateTimeOffset.UtcNow - updated.GetDateTimeOffset() > TimeSpan.FromMinutes(2) ? " · 已过期" : ""), 10, .45, new Thickness(24, 5, 0, 0)));
-            Accounts.Children.Add(new Border { Child = card, Padding = new Thickness(12), Margin = new Thickness(0, 0, 0, 8), CornerRadius = new CornerRadius(10),
-                Background = new Brush(active ? MediaColor.FromArgb(35, 103, 162, 243) : MediaColor.FromArgb(12, 135, 150, 170)) });
+                body.Children.Add(Label("更新 " + updated.GetDateTimeOffset().ToLocalTime().ToString("HH:mm:ss")
+                    + (DateTimeOffset.UtcNow - updated.GetDateTimeOffset() > TimeSpan.FromMinutes(2) ? " · 已过期" : ""), 10, .45, new Thickness(0, 6, 0, 0)));
+            var grid = new Grid();
+            grid.Children.Add(body);
+            if (active)
+            {
+                grid.Children.Add(new TextBlock
+                {
+                    Text = "✓",
+                    FontSize = 15,
+                    FontWeight = FontWeights.SemiBold,
+                    Foreground = new Brush(accent),
+                    HorizontalAlignment = System.Windows.HorizontalAlignment.Right,
+                    VerticalAlignment = VerticalAlignment.Top,
+                    Margin = new Thickness(0, -1, 0, 0)
+                });
+            }
+            var card = new Border
+            {
+                Child = grid,
+                Padding = new Thickness(12, 10, 12, 10),
+                Margin = new Thickness(0, 0, 0, 10),
+                CornerRadius = new CornerRadius(12),
+                BorderThickness = new Thickness(1.2),
+                BorderBrush = active ? new Brush(MediaColor.FromArgb(200, accent.R, accent.G, accent.B)) : edge,
+                Background = new Brush(active ? MediaColor.FromArgb(48, accent.R, accent.G, accent.B) : MediaColor.FromArgb(32, 135, 150, 170)),
+                Cursor = canActivate || active ? System.Windows.Input.Cursors.Hand : System.Windows.Input.Cursors.Arrow,
+                Opacity = canActivate || active ? 1 : 0.55
+            };
+            if (canActivate && !active)
+            {
+                var accountId = id;
+                card.MouseLeftButtonUp += async (_, e) =>
+                {
+                    if (busy) return;
+                    e.Handled = true;
+                    await ActivateAsync(accountId);
+                };
+            }
+            Accounts.Children.Add(card);
         }
         if (capsule) { var expand = new System.Windows.Controls.Button { Content = "◫", Padding = new Thickness(7, 2, 7, 2), ToolTip = "展开" }; expand.Click += CycleMode; wrap.Children.Add(expand); }
         if (!state.GetProperty("accounts").EnumerateArray().Any()) Accounts.Children.Add(Label("还没有账户。请在 Dashboard 添加。", 12, .7, new Thickness(0, 12, 0, 12)));
     }
-    private static string Percent(JsonElement window) => window.ValueKind == JsonValueKind.Object ? window.GetProperty("usedPercent").GetDouble().ToString("0") + "%" : "—";
-    private static TextBlock Label(string? value, double size, double opacity, Thickness margin) => new() { Text = value, FontSize = size, Opacity = opacity, Margin = margin };
-    private static Grid QuotaRow(string title, JsonElement window)
+    private Border CapsuleChip(string id, string name, JsonElement five, bool active, bool canActivate, MediaColor accent, System.Windows.Media.Brush edge)
     {
-        var grid = new Grid { Margin = new Thickness(24, 4, 0, 4) }; grid.ColumnDefinitions.Add(new() { Width = new GridLength(48) }); grid.ColumnDefinitions.Add(new()); grid.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
-        grid.Children.Add(Label(title, 12, .6, new Thickness()));
-        var used = Label(Percent(window), 12, 1, new Thickness()); Grid.SetColumn(used, 1); grid.Children.Add(used);
-        var left = "待确认";
-        if (window.ValueKind == JsonValueKind.Object)
+        var row = new StackPanel { Orientation = Orientation.Horizontal };
+        var title = new TextBlock
         {
-            var span = window.GetProperty("resetAt").GetDateTimeOffset() - DateTimeOffset.UtcNow;
-            left = span.TotalDays >= 1 ? $"{(int)span.TotalDays}d {span.Hours}h" : span.TotalHours >= 1 ? $"{(int)span.TotalHours}h {span.Minutes}m" : $"{Math.Max(0, (int)span.TotalMinutes)}m";
+            Text = name,
+            FontSize = 12,
+            FontWeight = active ? FontWeights.SemiBold : FontWeights.Normal,
+            VerticalAlignment = VerticalAlignment.Center,
+            Foreground = active ? new Brush(MediaColor.FromRgb(255, 255, 255)) : (System.Windows.Media.Brush)Resources["ForegroundBrush"]
+        };
+        row.Children.Add(title);
+        var used = five.ValueKind == JsonValueKind.Object ? Math.Clamp(five.GetProperty("usedPercent").GetDouble(), 0, 100) : 0;
+        row.Children.Add(new ProgressBar
+        {
+            Width = 34,
+            Height = 4,
+            Minimum = 0,
+            Maximum = 100,
+            Value = used,
+            Margin = new Thickness(8, 0, 4, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+            Foreground = new Brush(active ? MediaColor.FromRgb(255, 255, 255) : accent),
+            Background = new Brush(active ? MediaColor.FromArgb(90, 255, 255, 255) : MediaColor.FromArgb(45, 135, 150, 170)),
+            BorderThickness = new Thickness(0)
+        });
+        row.Children.Add(new TextBlock
+        {
+            Text = Percent(five),
+            FontSize = 10,
+            Opacity = active ? 0.95 : 0.75,
+            VerticalAlignment = VerticalAlignment.Center,
+            Foreground = active ? new Brush(MediaColor.FromRgb(255, 255, 255)) : (System.Windows.Media.Brush)Resources["ForegroundBrush"]
+        });
+        if (active)
+        {
+            row.Children.Add(new TextBlock
+            {
+                Text = "✓",
+                FontSize = 12,
+                FontWeight = FontWeights.SemiBold,
+                Margin = new Thickness(6, 0, 0, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+                Foreground = new Brush(MediaColor.FromRgb(255, 255, 255))
+            });
         }
-        var reset = Label(left, 11, .55, new Thickness()); Grid.SetColumn(reset, 2); grid.Children.Add(reset); return grid;
+        var chip = new Border
+        {
+            Child = row,
+            Padding = new Thickness(10, 6, 10, 6),
+            Margin = new Thickness(0, 0, 8, 6),
+            CornerRadius = new CornerRadius(14),
+            BorderThickness = new Thickness(1),
+            BorderBrush = active ? new Brush(MediaColor.FromArgb(220, accent.R, accent.G, accent.B)) : edge,
+            Background = active ? new Brush(accent) : new Brush(MediaColor.FromArgb(40, 135, 150, 170)),
+            Cursor = canActivate || active ? System.Windows.Input.Cursors.Hand : System.Windows.Input.Cursors.Arrow,
+            Opacity = canActivate || active ? 1 : 0.55
+        };
+        if (canActivate && !active)
+        {
+            var accountId = id;
+            chip.MouseLeftButtonUp += async (_, e) =>
+            {
+                if (busy) return;
+                e.Handled = true;
+                await ActivateAsync(accountId);
+            };
+        }
+        return chip;
+    }
+    private static string Percent(JsonElement window) => window.ValueKind == JsonValueKind.Object ? window.GetProperty("usedPercent").GetDouble().ToString("0") + "%" : "—";
+    private static string ResetLeft(JsonElement window)
+    {
+        if (window.ValueKind != JsonValueKind.Object) return "待确认";
+        var span = window.GetProperty("resetAt").GetDateTimeOffset() - DateTimeOffset.UtcNow;
+        return span.TotalDays >= 1 ? $"{(int)span.TotalDays}d {span.Hours}h" : span.TotalHours >= 1 ? $"{(int)span.TotalHours}h {span.Minutes}m" : $"{Math.Max(0, (int)span.TotalMinutes)}m";
+    }
+    private static TextBlock Label(string? value, double size, double opacity, Thickness margin) => new() { Text = value, FontSize = size, Opacity = opacity, Margin = margin };
+    private static StackPanel QuotaBar(string title, JsonElement window, MediaColor accent)
+    {
+        var root = new StackPanel { Margin = new Thickness(0, 7, 0, 0) };
+        var head = new Grid();
+        head.ColumnDefinitions.Add(new() { Width = new GridLength(42) });
+        head.ColumnDefinitions.Add(new());
+        head.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
+        var titleLabel = Label(title, 11, .65, new Thickness());
+        head.Children.Add(titleLabel);
+        var used = Label(Percent(window), 11, 1, new Thickness());
+        Grid.SetColumn(used, 1);
+        head.Children.Add(used);
+        var reset = Label(ResetLeft(window), 10, .55, new Thickness());
+        Grid.SetColumn(reset, 2);
+        head.Children.Add(reset);
+        root.Children.Add(head);
+        var value = window.ValueKind == JsonValueKind.Object ? Math.Clamp(window.GetProperty("usedPercent").GetDouble(), 0, 100) : 0;
+        root.Children.Add(new ProgressBar
+        {
+            Height = 6,
+            Minimum = 0,
+            Maximum = 100,
+            Value = value,
+            Margin = new Thickness(0, 5, 0, 0),
+            Foreground = new Brush(accent),
+            Background = new Brush(MediaColor.FromArgb(45, 135, 150, 170)),
+            BorderThickness = new Thickness(0)
+        });
+        return root;
     }
     private async Task ActivateAsync(string id)
     {
