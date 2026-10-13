@@ -14,7 +14,7 @@ public static class LocalCommands
     {
         if (command == "help")
         {
-            Console.WriteLine("serve [--live-boundary-probe] | login/native-login <label> | dashboard | status | usage | models | settings [on/off 5h weekly] | activate/pause/resume/drain/undrain/enable/disable/refresh/delete <account-id> | codex [official arguments]"); return 0;
+            Console.WriteLine("serve [--live-boundary-probe] | login/native-login <label> | dashboard | status | usage | models | settings [on/off 5h weekly] | rename <account-id> <name> | activate/pause/resume/drain/undrain/enable/disable/refresh/delete <account-id> | codex [official arguments]"); return 0;
         }
         var key = Vault.ReadLocalKey(directory);
         if (command == "model-credential")
@@ -59,6 +59,12 @@ public static class LocalCommands
         {
             using var response = await client.GetAsync("http://127.0.0.1:3210/" + command); response.EnsureSuccessStatusCode();
             Console.WriteLine(await response.Content.ReadAsStringAsync()); return 0;
+        }
+        if (command == "rename" && args.Length == 2 && Guid.TryParseExact(args[0], "N", out _))
+        {
+            using var response = await client.PostAsJsonAsync("http://127.0.0.1:3210/accounts/" + args[0] + "/rename", new { name = args[1] });
+            Console.WriteLine(response.IsSuccessStatusCode ? "账户名称已更新，登录和路由保持不变。" : "改名失败，请检查账户 ID 和名称（1–80 字符，不含控制字符）。");
+            return response.IsSuccessStatusCode ? 0 : 1;
         }
         if (command is "activate" or "pause" or "resume" or "drain" or "undrain" or "enable" or "disable" or "refresh" or "delete" && args.Length == 1 && Guid.TryParseExact(args[0], "N", out _))
         {

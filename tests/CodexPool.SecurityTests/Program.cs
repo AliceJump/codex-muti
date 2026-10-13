@@ -34,6 +34,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Delete protects selected and standby model reservations, releases on failure and clears empty scheduler", DeleteModelReservations),
     ("Delete refuses active handover beyond the migration gate and preserves eligible routing", DeleteMigrationGate),
     ("Delete coordinates refresh, quota, catalog and reauthorization with deterministic barriers", DeleteBackgroundOperations),
+    ("Rename preserves credentials, quotas, controls and active epoch through refresh and reauthorization", AccountRename),
     ("Catalog client_version prefers Codex query and keeps visibility=list Sol slugs", CatalogClientVersion)
 };
 if (args.Length != 0)
@@ -76,7 +77,7 @@ async Task OfficialIngress()
         Check(await auth.AcceptsAsync("GET", "/v1/responses", "Bearer " + token, default));
         Check(await auth.AcceptsAsync("GET", "/v1/models", "Bearer " + token, default));
         Check(!await auth.AcceptsAsync("POST", "/v1/models", "Bearer " + token, default));
-        foreach (var path in new[] { "/status", "/settings", "/accounts/A/activate", "/dashboard/session", "/v1/other" })
+        foreach (var path in new[] { "/status", "/settings", "/accounts/A/activate", "/accounts/A/rename", "/dashboard/session", "/v1/other" })
             Check(!await auth.AcceptsAsync("POST", path, "Bearer " + token, default));
         Check(!await auth.AcceptsAsync("DELETE", "/v1/responses", "Bearer " + token, default));
     }
@@ -363,6 +364,44 @@ async Task LocalApi()
         using var second = Start(); await second.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)); Check(second.ExitCode != 0);
     }
     finally { if (!server.HasExited) { server.Kill(true); await server.WaitForExitAsync(); } }
+}
+async Task AccountRename()
+{
+    var vault = Store("account-rename"); vault.Add(Account("A")); vault.Add(Account("B")); vault.Control("B", "pause");
+    vault.SaveQuota(new("A", "native_codex_usage", "plus", DateTimeOffset.UtcNow,
+        [new("5h", 18000, 25, 75, DateTimeOffset.UtcNow.AddHours(1))]));
+    using var issuer = new FakeIssuer(); using var http = new HttpClient(issuer); var auth = new OAuth(http, vault);
+    var pool = new PoolRuntime(vault, auth, new Quota(http, auth, vault), true);
+    var selection = pool.Select();
+    var beforeA = vault.Find("A")!; var beforeB = JsonSerializer.Serialize(vault.Find("B")); var quotas = JsonSerializer.Serialize(vault.Quotas);
+    using (var reserved = pool.ReserveModelRequest())
+    {
+        Check(vault.Rename("A", "  主力 账户  "));
+        Check(vault.Find("A")!.Name == "主力 账户");
+        var expected = JsonSerializer.Deserialize<AccountCredential>(JsonSerializer.Serialize(beforeA))!; expected.Name = "主力 账户";
+        Check(JsonSerializer.Serialize(vault.Find("A")) == JsonSerializer.Serialize(expected));
+        Check(vault.ActiveId == "A" && pool.Select().Epoch == selection.Epoch);
+    }
+    Check(JsonSerializer.Serialize(vault.Find("B")) == beforeB && JsonSerializer.Serialize(vault.Quotas) == quotas);
+    Check(Store("account-rename").Find("A")!.Name == "主力 账户");
+    Check(!vault.Rename("missing", "不存在"));
+    foreach (var invalid in new string?[] { null, "", "   ", new('x', 81), "A\nB", "A\t", "A\u007f", "A\u0085" })
+    {
+        try { vault.Rename("A", invalid); Check(false); } catch (ArgumentException) { }
+        Check(vault.Find("A")!.Name == "主力 账户");
+    }
+    var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    issuer.Barrier = async token => { entered.TrySetResult(); await release.Task.WaitAsync(token); };
+    var refresh = auth.ReadyAsync("A", default);
+    try { await entered.Task.WaitAsync(TimeSpan.FromSeconds(3)); Check(vault.Rename("A", "刷新中改名")); }
+    finally { release.TrySetResult(); }
+    await refresh; issuer.Barrier = null;
+    Check(vault.Find("A")!.Name == "刷新中改名" && JsonSerializer.Serialize(vault.Find("B")) == beforeB);
+    var query = Query(new Uri(await auth.BeginAsync("旧的登录名称", "A", default)).Query); issuer.Nonce = query["nonce"];
+    Check(await auth.CompleteAsync(query["state"], "synthetic-code", "client-A", null, default) == "A");
+    Check(vault.Find("A")!.Name == "刷新中改名" && pool.Select().Epoch == selection.Epoch);
+    Check(JsonSerializer.Serialize(vault.Quotas) == quotas && Store("account-rename").Find("A")!.Name == "刷新中改名");
 }
 Task AccountDelete()
 {

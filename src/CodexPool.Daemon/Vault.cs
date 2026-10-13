@@ -181,6 +181,19 @@ public sealed class Vault
             Persist(next); document = next;
         }
     }
+    public bool Rename(string id, string? name)
+    {
+        if (name is null || name.Any(char.IsControl)) throw new ArgumentException("invalid_account_name", nameof(name));
+        name = name.Trim();
+        if (name.Length is < 1 or > 80) throw new ArgumentException("invalid_account_name", nameof(name));
+        lock (gate)
+        {
+            var next = CloneDocument(document); var target = next.Accounts.FirstOrDefault(x => x.Id == id);
+            if (target is null) return false;
+            target.Name = name; // Only the local display label changes; grants and scheduler IDs remain stable.
+            Persist(next); document = next; return true;
+        }
+    }
     public bool Control(string id, string operation)
     {
         lock (gate)

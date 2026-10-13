@@ -62,6 +62,8 @@ openai_base_url = "http://127.0.0.1:3210/v1"
 
 ## 桌面小组件
 
+账户名称现在可在 Web 卡片操作区点击 **改名**，也可执行 `pool.ps1 rename <account-id> "新名称"`。改名仅修改显示标签，登录、额度和路由保持不变，详见 [账户改名](docs/account-rename.md)。
+
 手动构建并启动新版本（构建到独立目录，已有代理时保留原进程）：
 
 ```powershell

@@ -192,6 +192,19 @@ try
         app.MapPost("/accounts/{id}/" + operation, (string id) => vault.Control(id, operation)
             ? Results.Ok(new { accountId = id, operation, affects = "new_requests_only" })
             : Results.NotFound(new { error = new { code = "account_not_found" } }));
+    app.MapPost("/accounts/{id}/rename", async (string id, HttpContext context) =>
+    {
+        if (context.Request.ContentType?.StartsWith("application/json", StringComparison.OrdinalIgnoreCase) != true)
+            return Results.StatusCode(StatusCodes.Status415UnsupportedMediaType);
+        var input = await context.Request.ReadFromJsonAsync<RenameInput>(context.RequestAborted);
+        try
+        {
+            return vault.Rename(id, input?.Name)
+                ? Results.Ok(new { accountId = id, affects = "display_name_only" })
+                : Results.NotFound(new { error = new { code = "account_not_found" } });
+        }
+        catch (ArgumentException) { return Results.BadRequest(new { error = new { code = "invalid_account_name" } }); }
+    });
     app.MapPost("/accounts/{id}/delete", (string id) =>
     {
         try
@@ -300,6 +313,7 @@ catch { Console.Error.WriteLine("Daemon failed to start or stopped unexpectedly.
 
 
 sealed record LoginInput(string Name, string? AccountId);
+sealed record RenameInput(string? Name);
 sealed class WebSink(HttpContext context) : IResponseSink
 {
     public bool Started { get; private set; }
