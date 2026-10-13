@@ -62,6 +62,16 @@ openai_base_url = "http://127.0.0.1:3210/v1"
 
 ## 桌面小组件
 
+手动构建并启动新版本（构建到独立目录，已有代理时保留原进程）：
+
+```powershell
+.\scripts\build-and-start.ps1
+# 也打开 Web：
+.\scripts\build-and-start.ps1 -Dashboard
+```
+
+脚本不会停止或替换当前代理。要让新代理修复生效，请先结束请求、自己退出旧代理，再执行上述命令；旧托盘界面从菜单“退出托盘面板”退出即可。
+
 Windows 提供右下角托盘状态面板，单击 Codex Pool 图标展开当前账户、额度、自动切换状态，以及“打开悬浮窗 / 打开 Web”入口；点外部自动收起。Web 服务默认随代理启用。运行 `scripts/build-widget.ps1`、`scripts/install-widget-shortcut.ps1` 后，可双击桌面的“Codex Pool 小组件”启动托盘入口；快捷键为 `Ctrl+Alt+W`。它与原浮窗独立运行，退出 UI 后代理继续运行。
 
 macOS SwiftUI 客户端原型和构建脚本已提供，当前尚未通过 Mac 编译/真机验收，Mac Daemon 的 Keychain 存储适配仍待实现。Windows 无法直接运行原生 `.app`。使用方式与准确验收范围见 [docs/desktop-widget.md](docs/desktop-widget.md)。

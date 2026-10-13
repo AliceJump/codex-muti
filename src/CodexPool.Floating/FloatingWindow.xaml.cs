@@ -37,6 +37,7 @@ public partial class FloatingWindow : Window
     private readonly string preferencesFile;
     private Forms.Screen? flyoutScreen;
     private bool positioningFlyout;
+    private string? trayStateKey;
     private long dismissedAt;
     private System.Drawing.Point dismissedPoint;
     private nint handle;
@@ -57,6 +58,7 @@ public partial class FloatingWindow : Window
         PinButton.Content = Topmost ? "●" : "○";
         var shortcut = widget ? "Ctrl+Alt+W" : "Ctrl+Alt+C";
         tray = new Forms.NotifyIcon { Text = (widget ? "Codex Pool · 账户状态 · " : "Codex Pool · ") + shortcut, Icon = CreateIcon(), Visible = true };
+        if (widget) UpdateTrayQuota(null);
         var menu = new Forms.ContextMenuStrip();
         menu.Items.Add("显示 / 隐藏", null, (_, _) => Dispatcher.Invoke(ToggleVisibility));
         if (!widget) menu.Items.Add("重置位置", null, (_, _) => Dispatcher.Invoke(() => { preferences = preferences with { X = 80, Y = 80 }; RestorePosition(); Show(); }));
@@ -135,11 +137,17 @@ public partial class FloatingWindow : Window
                     using var document = JsonDocument.Parse(line[6..]); var state = document.RootElement.Clone();
                     await Dispatcher.InvokeAsync(() => { connected = true; Connection.Text = "● 服务在线 · Web 已启用"; Render(state); });
                 }
+                if (!lifetime.IsCancellationRequested) await Dispatcher.InvokeAsync(SetOffline);
             }
             catch (Exception ex) when (ex is HttpRequestException or IOException or UnauthorizedAccessException or System.Security.Cryptography.CryptographicException or JsonException or OperationCanceledException)
-            { if (!lifetime.IsCancellationRequested) await Dispatcher.InvokeAsync(() => { connected = false; Connection.Text = "服务离线 · 正在重新连接"; Accounts.IsEnabled = false; }); }
+            { if (!lifetime.IsCancellationRequested) await Dispatcher.InvokeAsync(SetOffline); }
             if (!lifetime.IsCancellationRequested) try { await Task.Delay(1500, lifetime.Token); } catch (OperationCanceledException) { }
         }
+    }
+    private void SetOffline()
+    {
+        connected = false; Connection.Text = "服务离线 · 正在重新连接"; Accounts.IsEnabled = false;
+        if (widget) UpdateTrayQuota(null);
     }
     internal async void ShowFromLauncher()
     {
@@ -150,6 +158,7 @@ public partial class FloatingWindow : Window
     }
     private void Render(JsonElement state)
     {
+        if (widget) UpdateTrayQuota(connected ? state : null);
         snapshot = state; Accounts.IsEnabled = !busy && connected; Accounts.Children.Clear();
         var capsule = preferences.Mode == 2; Width = capsule ? 380 : widget ? 380 : 336;
         Header.Visibility = capsule ? Visibility.Collapsed : Visibility.Visible;
@@ -257,6 +266,43 @@ public partial class FloatingWindow : Window
         }
         if (capsule) { var expand = new System.Windows.Controls.Button { Content = "◫", Padding = new Thickness(7, 2, 7, 2), ToolTip = "展开" }; expand.Click += CycleMode; wrap.Children.Add(expand); }
         if (Accounts.Children.Count == 0) Accounts.Children.Add(Label("没有启用的账户。请在 Web 面板添加或启用。", 12, .7, new Thickness(0, 12, 0, 12)));
+    }
+    private void UpdateTrayQuota(JsonElement? state)
+    {
+        double? used = null;
+        var threshold = 95d;
+        var tooltip = "Codex Pool\n服务离线 · 额度未知";
+        if (state is { } snapshot)
+        {
+            var account = snapshot.GetProperty("accounts").EnumerateArray().FirstOrDefault(x => x.GetProperty("active").GetBoolean());
+            if (account.ValueKind == JsonValueKind.Object)
+            {
+                var id = account.GetProperty("id").GetString();
+                var name = account.GetProperty("name").GetString() ?? "Codex Pool";
+                if (name.Length > 20) name = name[..10] + "…" + name[^9..];
+                var quota = snapshot.GetProperty("usage").EnumerateArray().FirstOrDefault(x => x.GetProperty("accountId").GetString() == id);
+                var fresh = quota.ValueKind == JsonValueKind.Object && quota.TryGetProperty("updatedAt", out var updated)
+                    && updated.TryGetDateTimeOffset(out var date) && DateTimeOffset.UtcNow - date <= TimeSpan.FromMinutes(2)
+                    && date <= DateTimeOffset.UtcNow.AddSeconds(30);
+                JsonElement Window(string kind) => fresh && quota.TryGetProperty("windows", out var windows)
+                    ? windows.EnumerateArray().FirstOrDefault(x => x.GetProperty("kind").GetString() == kind
+                        && x.GetProperty("resetAt").GetDateTimeOffset() > DateTimeOffset.UtcNow) : default;
+                var five = Window("5h"); var week = Window("weekly");
+                if (five.ValueKind == JsonValueKind.Object) used = five.GetProperty("usedPercent").GetDouble();
+                if (snapshot.TryGetProperty("settings", out var settings)) threshold = settings.GetProperty("fiveHourThreshold").GetDouble();
+                tooltip = name + "\n5h " + Percent(five) + " 已用 · " + ResetLeft(five)
+                    + "\n周 " + Percent(week) + " 已用 · " + ResetLeft(week);
+                if (!fresh) tooltip = name + "\n额度未知或已过期\n打开面板查看服务状态";
+            }
+            else tooltip = "Codex Pool\n尚未选择账户";
+        }
+        if (tooltip.Length > 63) tooltip = tooltip[..63];
+        var key = tooltip + "|" + used?.ToString("R", System.Globalization.CultureInfo.InvariantCulture) + "|" + threshold;
+        if (key == trayStateKey) return;
+        var icon = QuotaTrayIcon.Create(used, threshold);
+        var previous = tray.Icon;
+        tray.Icon = icon; tray.Text = tooltip; trayStateKey = key;
+        previous?.Dispose();
     }
     private static string AccountState(string? state) => state switch
     {

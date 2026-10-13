@@ -1,7 +1,7 @@
-param([switch]$SelfContained)
+param([switch]$SelfContained, [string]$OutputDirectory)
 $ErrorActionPreference = 'Stop'
 $taskRoot = Split-Path $PSScriptRoot -Parent
-$taskOutput = Join-Path $taskRoot '.local\release\Widget'
+$taskOutput = if ($OutputDirectory) { [IO.Path]::GetFullPath($OutputDirectory) } else { Join-Path $taskRoot '.local\release\Widget' }
 $taskMode = if ($SelfContained) { 'true' } else { 'false' }
 # Publish only the client so an active daemon / existing floating window need not restart.
 & dotnet publish (Join-Path $taskRoot 'src\CodexPool.Floating') -c Release -r win-x64 --self-contained $taskMode -o $taskOutput
