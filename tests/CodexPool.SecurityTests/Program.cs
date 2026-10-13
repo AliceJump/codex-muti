@@ -40,7 +40,9 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Catalog client_version prefers Codex query and keeps visibility=list Sol slugs", CatalogClientVersion),
     ("Token statistics survive encrypted atomic persistence without touching credentials", UsagePersistence),
     ("Token statistics aggregate local days, accounts, models and unknown detail coverage", UsagePeriods),
-    ("Concurrent token accounting is exact and failed writes retry without losing history", UsageConcurrency)
+    ("Concurrent token accounting is exact and failed writes retry without losing history", UsageConcurrency),
+    ("Quota preserves arbitrary, absent, optional and scoped windows plus credit metadata", DynamicQuotaParser),
+    ("Generic routing honors credits, explicit denial, budgets, model scope and stale snapshots", DynamicQuotaRouting)
 };
 if (args.Length != 0)
 {
@@ -347,6 +349,48 @@ Task PoolRouting()
     Check(new PoolRuntime(reopened, auth, quota2, true).Select().AccountId == "B");
     var production = new PoolRuntime(reopened, auth, quota2, false); Check(!production.Settings.AutoSwitch);
     try { production.UpdateSettings(new(true)); Check(false); } catch (AuthFailure) { }
+    return Task.CompletedTask;
+}
+Task DynamicQuotaParser()
+{
+    var payload = JsonSerializer.SerializeToUtf8Bytes(new { plan_type = "pro", rate_limit = new { allowed = true, limit_reached = false,
+        primary_window = new { used_percent = 40, limit_window_seconds = 25200, reset_at = DateTimeOffset.UtcNow.AddHours(1).ToUnixTimeSeconds() },
+        secondary_window = new { used_percent = 60, limit_window_seconds = 32400, reset_at = DateTimeOffset.UtcNow.AddHours(2).ToUnixTimeSeconds() } },
+        credits = new { has_credits = true, unlimited = false, balance = "12.50" }, spend_control = new { reached = false },
+        additional_rate_limits = new[] { new { metered_feature = "special", normal_model_slug = "gpt-6-luna", rate_limit = new {
+            primary_window = new { used_percent = 100, limit_window_seconds = 3600, reset_at = DateTimeOffset.UtcNow.AddHours(1).ToUnixTimeSeconds() } } } } });
+    var parsed = Quota.Parse("A", payload);
+    Check(parsed.Windows.Count == 3 && parsed.Windows[0].WindowSeconds == 25200 && parsed.Windows[1].WindowSeconds == 32400
+        && parsed.Windows[2].Model == "gpt-6-luna" && parsed.Windows[2].LimitId != "codex");
+    Check(parsed.Credits == new QuotaCredits(true, false, 12.5m) && parsed.Allowed == true && parsed.SpendControlReached == false);
+    Check(parsed.Applicable("gpt-6.1-sol").Count() == 2 && parsed.Applicable("gpt-6-luna").Count() == 3);
+    var none = Quota.Parse("A", "{\"rate_limit\":{\"allowed\":true,\"primary_window\":null}}"u8.ToArray());
+    Check(none.Windows.Count == 0 && none.WindowState == "not_reported");
+    Check(Quota.Parse("A", "{}"u8.ToArray()).WindowState == "unknown");
+    var optional = Quota.Parse("A", "{\"rate_limit\":{\"primary_window\":{\"used_percent\":20}}}"u8.ToArray()).Windows.Single();
+    Check(optional.WindowSeconds is null && optional.ResetAt is null && optional.RemainingPercent == 80);
+    Check(Quota.Parse("A", "{\"rate_limit\":{\"allowed\":true,\"primary_window\":{\"used_percent\":-1}}}"u8.ToArray()).WindowState == "unknown");
+    return Task.CompletedTask;
+}
+Task DynamicQuotaRouting()
+{
+    var vault = Store("dynamic-quota-routing"); vault.Add(Account("A")); vault.Add(Account("B"));
+    using var issuer = new FakeIssuer(); using var http = new HttpClient(issuer); var auth = new OAuth(http, vault);
+    vault.SaveSettings(new(true, WindowThreshold: 90)); var now = DateTimeOffset.UtcNow;
+    PoolRuntime Pool(QuotaSnapshot snapshot)
+    { vault.SaveQuota(snapshot); return new(vault, auth, new Quota(http, auth, vault), true); }
+    var baseline = new QuotaSnapshot("A", "fixture", "pro", now, [new("primary_window", 25200, 95, 5, now.AddHours(1))]);
+    Check(Pool(baseline).Select().AccountId == "B"); vault.ActivateForProbe("A");
+    Check(Pool(baseline with { Windows = [new("primary_window", 32400, 100, 0, now.AddHours(1))], Allowed = true }).Select().AccountId == "A");
+    Check(Pool(baseline with { Windows = [new("primary_window", 32400, 100, 0, now.AddHours(1))], Credits = new(true, false, 10) }).Availability()[0].Available);
+    Check(Pool(baseline with { Windows = [], Allowed = false }).Availability()[0].Reason == "quota_exhausted");
+    Check(Pool(baseline with { Windows = [], Credits = new(true, false, 10), SpendControlReached = true }).Availability()[0].ErrorCode == "insufficient_quota");
+    Check(Pool(baseline with { Windows = [], Allowed = false, UpdatedAt = now.AddMinutes(-3) }).Availability()[0].Available);
+    var scoped = baseline with { Windows = [new("primary_window", 32400, 100, 0, now.AddHours(1), "additional_0", "gpt-6-luna")] };
+    var pool = Pool(scoped); Check(pool.Availability()[0].Available && pool.Availability("gpt-6.1-sol")[0].Available);
+    Check(pool.Availability("gpt-6-luna")[0].Reason == "quota_exhausted");
+    using var reservation = pool.ReserveModelRequest("gpt-6-luna"); Check(reservation.Selection.AccountId == "B");
+    Check(PoolAvailability.Aggregate([new("A", "quota_threshold")]).Code == "account_pool_threshold_reached");
     return Task.CompletedTask;
 }
 async Task LocalApi()

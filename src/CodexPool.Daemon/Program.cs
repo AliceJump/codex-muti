@@ -88,7 +88,7 @@ try
             else { context.Response.StatusCode = 503; await context.Response.WriteAsJsonAsync(new { error = new { code = ex.Code } }); }
         }
         catch (NoEligibleAccountException)
-        { if (!context.Response.HasStarted) { var error = pool.Unavailable(); context.Response.StatusCode = error.Status; context.Response.ContentType = "application/json"; if (error.RetryAfter is not null) context.Response.Headers["Retry-After"] = error.RetryAfter; await context.Response.Body.WriteAsync(error.Body(), context.RequestAborted); } else context.Abort(); }
+        { if (!context.Response.HasStarted) { var error = pool.Unavailable(model: context.Items["quotaModel"] as string); context.Response.StatusCode = error.Status; context.Response.ContentType = "application/json"; if (error.RetryAfter is not null) context.Response.Headers["Retry-After"] = error.RetryAfter; await context.Response.Body.WriteAsync(error.Body(), context.RequestAborted); } else context.Abort(); }
         catch (JsonException)
         { if (!context.Response.HasStarted) { context.Response.StatusCode = 400; await context.Response.WriteAsJsonAsync(new { error = new { code = "invalid_json" } }); } else context.Abort(); }
         catch (RequestBodyFailure ex)
@@ -256,7 +256,9 @@ try
         if (json.TryGetProperty("previous_response_id", out var previous) && previous.ValueKind != JsonValueKind.Null
             || json.TryGetProperty("conversation", out var conversation) && conversation.ValueKind != JsonValueKind.Null)
         { context.Response.StatusCode = 400; await context.Response.WriteAsJsonAsync(new { error = new { code = "server_continuation_unsupported" } }); return; }
-        using var reservation = pool.ReserveModelRequest();
+        var requestedModel = modelValue.GetString()!;
+        context.Items["quotaModel"] = requestedModel;
+        using var reservation = pool.ReserveModelRequest(requestedModel);
         var selection = reservation.Selection;
         var candidates = await pool.PrepareAsync(reservation, context.RequestAborted);
         var account = candidates[0];
@@ -287,7 +289,7 @@ try
                     if (entering) { attemptedAccount = lease.AccountId; attemptCount++; }
                     inFlight.AddOrUpdate(lease.AccountId, entering ? 1 : 0, (_, count) => Math.Max(0, count + (entering ? 1 : -1)));
                 }, lease => { upstreamCompleted = true; pool.RecordSuccess(lease.AccountId); },
-                (lease, error) => pool.RecordFailure(lease.AccountId, error), error => pool.Unavailable(error, reservation.CandidateIds.ToArray(), reservation.AutoSwitch),
+                (lease, error) => pool.RecordFailure(lease.AccountId, error), error => pool.Unavailable(error, reservation.CandidateIds.ToArray(), reservation.AutoSwitch, requestedModel),
                 (_, value) => tokenUsage = value);
         }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
@@ -298,7 +300,7 @@ try
             // Account admission/control persistence errors must not erase observed consumption.
             if (attemptCount > 0) statistics.Record(attemptedAccount, modelValue.GetString()!, tokenUsage);
         }
-        pool.Complete(selection, result, failoverReason);
+        pool.Complete(selection, result, failoverReason, requestedModel);
         if (headers.TryGetValue("session_id", out var completedSession)) sessionOwners[Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(completedSession)))] = result.AccountId;
         recent.Enqueue(new { timestamp = DateTimeOffset.UtcNow, requestId, account = result.AccountId, model = modelValue.GetString(),
             durationMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds, status = result.StatusCode, result.Outcome, result.Attempts,

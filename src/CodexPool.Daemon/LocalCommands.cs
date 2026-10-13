@@ -37,12 +37,17 @@ public static class LocalCommands
         }
         using var client = new HttpClient(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(30) };
         client.DefaultRequestHeaders.Authorization = new("Bearer", key);
-        if (command == "settings" && args.Length is 0 or 3)
+        if (command == "settings" && args.Length is 0 or 2 or 3)
         {
             if (args.Length == 0) { Console.WriteLine(await client.GetStringAsync("http://127.0.0.1:3210/settings")); return 0; }
-            if (args[0] is not ("on" or "off") || !double.TryParse(args[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var five)
-                || !double.TryParse(args[2], NumberStyles.Float, CultureInfo.InvariantCulture, out var weekly)) return 1;
-            var settings = new PoolSettings(args[0] == "on", five, weekly); StickyScheduler.Validate(settings);
+            if (args[0] is not ("on" or "off") || !double.TryParse(args[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var five)) return 1;
+            var settings = new PoolSettings(args[0] == "on", WindowThreshold: five);
+            if (args.Length == 3)
+            {
+                if (!double.TryParse(args[2], NumberStyles.Float, CultureInfo.InvariantCulture, out var weekly)) return 1;
+                settings = new(args[0] == "on", five, weekly);
+            }
+            StickyScheduler.Validate(settings);
             using var response = await client.PostAsJsonAsync("http://127.0.0.1:3210/settings", settings); response.EnsureSuccessStatusCode();
             Console.WriteLine(await response.Content.ReadAsStringAsync()); return 0;
         }

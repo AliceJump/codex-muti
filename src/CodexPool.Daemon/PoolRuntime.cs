@@ -13,7 +13,7 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
     public PoolSettings Settings => boundaryProbe ? vault.Settings : vault.Settings with { AutoSwitch = false };
     public AccountSwitch[] History => scheduler.History;
     public string? Active => scheduler.Active;
-    public AccountAvailability[] Availability()
+    public AccountAvailability[] Availability(string? model = null)
     {
         lock (gate)
         {
@@ -21,13 +21,16 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
             return vault.Accounts.Select(x =>
             {
                 var usage = quota.Snapshot(x.Id);
-                var fresh = usage is not null && now - usage.UpdatedAt <= TimeSpan.FromMinutes(2) && usage.UpdatedAt <= now.AddSeconds(30);
-                var exhausted = fresh ? usage!.Windows.Where(w => w.UsedPercent >= 100 && w.ResetAt > now).OrderByDescending(w => w.ResetAt).FirstOrDefault() : null;
+                var fresh = usage?.Fresh(now) == true;
+                var exhausted = fresh ? usage!.RoutingWindows(model, now).Where(w => w.UsedPercent >= 100).OrderByDescending(w => w.ResetAt).FirstOrDefault() : null;
+                var denied = fresh && (usage!.SpendControlReached == true || usage.Allowed == false && !usage.CreditsAvailable
+                    || usage.LimitReached == true && usage.Allowed != true && !usage.CreditsAvailable);
                 var reason = !x.Enabled ? "disabled" : x.Paused ? "paused" : x.Draining ? "draining"
                     : x.AuthStatus == "reauth_required" || auth.Health(x.Id) == "reauth_required" ? "auth_unavailable"
                     : x.AuthStatus == "refresh_pending" ? auth.IsRefreshing(x.Id) ? "auth_temporarily_unavailable" : "auth_unavailable"
-                    : exhausted is not null ? "quota_exhausted" : null;
-                string? code = null; DateTimeOffset? reset = exhausted?.ResetAt; int? minutes = exhausted?.WindowSeconds / 60;
+                    : exhausted is not null || denied ? "quota_exhausted" : null;
+                string? code = usage?.SpendControlReached == true && fresh ? "insufficient_quota" : null;
+                DateTimeOffset? reset = exhausted?.ResetAt; int? minutes = exhausted?.WindowSeconds / 60;
                 if (failures.TryGetValue(x.Id, out var observed) && observed.Until > now) code = observed.Error.Code;
                 if (reason is null && failures.TryGetValue(x.Id, out var failure) && failure.Until > now)
                 {
@@ -39,22 +42,21 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
                 if (reason is null)
                 {
                     var candidate = new PoolAccount(x.Id, x.Enabled, x.Paused, x.Draining, true, x.CooldownUntil,
-                        fresh ? usage!.Windows.FirstOrDefault(w => w.Kind == "5h" && w.ResetAt > now)?.UsedPercent : null,
-                        fresh ? usage!.Windows.FirstOrDefault(w => w.Kind == "weekly" && w.ResetAt > now)?.UsedPercent : null, usage?.UpdatedAt);
+                        QuotaUpdatedAt: usage?.UpdatedAt, Windows: fresh ? RoutingWindows(usage!, model, now) : []);
                     reason = StickyScheduler.ExclusionReason(candidate, Settings, now);
                 }
                 return new AccountAvailability(x.Id, reason, code, reset, usage?.Plan, minutes);
             }).ToArray();
         }
     }
-    public ModelError Unavailable(ModelError? last = null, IReadOnlyCollection<string>? requestAccounts = null, bool? autoSwitch = null)
+    public ModelError Unavailable(ModelError? last = null, IReadOnlyCollection<string>? requestAccounts = null, bool? autoSwitch = null, string? model = null)
     {
         lock (gate)
         {
             var firstId = requestAccounts?.FirstOrDefault() ?? scheduler.Active;
             var provider = firstId is not null ? vault.Find(firstId)?.ProviderKind : vault.Selected?.ProviderKind;
             var registered = vault.Accounts.Where(x => provider is null || x.ProviderKind == provider).Select(x => x.Id).ToHashSet(StringComparer.Ordinal);
-            var all = Availability().Where(x => registered.Contains(x.AccountId)).ToArray();
+            var all = Availability(model).Where(x => registered.Contains(x.AccountId)).ToArray();
             // A reservation controls which accounts may be sent this request. The final diagnosis
             // must also include accounts already excluded before reservation (auth/quota/threshold).
             var assessed = all;
@@ -79,27 +81,28 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
         }
     }
     public void RecordSuccess(string id) { lock (gate) failures.Remove(id); }
-    private PoolAccount[] Accounts()
+    private static RoutingQuotaWindow[] RoutingWindows(QuotaSnapshot snapshot, string? model, DateTimeOffset now) =>
+        snapshot.RoutingWindows(model, now).Select(w => new RoutingQuotaWindow(w.WindowSeconds, w.UsedPercent, w.ResetAt)).ToArray();
+    private PoolAccount[] Accounts(string? model = null)
     {
-        var availabilityById = Availability().ToDictionary(x => x.AccountId, StringComparer.Ordinal);
+        var availabilityById = Availability(model).ToDictionary(x => x.AccountId, StringComparer.Ordinal);
         return vault.Accounts.Select(x =>
         {
             if (!availabilityById.TryGetValue(x.Id, out var availability)) availability = new(x.Id, null);
             var usage = quota.Snapshot(x.Id);
-            double? Used(string kind) => usage?.Windows.FirstOrDefault(w => w.Kind == kind && w.ResetAt > DateTimeOffset.UtcNow)?.UsedPercent;
             var cooldown = availability.Reason is "quota_exhausted" or "auth_temporarily_unavailable"
                 ? availability.ResetAt ?? (failures.TryGetValue(x.Id, out var failure) ? failure.Until : DateTimeOffset.UtcNow.AddMinutes(1)) : x.CooldownUntil;
             return new PoolAccount(x.Id, x.Enabled, x.Paused, x.Draining, x.AuthStatus == "ready" && auth.Health(x.Id) != "reauth_required"
                 && availability.Reason is not ("auth_unavailable" or "access_unavailable" or "configuration_unavailable"),
-                cooldown, Used("5h"), Used("weekly"), usage?.UpdatedAt);
+                cooldown, QuotaUpdatedAt: usage?.UpdatedAt, Windows: usage is null ? [] : RoutingWindows(usage, model, DateTimeOffset.UtcNow));
         }).ToArray();
     }
-    public AccountSelection Select()
+    public AccountSelection Select(string? model = null)
     {
         lock (gate)
         {
             var provider = scheduler.Active is { } current ? vault.Find(current)?.ProviderKind : null;
-            var accounts = Accounts().Where(x => provider is null || vault.Find(x.Id)?.ProviderKind == provider).ToArray();
+            var accounts = Accounts(model).Where(x => provider is null || vault.Find(x.Id)?.ProviderKind == provider).ToArray();
             var selection = scheduler.Select(accounts, Settings, DateTimeOffset.UtcNow);
             return selection;
         }
@@ -112,13 +115,13 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
             scheduler.Activate(id, Accounts(), Settings, DateTimeOffset.UtcNow);
         }
     }
-    public ModelReservation ReserveModelRequest()
+    public ModelReservation ReserveModelRequest(string? model = null)
     {
         lock (gate)
         {
-            var selection = Select();
-            var available = Availability().Where(x => x.Available).Select(x => x.AccountId).ToHashSet(StringComparer.Ordinal);
-            var ids = Candidates(selection).Where(available.Contains).ToArray();
+            var selection = Select(model);
+            var available = Availability(model).Where(x => x.Available).Select(x => x.AccountId).ToHashSet(StringComparer.Ordinal);
+            var ids = Candidates(selection, model).Where(available.Contains).ToArray();
             if (ids.Length == 0) throw new NoEligibleAccountException();
             var uses = new List<IDisposable>();
             try
@@ -197,13 +200,13 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
         if (settings.AutoSwitch && !boundaryProbe) throw new AuthFailure("live_migration_gate_pending");
         lock (gate) vault.SaveSettings(settings);
     }
-    public string[] Candidates(AccountSelection selection)
+    public string[] Candidates(AccountSelection selection, string? model = null)
     {
         lock (gate)
         {
             if (!Settings.AutoSwitch) return [selection.AccountId];
             var provider = vault.Find(selection.AccountId)?.ProviderKind;
-            return new[] { selection.AccountId }.Concat(Accounts().Where(x => x.Id != selection.AccountId
+            return new[] { selection.AccountId }.Concat(Accounts(model).Where(x => x.Id != selection.AccountId
                 && vault.Find(x.Id)?.ProviderKind == provider
                 && StickyScheduler.ExclusionReason(x, Settings, DateTimeOffset.UtcNow) is null).Select(x => x.Id)).ToArray();
         }
@@ -216,15 +219,15 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
             .Select(x => (DateTimeOffset?)x.ResetAt).Max();
         vault.Cooldown(lease.AccountId, reason == "quota_rejected" ? reset ?? DateTimeOffset.UtcNow.AddMinutes(1) : DateTimeOffset.UtcNow.AddSeconds(30));
     }
-    public void Complete(AccountSelection lease, RelayResult result, string? failoverReason = null)
+    public void Complete(AccountSelection lease, RelayResult result, string? failoverReason = null, string? model = null)
     {
         lock (gate)
         {
             if (result.AccountId != lease.AccountId)
-                scheduler.CompleteFailover(lease, result.AccountId, failoverReason ?? "safe_precommit_failover", Accounts(), Settings, DateTimeOffset.UtcNow);
+                scheduler.CompleteFailover(lease, result.AccountId, failoverReason ?? "safe_precommit_failover", Accounts(model), Settings, DateTimeOffset.UtcNow);
             // After a rejected final attempt, only future requests may move to another account.
             if (result.Outcome is "quota_rejected" or "auth_rejected" or "access_rejected" && Settings.AutoSwitch)
-                try { Select(); } catch (NoEligibleAccountException) { }
+                try { Select(model); } catch (NoEligibleAccountException) { }
         }
     }
 }

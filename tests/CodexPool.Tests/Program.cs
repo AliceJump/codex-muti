@@ -36,7 +36,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Fragmented terminal usage counts once on the serving lease and preserves SSE bytes", TerminalUsage),
     ("Reported consumption survives downstream failure without reopening replay", UsageWriteFailure),
     ("Missing, malformed, truncated and oversized usage remain unknown", UnknownUsage),
-    ("Large terminal events and multiline framing retain usage within the observer limit", LargeUsage)
+    ("Large terminal events and multiline framing retain usage within the observer limit", LargeUsage),
+    ("Arbitrary quota durations participate in thresholds, reset and freshness gates", GenericWindows)
 };
 var failed = 0;
 foreach (var (name, run) in tests)
@@ -351,6 +352,26 @@ static Task Eligibility()
     accounts = [new("A", Enabled: false), new("B", Draining: true)];
     try { scheduler.Select(accounts, new(true), now); throw new InvalidOperationException(); } catch (NoEligibleAccountException) { }
     Check(scheduler.History.Length == 1);
+    return Task.CompletedTask;
+}
+static Task GenericWindows()
+{
+    var now = DateTimeOffset.UtcNow; var settings = new PoolSettings(true, WindowThreshold: 90);
+    Check(QuotaLabels.Duration(25200) == "7h" && QuotaLabels.Duration(32400) == "9h" && QuotaLabels.Duration(5400) == "90m"
+        && QuotaLabels.Duration(604800) == "周" && QuotaLabels.Duration(90001) == "90001s" && QuotaLabels.Duration(null) == "额度窗口");
+    foreach (var seconds in new[] { 25200, 32400, 18000, 604800, 1234 })
+    {
+        var account = new PoolAccount("A", QuotaUpdatedAt: now, Windows: [new(seconds, 90, now.AddHours(1))]);
+        Check(StickyScheduler.ExclusionReason(account, settings, now) == "quota_threshold");
+        Check(StickyScheduler.ExclusionReason(account with { QuotaUpdatedAt = now.AddMinutes(-3) }, settings, now) is null);
+        Check(StickyScheduler.ExclusionReason(account with { Windows = [new(seconds, 100, now)] }, settings, now) is null);
+        Check(StickyScheduler.ExclusionReason(account with { Windows = [new(seconds, 100, null)] }, settings, now) is null);
+        Check(StickyScheduler.ExclusionReason(account, settings with { AutoSwitch = false }, now) is null);
+    }
+    Check(StickyScheduler.ExclusionReason(new("A", QuotaUpdatedAt: now, Windows: []), settings, now) is null);
+    foreach (var threshold in new[] { double.NaN, 0, 101 })
+        try { StickyScheduler.Validate(new(WindowThreshold: threshold)); Check(false); } catch (ArgumentException) { }
+    Check(new PoolSettings(true, 80, 95).Threshold(18000) == 80 && new PoolSettings(true, 80, 95).Threshold(604800) == 95);
     return Task.CompletedTask;
 }
 static Task PersistenceFailure()
