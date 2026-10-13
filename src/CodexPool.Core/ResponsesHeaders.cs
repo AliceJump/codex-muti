@@ -30,11 +30,16 @@ public static class ResponsesHeaders
 
     public static void BindTurnState(IDictionary<string, string> headers, ConcurrentDictionary<string, string> owners, string accountId)
     {
-        var conversation = Read(headers).ConversationId;
+        // Dictionary is IReadOnlyDictionary; other IDictionary callers get a case-insensitive copy for lookup only.
+        var conversation = Read(headers as IReadOnlyDictionary<string, string>
+            ?? new Dictionary<string, string>(headers, StringComparer.OrdinalIgnoreCase)).ConversationId;
         if (conversation is null) { headers.Remove("x-codex-turn-state"); return; }
         var hash = Hash(conversation);
-        if (!owners.TryGetValue(hash, out var prior) || prior != accountId) headers.Remove("x-codex-turn-state");
-        // Bounded transport ownership hints, never conversation contents or Codex workflow state.
+        if (owners.TryGetValue(hash, out var prior) && prior == accountId) return;
+        headers.Remove("x-codex-turn-state");
+        // Claim only when unset so the first attempt can own later turns after Remember.
+        // Never steal from another account here — completed requests call Remember.
+        if (prior is not null) return;
         if (owners.Count >= 1024) owners.Clear();
         owners[hash] = accountId;
     }
