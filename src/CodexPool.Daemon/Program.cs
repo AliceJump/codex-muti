@@ -293,8 +293,12 @@ try
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
         { result = new(attemptedAccount, upstreamCompleted ? 200 : context.RequestAborted.IsCancellationRequested ? 499 : 504, attemptCount, sink.Started,
             upstreamCompleted ? "completed_client_disconnect" : context.RequestAborted.IsCancellationRequested ? "client_cancelled" : "request_deadline"); }
+        finally
+        {
+            // Account admission/control persistence errors must not erase observed consumption.
+            if (attemptCount > 0) statistics.Record(attemptedAccount, modelValue.GetString()!, tokenUsage);
+        }
         pool.Complete(selection, result, failoverReason);
-        statistics.Record(result.AccountId, modelValue.GetString()!, tokenUsage);
         if (headers.TryGetValue("session_id", out var completedSession)) sessionOwners[Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(completedSession)))] = result.AccountId;
         recent.Enqueue(new { timestamp = DateTimeOffset.UtcNow, requestId, account = result.AccountId, model = modelValue.GetString(),
             durationMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds, status = result.StatusCode, result.Outcome, result.Attempts,
@@ -332,7 +336,9 @@ try
         }
         catch (OperationCanceledException) when (app.Lifetime.ApplicationStopping.IsCancellationRequested) { }
     });
-    await app.RunAsync(); await Task.WhenAll(eventTask, quotaTask, statisticsTask); return 0;
+    await app.RunAsync(); await Task.WhenAll(eventTask, quotaTask, statisticsTask);
+    // ApplicationStopping occurs before Kestrel drains its accepted requests.
+    statistics.Flush(); return 0;
 }
 catch { Console.Error.WriteLine("Daemon failed to start or stopped unexpectedly. Check port 3210 and single-instance ownership."); return 1; }
 
