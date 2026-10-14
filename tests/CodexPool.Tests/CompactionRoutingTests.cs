@@ -63,4 +63,30 @@ internal static class CompactionRoutingTests
         Check(scheduler.AdviseCompaction("model", accounts, Settings, Now) is null);
         return Task.CompletedTask;
     }
+
+    public static Task WarningWindows()
+    {
+        bool Warn(PoolSettings settings, params RoutingQuotaWindow[] windows) => new StickyScheduler("A")
+            .AdviseCompaction("model", [new("A", QuotaUpdatedAt: Now, Windows: windows), new("B")], settings, Now) is not null;
+        RoutingQuotaWindow Window(int? seconds, double used) => new(seconds, used, Now.AddDays(7));
+        foreach (var settings in new[] { new PoolSettings(true, 98, 98), new PoolSettings(true, 80, 90, 98) })
+        {
+            Check(!Warn(settings, Window(604800, 95.99)));
+            Check(Warn(settings, Window(604800, 96)));
+            foreach (var seconds in new int?[] { 18000, 25200, null })
+            {
+                Check(!Warn(settings, Window(seconds, 92.99)));
+                Check(Warn(settings, Window(seconds, 93)));
+            }
+            Check(!Warn(settings, Window(18000, 92), Window(604800, 95)));
+            Check(Warn(settings, Window(18000, 93), Window(604800, 95)));
+            Check(Warn(settings, Window(18000, 92), Window(604800, 96)));
+        }
+        var legacy = new PoolSettings(true, 80, 90);
+        Check(!Warn(legacy, Window(604800, 87.99)) && Warn(legacy, Window(604800, 88)));
+        Check(!Warn(legacy, Window(18000, 74.99)) && Warn(legacy, Window(18000, 75)));
+        Check(Warn(new(true, WindowThreshold: 1), Window(604800, 0)));
+        Check(!Warn(new(false, WindowThreshold: 98), Window(604800, 96)));
+        return Task.CompletedTask;
+    }
 }

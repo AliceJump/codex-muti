@@ -33,8 +33,8 @@ public sealed class StickyScheduler(string? activeId, Action<string>? persistSel
     public AccountSelection Current { get { lock (gate) return new(active ?? "", epoch, null); } }
     public CompactionHold? Hold { get { lock (gate) return compactionHold; } }
 
-    // Best-effort optimization: one attempt per routing epoch, five percentage points
-    // before the existing switch threshold. Unknown/stale quota never requests compaction.
+    // One attempt per routing epoch: weekly windows warn two percentage points
+    // before the switch threshold, other windows five. Unknown/stale quota cannot warn.
     public CompactionAdvice? AdviseCompaction(string model, IReadOnlyList<PoolAccount> accounts, PoolSettings settings, DateTimeOffset now)
     {
         lock (gate)
@@ -43,7 +43,7 @@ public sealed class StickyScheduler(string? activeId, Action<string>? persistSel
             var account = accounts.FirstOrDefault(x => x.Id == active);
             if (account is null || !CanHold(account, now) || account.Windows is null
                 || !account.Windows.Any(w => w.ResetAt > now && double.IsFinite(w.UsedPercent)
-                    && w.UsedPercent >= Math.Max(0, settings.Threshold(w.WindowSeconds) - 5))) return null;
+                    && w.UsedPercent >= Math.Max(0, settings.Threshold(w.WindowSeconds) - (w.WindowSeconds == 604800 ? 2 : 5)))) return null;
             if (!accounts.Any(x => x.Id != active && ExclusionReason(x, settings, now) is null)) return null;
             return new(account.Id, epoch, model);
         }
