@@ -21,6 +21,7 @@ var tests = new (string Name, Func<Task> Run)[]
 {
     ("Experimental compaction holds one serving account without failover and respects explicit rejection", CompactionRouting),
     ("Compaction control API rejects guests, model bearer and browser cookies; conditional switch is idempotent", CompactionApi),
+    ("Daemon shutdown accepts only local bearer and acknowledges before requesting host shutdown", DaemonShutdown),
     ("DPAPI storage never contains plaintext canaries; public views redact", Storage),
     ("OIDC rejects wrong signature, issuer, audience, nonce and expiry", IdToken),
     ("OAuth PKCE and state isolation; callback is one-use", Login),
@@ -520,6 +521,31 @@ Task CompactionRouting()
     pool.Rejected(new("A", new("https://fixture.invalid/responses"), "canary"), "quota_rejected");
     Check(pool.Select().AccountId == "B" && !pool.FinishCompaction(hold.Id, true));
     return Task.CompletedTask;
+}
+async Task DaemonShutdown()
+{
+    var builder = WebApplication.CreateBuilder([]); builder.Logging.ClearProviders();
+    builder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, 0));
+    await using var app = builder.Build();
+    var stopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    const string key = "LOCAL-SHUTDOWN-CANARY";
+    DaemonControlEndpoints.Map(app, key, () => stopped.TrySetResult());
+    await app.StartAsync();
+    using var http = new HttpClient(new SocketsHttpHandler { UseProxy = false })
+        { BaseAddress = new(app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single()) };
+    using (var guest = await http.PostAsJsonAsync("/control/shutdown", new { })) Check(guest.StatusCode == HttpStatusCode.Unauthorized);
+    http.DefaultRequestHeaders.Authorization = new("Bearer", "MODEL-ONLY-CANARY");
+    using (var model = await http.PostAsJsonAsync("/control/shutdown", new { })) Check(model.StatusCode == HttpStatusCode.Unauthorized);
+    http.DefaultRequestHeaders.Authorization = null; http.DefaultRequestHeaders.Add("Cookie", "pool_session=BROWSER-CANARY");
+    using (var browser = await http.PostAsJsonAsync("/control/shutdown", new { })) Check(browser.StatusCode == HttpStatusCode.Unauthorized);
+    Check(!stopped.Task.IsCompleted);
+    http.DefaultRequestHeaders.Authorization = new("Bearer", key);
+    using var response = await http.PostAsJsonAsync("/control/shutdown", new { });
+    Check(response.StatusCode == HttpStatusCode.Accepted);
+    using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+    Check(document.RootElement.GetProperty("state").GetString() == "stopping");
+    await stopped.Task.WaitAsync(TimeSpan.FromSeconds(3));
+    await app.StopAsync();
 }
 async Task CompactionApi()
 {

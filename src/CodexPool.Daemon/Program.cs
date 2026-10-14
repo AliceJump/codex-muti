@@ -26,6 +26,7 @@ try
     var modelClientVersion = CodexClientVersion.ResolveInstalled(Environment.GetEnvironmentVariable("CODEX_POOL_CLIENT_VERSION"));
     var builder = WebApplication.CreateBuilder([]);
     builder.Logging.ClearProviders();
+    builder.Services.Configure<HostOptions>(options => options.ShutdownTimeout = TimeSpan.FromSeconds(30));
     builder.WebHost.ConfigureKestrel(options =>
     {
         options.Listen(System.Net.IPAddress.Loopback, 3210);
@@ -72,7 +73,7 @@ try
             context.Request.Headers.Authorization.ToString(), context.RequestAborted);
         var session = browsers.Find(context);
         var mutating = context.Request.Method is not ("GET" or "HEAD");
-        var bearerOnly = path.StartsWith("/v1/", StringComparison.Ordinal) || path.StartsWith("/compaction/", StringComparison.Ordinal)
+        var bearerOnly = path.StartsWith("/v1/", StringComparison.Ordinal) || path.StartsWith("/compaction/", StringComparison.Ordinal) || path.StartsWith("/control/", StringComparison.Ordinal)
             || path is "/accounts/login" or "/dashboard/session";
         if (!publicPath && !bearer && !modelBearer && (bearerOnly || session is null))
         { context.Response.StatusCode = 401; return; }
@@ -118,6 +119,7 @@ try
         app.MapGet(asset.Path, () => Results.Stream(typeof(Vault).Assembly.GetManifestResourceStream("CodexPool.Daemon.Dashboard." + asset.File)!, asset.Type));
     app.MapGet("/settings", () => pool.Settings);
     CompactionEndpoints.Map(app, pool, vault.LocalKey);
+    DaemonControlEndpoints.Map(app, vault.LocalKey, app.Lifetime.StopApplication);
     app.MapPost("/settings", async (HttpContext context) =>
     {
         var settings = await context.Request.ReadFromJsonAsync<PoolSettings>(context.RequestAborted) ?? throw new AuthFailure("invalid_settings");
