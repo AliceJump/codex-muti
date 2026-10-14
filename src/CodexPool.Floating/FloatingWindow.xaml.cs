@@ -65,7 +65,7 @@ public partial class FloatingWindow : Window
                 case "pin": TogglePinned(); break;
             }
         };
-        Scene.DragRequested = () => { if (Pinned) { DragMove(); SavePosition(); } };
+        Scene.DragRequested = () => { if (Pinned) { DragMove(); ConstrainPinnedScene(IsVisible); SavePosition(); } };
         if (startServices)
         {
             tray = new StableTrayIcon(CreateIcon(), "Codex Pool · 账户状态 · Ctrl+Alt+W");
@@ -165,6 +165,7 @@ public partial class FloatingWindow : Window
             state.GetProperty("automaticSwitching").GetBoolean(), IsVisible,
             state.GetProperty("inFlightRequests").EnumerateArray().Sum(x => x.GetProperty("value").GetInt32()));
         Scene.SetBusy(busy);
+        ConstrainPinnedScene(IsVisible);
     }
     internal void Preview(JsonElement state, int mode, bool online = true)
     { connected = online; preferences = preferences with { Mode = mode }; Render(state); }
@@ -321,7 +322,7 @@ public partial class FloatingWindow : Window
         if (Pinned) SavePosition();
         preferences = preferences with { Pinned = !Pinned };
         Scene.SetPinned(Pinned);
-        if (Pinned) { flyoutScreen = null; SavePosition(); }
+        if (Pinned) { flyoutScreen = null; ConstrainPinnedScene(IsVisible); SavePosition(); }
         else { ShowFlyout(); SavePosition(); }
     }
     internal void DismissOnDeactivation()
@@ -345,6 +346,7 @@ public partial class FloatingWindow : Window
         var screen = flyoutScreen ?? (handle != 0 ? Forms.Screen.FromHandle(handle) : Forms.Screen.PrimaryScreen!);
         var dpi = VisualTreeHelper.GetDpi(this); var area = screen.WorkingArea;
         Width = Math.Min(620, area.Width / dpi.DpiScaleX); Height = Math.Min(760, Math.Max(100, area.Height / dpi.DpiScaleY - 24));
+        UpdateLayout();
         if (snapshot is { } state) Render(state);
     }
     private void PositionFlyout()
@@ -381,21 +383,30 @@ public partial class FloatingWindow : Window
     private void ClampPosition()
     {
         if (!Pinned) { PositionFlyout(); return; }
+        ConstrainPinnedScene(false);
+    }
+    private void ConstrainPinnedScene(bool animate)
+    {
+        if (!Pinned || Scene.ActualWidth <= 0 || Scene.ActualHeight <= 0) return;
         if (handle == 0 || !GetWindowRect(handle, out var rect)) return;
         var dpi = VisualTreeHelper.GetDpi(this); var visible = Scene.SurfaceBounds;
         var visibleRect = new System.Drawing.Rectangle(rect.Left + (int)(visible.Left * dpi.DpiScaleX), rect.Top + (int)(visible.Top * dpi.DpiScaleY),
             (int)(visible.Width * dpi.DpiScaleX), (int)(visible.Height * dpi.DpiScaleY));
         var area = Forms.Screen.FromRectangle(visibleRect).WorkingArea;
-        var x = rect.Left + Math.Clamp(visibleRect.Left, area.Left, Math.Max(area.Left, area.Right - visibleRect.Width)) - visibleRect.Left;
-        var y = rect.Top + Math.Clamp(visibleRect.Top, area.Top, Math.Max(area.Top, area.Bottom - visibleRect.Height)) - visibleRect.Top;
-        _ = SetWindowPos(handle, 0, x, y, 0, 0, 0x0001 | 0x0004 | 0x0010);
+        var target = Scene.TargetSurfaceBounds;
+        var left = rect.Left + target.Left * dpi.DpiScaleX; var top = rect.Top + target.Top * dpi.DpiScaleY;
+        var x = rect.Left + (int)Math.Round(Math.Clamp(left, area.Left, Math.Max(area.Left, area.Right - target.Width * dpi.DpiScaleX)) - left);
+        var y = rect.Top + (int)Math.Round(Math.Clamp(top, area.Top, Math.Max(area.Top, area.Bottom - target.Height * dpi.DpiScaleY)) - top);
+        if (x == rect.Left && y == rect.Top) return;
+        if (SetWindowPos(handle, 0, x, y, 0, 0, 0x0001 | 0x0004 | 0x0010) && GetWindowRect(handle, out var moved))
+            Scene.RebaseHost((moved.Left - rect.Left) / dpi.DpiScaleX, (moved.Top - rect.Top) / dpi.DpiScaleY, animate);
     }
     private void SavePosition()
     {
         if (!startServices || handle == 0 || !GetWindowRect(handle, out var rect)) return;
         if (Pinned)
         {
-            var dpi = VisualTreeHelper.GetDpi(this); var bounds = Scene.SurfaceBounds;
+            var dpi = VisualTreeHelper.GetDpi(this); var bounds = Scene.TargetSurfaceBounds;
             preferences = preferences with { X = rect.Left + (int)Math.Round((bounds.Left + bounds.Width / 2) * dpi.DpiScaleX),
                 Y = rect.Top + (int)Math.Round(bounds.Bottom * dpi.DpiScaleY), PositionVersion = 2 };
         }

@@ -124,6 +124,56 @@ internal static class SceneTests
             }
             finally { window.Close(); }
         });
+        run("Retargeting a scrolled pool preserves the on-screen account pose and settles inside the new scroll range", () =>
+        {
+            var window = new FloatingWindow(false) { Opacity = 0, ShowActivated = false };
+            try
+            {
+                window.Show(); window.Preview(State(count: 12), 0); Pump(1200);
+                var scene = (PoolScene)window.FindName("Scene");
+                scene.RaiseEvent(new MouseWheelEventArgs(Mouse.PrimaryDevice, 0, -12000) { RoutedEvent = Mouse.MouseWheelEvent });
+                Check(scene.ScrollOffset > 500);
+                var card = scene.AccountTargets["a11"];
+                var before = card.TranslatePoint(new Point(), scene); var previousScroll = scene.ScrollOffset;
+                window.Preview(State(count: 12), 2);
+                Check(before == card.TranslatePoint(new Point(), scene) && scene.ScrollOffset == previousScroll);
+                Pump(100); var interrupted = card.TranslatePoint(new Point(), scene);
+                window.Preview(State(count: 12), 1); Check(interrupted == card.TranslatePoint(new Point(), scene));
+                Pump(1400); Check(!scene.Animating && scene.ScrollOffset >= 0);
+                window.Preview(State(count: 1), 1); Pump(1400); Check(scene.ScrollOffset == 0 && !scene.Animating);
+            }
+            finally { window.Close(); }
+        });
+        run("Pinned expansion at the work-area corner stays on screen without a visible jump or native resize", () =>
+        {
+            var window = new FloatingWindow(false) { Opacity = 0, ShowActivated = false };
+            try
+            {
+                window.Show(); window.Preview(State(), 1); Pump(1200); window.TogglePinned();
+                var scene = (PoolScene)window.FindName("Scene"); var hwnd = new WindowInteropHelper(window).Handle;
+                var area = System.Windows.Forms.Screen.FromHandle(hwnd).WorkingArea; var dpi = VisualTreeHelper.GetDpi(scene);
+                var root = scene.SurfaceBounds;
+                Check(SetWindowPos(hwnd, 0, area.Left + 16 - (int)Math.Round(root.Left * dpi.DpiScaleX), area.Top + 16 - (int)Math.Round(root.Top * dpi.DpiScaleY), 0, 0, 0x15));
+                var before = ScreenBounds(window, scene); var sizes = 0;
+                HwndSource.FromHwnd(hwnd).AddHook((nint _, int message, nint wp, nint lp, ref bool handled) => { if (message == 5) sizes++; return 0; });
+                window.Preview(State(), 0);
+                var immediate = ScreenBounds(window, scene);
+                Check(Math.Abs(before.Left - immediate.Left) < 1.1 && Math.Abs(before.Top - immediate.Top) < 1.1);
+                Pump(80);
+                foreach (var mode in new[] { 2, 0, 1, 0 })
+                {
+                    var interrupted = ScreenBounds(window, scene);
+                    window.Preview(State(), mode); var retargeted = ScreenBounds(window, scene);
+                    Check(Math.Abs(interrupted.Left - retargeted.Left) < 1.1 && Math.Abs(interrupted.Top - retargeted.Top) < 1.1);
+                    Check(GetWindowRect(hwnd, out var start)); Pump(80);
+                    Check(GetWindowRect(hwnd, out var unchanged) && start.Equals(unchanged));
+                }
+                Pump(1400); var after = ScreenBounds(window, scene);
+                Check(after.Left >= area.Left - 1 && after.Top >= area.Top - 1 && after.Right <= area.Right + 1 && after.Bottom <= area.Bottom + 1);
+                Check(!scene.Animating && sizes == 0);
+            }
+            finally { window.Close(); }
+        });
         run("Scene displays empty pools, credits and many accounts with bounded viewport and redraw", () =>
         {
             var window = new FloatingWindow(false) { Opacity = 0, ShowActivated = false };
@@ -150,6 +200,12 @@ internal static class SceneTests
             finally { window.Close(); }
         });
     }
+    private static Rect ScreenBounds(Window window, PoolScene scene)
+    {
+        Check(GetWindowRect(new WindowInteropHelper(window).Handle, out var native));
+        var dpi = VisualTreeHelper.GetDpi(scene); var root = scene.SurfaceBounds;
+        return new(native.Left + root.Left * dpi.DpiScaleX, native.Top + root.Top * dpi.DpiScaleY, root.Width * dpi.DpiScaleX, root.Height * dpi.DpiScaleY);
+    }
     private static void Pump(int milliseconds)
     {
         var frame = new DispatcherFrame(); var timer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(milliseconds) };
@@ -157,4 +213,5 @@ internal static class SceneTests
     }
     [StructLayout(LayoutKind.Sequential)] private struct WindowRect { internal int Left, Top, Right, Bottom; }
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetWindowRect(nint window, out WindowRect rect);
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool SetWindowPos(nint hwnd, nint after, int x, int y, int width, int height, uint flags);
 }
