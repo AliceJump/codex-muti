@@ -124,6 +124,70 @@ internal static class SceneTests
             }
             finally { window.Close(); }
         });
+        run("Tray entrance repeats on every hidden-to-visible transition and shares the scene clock without native resizing", () =>
+        {
+            var window = new FloatingWindow(false) { Opacity = 0, ShowActivated = false };
+            try
+            {
+                var scene = (PoolScene)window.FindName("Scene");
+                window.ShowFromLauncher(); Check(scene.EntranceProgress == 0 && scene.Opacity == 0 && scene.Animating);
+                Pump(1200); Check(scene.EntranceProgress == 1 && !scene.Animating); window.Hide();
+                var hwnd = new WindowInteropHelper(window).Handle; var sizes = 0;
+                HwndSource.FromHwnd(hwnd).AddHook((nint _, int message, nint wp, nint lp, ref bool handled) => { if (message == 5) sizes++; return 0; });
+                foreach (var mode in new[] { 0, 1, 2 })
+                {
+                    window.Preview(State(), mode);
+                    window.ShowFromLauncher(); Check(scene.EntranceProgress == 0 && scene.Opacity == 0 && scene.Animating);
+                    Check(GetWindowRect(hwnd, out var initial));
+                    Pump(80); var progress = scene.EntranceProgress;
+                    if (progress is <= 0 or >= 1) throw new InvalidOperationException($"Entrance mode {mode} did not expose an intermediate frame: {progress}");
+                    Check(((TranslateTransform)scene.RenderTransform).Y * (scene.AtTop ? -1 : 1) > 0);
+                    window.Preview(State(count: 3), mode); Check(scene.EntranceProgress == progress);
+                    window.ShowFromLauncher(); Check(scene.EntranceProgress == progress);
+                    Pump(1200); Check(scene.EntranceProgress == 1 && scene.Opacity == 1 && !scene.Animating);
+                    Check(GetWindowRect(hwnd, out var current) && current.Equals(initial));
+                    window.Hide(); Check(!scene.Animating);
+                }
+                window.ShowFromLauncher(); Pump(30); window.Hide();
+                Check(!scene.Animating && scene.EntranceProgress == 1);
+                window.ShowFromLauncher(); Check(scene.EntranceProgress == 0); Pump(1200);
+                window.TogglePinned(); window.Hide(); window.ShowFromLauncher(); Check(scene.EntranceProgress == 0); Pump(1200);
+                Check(window.Pinned && !scene.Animating && sizes == 0);
+                window.Hide(); window.ShowFromLauncher(); Pump(30); scene.SetTheme(true, true);
+                Check(scene.EntranceProgress == 1 && !scene.Animating);
+                window.Hide(); window.ShowFromLauncher();
+                Check(scene.EntranceProgress == 1 && scene.Opacity == 1 && !scene.Animating);
+            }
+            finally { window.Close(); }
+        });
+        run("Tray deactivation and selection form one toggle without dropping rapid consecutive clicks", () =>
+        {
+            var window = new FloatingWindow(false) { Opacity = 0, ShowActivated = false };
+            try
+            {
+                window.Show(); window.Preview(State(), 1); Pump(1200);
+                var scene = (PoolScene)window.FindName("Scene");
+                var area = System.Windows.Forms.Screen.FromHandle(new WindowInteropHelper(window).Handle).WorkingArea;
+                var point = new System.Drawing.Point(area.Right - 30, area.Bottom - 10);
+                for (var i = 0; i < 8; i++)
+                {
+                    window.DismissOnDeactivation(trayPress: true); Check(window.IsVisible);
+                    window.HandleTrayPress();
+                    if (i == 0) Pump(80); // The release fallback can run before Explorer's selection callback.
+                    window.HandleTrayClick(point); Check(!window.IsVisible && !scene.Animating);
+                    window.HandleTrayPress();
+                    window.HandleTrayClick(point); Check(window.IsVisible && scene.EntranceProgress == 0);
+                }
+                window.DismissOnDeactivation(); Check(!window.IsVisible);
+                window.HandleTrayPress();
+                window.HandleTrayClick(point); Check(window.IsVisible);
+                window.Hide(); window.ShowActivated = false; window.Show();
+                window.DismissOnDeactivation(trayPress: true); Pump(80);
+                Check(!window.IsVisible); // A canceled tray drag has no selection: release still dismisses.
+                window.HandleTrayPress(); window.HandleTrayClick(point); Check(window.IsVisible);
+            }
+            finally { window.Close(); }
+        });
         run("Retargeting a scrolled pool preserves the on-screen account pose and settles inside the new scroll range", () =>
         {
             var window = new FloatingWindow(false) { Opacity = 0, ShowActivated = false };
@@ -139,7 +203,9 @@ internal static class SceneTests
                 Check(before == card.TranslatePoint(new Point(), scene) && scene.ScrollOffset == previousScroll);
                 Pump(100); var interrupted = card.TranslatePoint(new Point(), scene);
                 window.Preview(State(count: 12), 1); Check(interrupted == card.TranslatePoint(new Point(), scene));
-                Pump(1400); Check(!scene.Animating && scene.ScrollOffset >= 0);
+                Pump(1400); Check(!scene.Animating && scene.ScrollOffset > 0);
+                window.Preview(State(count: 12), 0); Pump(1400);
+                Check(Math.Abs(scene.ScrollOffset - previousScroll) < .001);
                 window.Preview(State(count: 1), 1); Pump(1400); Check(scene.ScrollOffset == 0 && !scene.Animating);
             }
             finally { window.Close(); }

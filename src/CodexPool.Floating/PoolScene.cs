@@ -44,7 +44,10 @@ public sealed class PoolScene : Canvas
     private TimeSpan renderingTime;
     private readonly MorphSpring scrollMotion = new(0);
     private readonly MorphSpring hostOffset = new(0, 0);
+    private readonly MorphSpring entrance = new(1);
+    private readonly TranslateTransform entranceTranslation = new();
     private double scroll => scrollMotion.Value[0];
+    private double requestedScroll;
     private double contentHeight, viewportHeight;
     private Rect viewport;
     private bool light, highContrast;
@@ -66,6 +69,7 @@ public sealed class PoolScene : Canvas
     internal IReadOnlyList<PoolAccountView> Accounts => accounts;
     internal int Mode => mode;
     internal double ScrollOffset => scroll;
+    internal double EntranceProgress => entrance.Value[0];
     internal Rect SurfaceBounds
     {
         get { var bounds = BoundsFor(Shape.Value); bounds.Offset(hostOffset.Value[0], hostOffset.Value[1]); return bounds; }
@@ -77,7 +81,7 @@ public sealed class PoolScene : Canvas
     internal ToggleButton PinTarget => (ToggleButton)actions.First(a => a.Action == "pin").Button;
     public PoolScene()
     {
-        Focusable = false; ClipToBounds = false;
+        Focusable = false; ClipToBounds = false; RenderTransform = entranceTranslation;
         drawing = new(this) { IsHitTestVisible = false }; Children.Add(drawing); Children.Add(hits);
         foreach (var (label, action) in new[] { ("◫", "mode"), ("◐", "theme"), ("\uE718", "pin"), ("×", "close"), ("Web 面板 ↗", "web"), ("刷新额度", "refresh") })
         {
@@ -111,6 +115,7 @@ public sealed class PoolScene : Canvas
     internal void SetTheme(bool useLight, bool contrast)
     {
         light = useLight; highContrast = contrast; text.Clear();
+        if (highContrast || !SystemParameters.ClientAreaAnimation) { Stop(); SnapMotion(); }
         var fg = Foreground;
         foreach (var (b, _) in actions) b.Foreground = fg;
         Present();
@@ -181,7 +186,7 @@ public sealed class PoolScene : Canvas
         var height = Math.Min(available, y + footer + (mode == 2 ? 0 : 8));
         Shape.Aim(width, Math.Max(64, height), mode == 2 ? 30 : 26, mode == 2 ? 0 : 1, mode == 0 ? 1 : 0);
         viewportHeight = Math.Max(32, height - header - footer);
-        scrollMotion.Aim(Math.Clamp(scrollMotion.Target[0], 0, Math.Max(0, contentHeight - viewportHeight)));
+        scrollMotion.Aim(Math.Clamp(requestedScroll, 0, Math.Max(0, contentHeight - viewportHeight)));
         if (!animate || highContrast || !SystemParameters.ClientAreaAnimation || !IsVisible) { Stop(); SnapMotion(); }
         else Start();
         Present();
@@ -201,7 +206,7 @@ public sealed class PoolScene : Canvas
         SetScroll(next);
     }
     private void SetScroll(double value)
-    { scrollMotion.Aim(Math.Clamp(value, 0, Math.Max(0, contentHeight - viewportHeight))); scrollMotion.Snap(); }
+    { requestedScroll = Math.Clamp(value, 0, Math.Max(0, contentHeight - viewportHeight)); scrollMotion.Aim(requestedScroll); scrollMotion.Snap(); }
     internal void RebaseHost(double x, double y, bool animate)
     {
         // Cancel a one-time native move in scene coordinates, then smoothly reach
@@ -211,20 +216,33 @@ public sealed class PoolScene : Canvas
         Present();
     }
     internal void ResetHostOffset() { hostOffset.Snap(); Present(); }
+    internal void PrepareEntrance()
+    {
+        if (IsVisible || highContrast || !SystemParameters.ClientAreaAnimation) return;
+        entrance.Aim(0); entrance.Snap(); entrance.Aim(1); Present();
+    }
+    internal void BeginEntrance()
+    {
+        if (IsVisible && !entrance.Settled) Start();
+    }
     private void SnapMotion()
-    { Shape.Snap(); scrollMotion.Snap(); hostOffset.Snap(); foreach (var c in cards.Values) c.Pose.Snap(); }
-    private void Start() { if (Animating) return; Animating = true; watch.Restart(); last = 0; renderingTime = default; CompositionTarget.Rendering += Tick; }
+    { Shape.Snap(); scrollMotion.Snap(); hostOffset.Snap(); entrance.Snap(); foreach (var c in cards.Values) c.Pose.Snap(); }
+    private void Start() { if (Animating) return; Animating = true; watch.Restart(); last = -1; renderingTime = default; CompositionTarget.Rendering += Tick; }
     internal void Stop() { Animating = false; CompositionTarget.Rendering -= Tick; }
     private void Tick(object? sender, EventArgs e)
     {
         var time = ((RenderingEventArgs)e).RenderingTime; if (time == renderingTime) return; renderingTime = time;
-        var now = watch.Elapsed.TotalSeconds; var dt = now - last; last = now; if (dt <= 0) return;
-        Shape.Step(dt); scrollMotion.Step(dt); hostOffset.Step(dt); foreach (var c in cards.Values) c.Pose.Step(dt);
-        if (Shape.Settled && scrollMotion.Settled && hostOffset.Settled && cards.Values.All(c => c.Pose.Settled)) { SnapMotion(); Stop(); }
+        var now = watch.Elapsed.TotalSeconds;
+        if (last < 0) { last = now; return; } // Initial layout/show cost must not consume the visible animation.
+        var dt = now - last; last = now; if (dt <= 0) return;
+        Shape.Step(dt); scrollMotion.Step(dt); hostOffset.Step(dt); entrance.Step(dt); foreach (var c in cards.Values) c.Pose.Step(dt);
+        if (Shape.Settled && scrollMotion.Settled && hostOffset.Settled && entrance.Settled && cards.Values.All(c => c.Pose.Settled)) { SnapMotion(); Stop(); }
         Present();
     }
     private void Present()
     {
+        Opacity = Math.Clamp(entrance.Value[0], 0, 1);
+        entranceTranslation.Y = (AtTop ? -1 : 1) * 8 * (1 - Opacity);
         var root = SurfaceBounds; var v = Shape.Value;
         viewport = new(root.X, root.Y + v[3] * 68, root.Width, Math.Max(1, root.Height - v[3] * 158));
         hits.Clip = new RectangleGeometry(viewport);

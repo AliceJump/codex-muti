@@ -17,6 +17,7 @@ internal sealed class StableTrayIcon : Forms.NativeWindow, IDisposable
     private bool registered, disposed;
     public Forms.ContextMenuStrip? ContextMenuStrip { get; set; }
     public event EventHandler<Forms.MouseEventArgs>? MouseClick;
+    public event EventHandler? LeftPress;
     public event EventHandler<Forms.MouseEventArgs>? ContextMenuRequested;
 
     internal delegate bool NotifyCall(uint operation, ref NotifyData data);
@@ -77,8 +78,9 @@ internal sealed class StableTrayIcon : Forms.NativeWindow, IDisposable
         if (message.Msg == Callback)
         {
             var notification = (uint)((long)message.LParam & 0xffff);
+            if (notification is 0x201 or 0x203) LeftPress?.Invoke(this, EventArgs.Empty);
             if (notification is 0x400 or 0x401) // NIN_SELECT / NIN_KEYSELECT (version 4)
-                MouseClick?.Invoke(this, new Forms.MouseEventArgs(Forms.MouseButtons.Left, 1,
+                MouseClick?.Invoke(this, new Forms.MouseEventArgs(Forms.MouseButtons.Left, notification == 0x401 ? 0 : 1,
                     (short)((long)message.WParam & 0xffff), (short)(((long)message.WParam >> 16) & 0xffff), 0));
             if (notification == 0x7b)
             {

@@ -25,6 +25,7 @@ public partial class FloatingWindow : Window
     private readonly StableTrayIcon? tray;
     private GlassTrayMenu? glassMenu;
     private readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromSeconds(20) };
+    private readonly DispatcherTimer trayDismissTimer = new() { Interval = TimeSpan.FromMilliseconds(16) };
     private WindowPreferences preferences = new();
     private JsonElement? snapshot;
     private bool exiting, busy, connected;
@@ -36,8 +37,7 @@ public partial class FloatingWindow : Window
     private string? trayStateKey;
     private string? lastActiveAccountId;
     private bool switchNotifyReady;
-    private long dismissedAt;
-    private System.Drawing.Point dismissedPoint;
+    private bool trayClickCloses;
     private nint handle;
     internal bool Pinned => preferences.Pinned;
     public FloatingWindow() : this(true) { }
@@ -71,15 +71,11 @@ public partial class FloatingWindow : Window
             tray = new StableTrayIcon(CreateIcon(), "Codex Pool · 账户状态 · Ctrl+Alt+W");
             UpdateTrayQuota(null);
             tray.ContextMenuRequested += (_, e) => Dispatcher.Invoke(() => ShowGlassTrayMenu(e));
+            tray.LeftPress += (_, _) => Dispatcher.Invoke(HandleTrayPress);
             tray.MouseClick += (_, e) =>
             {
                 if (e.Button != Forms.MouseButtons.Left) return;
-                Dispatcher.Invoke(() =>
-                {
-                    var cursor = Forms.Cursor.Position;
-                    if (Environment.TickCount64 - dismissedAt < 500 && Math.Abs(cursor.X - dismissedPoint.X) <= 2 && Math.Abs(cursor.Y - dismissedPoint.Y) <= 2) return;
-                    glassMenu?.Close(); ToggleVisibility(new System.Drawing.Point(e.X, e.Y));
-                });
+                Dispatcher.Invoke(() => HandleTrayClick(new System.Drawing.Point(e.X, e.Y), keyboard: e.Clicks == 0));
             };
         }
         PreviewKeyDown += (_, e) =>
@@ -98,7 +94,13 @@ public partial class FloatingWindow : Window
             if (!registered) SetNotice("快捷键已被其他应用使用，可从托盘或启动入口显示窗口。");
             if (Pinned) RestorePosition(); _ = WatchAsync(); timer.Start();
         };
-        Deactivated += (_, _) => DismissOnDeactivation();
+        Deactivated += (_, _) => DismissOnDeactivation(IsTrayPress());
+        trayDismissTimer.Tick += (_, _) =>
+        {
+            if ((GetAsyncKeyState(1) & 0x8000) != 0) return;
+            trayDismissTimer.Stop();
+            if (!Pinned && !IsActive) { SavePosition(); Hide(); }
+        };
         timer.Tick += (_, _) => { SavePosition(); if (snapshot is { } state) Render(state); };
         Closing += OnClosing;
         SystemEvents.UserPreferenceChanged += PreferenceChanged;
@@ -150,7 +152,7 @@ public partial class FloatingWindow : Window
     }
     internal async void ShowFromLauncher()
     {
-        if (Pinned) { Show(); ClampPosition(); Activate(); } else ShowFlyout();
+        if (Pinned) ShowPinned(); else ShowFlyout();
         if (!startServices) return;
         try { await ProxyStartup.EnsureRunningAsync(lifetime.Token); }
         catch (Exception ex) when (ex is HttpRequestException or IOException or System.ComponentModel.Win32Exception or OperationCanceledException)
@@ -325,18 +327,36 @@ public partial class FloatingWindow : Window
         if (Pinned) { flyoutScreen = null; ConstrainPinnedScene(IsVisible); SavePosition(); }
         else { ShowFlyout(); SavePosition(); }
     }
-    internal void DismissOnDeactivation()
+    private bool IsTrayPress() => (GetAsyncKeyState(1) & 0x8000) != 0
+        && tray?.TryGetBounds(out var bounds) == true && bounds.Contains(Forms.Cursor.Position);
+    internal void DismissOnDeactivation(bool trayPress = false)
     {
         if (Pinned) return;
-        dismissedAt = Environment.TickCount64; dismissedPoint = Forms.Cursor.Position; SavePosition(); Hide();
+        // The same tray press deactivates the popup before NIN_SELECT arrives.
+        // Let that selection close it once, instead of hiding and reopening it.
+        if (trayPress) { trayClickCloses = true; trayDismissTimer.Start(); return; }
+        trayDismissTimer.Stop(); SavePosition(); Hide();
     }
-    private void ToggleVisibility(System.Drawing.Point? clicked = null) { if (IsVisible) { SavePosition(); Hide(); } else if (Pinned) { Show(); ClampPosition(); Activate(); } else ShowFlyout(clicked); }
+    internal void HandleTrayPress() => trayClickCloses = IsVisible;
+    internal void HandleTrayClick(System.Drawing.Point point, bool keyboard = false)
+    {
+        trayDismissTimer.Stop(); glassMenu?.Close();
+        var close = !keyboard && trayClickCloses; trayClickCloses = false;
+        if (close) { SavePosition(); Hide(); } else ToggleVisibility(point);
+    }
+    private void ToggleVisibility(System.Drawing.Point? clicked = null) { if (IsVisible) { SavePosition(); Hide(); } else if (Pinned) ShowPinned(); else ShowFlyout(clicked); }
+    private void ShowPinned()
+    {
+        _ = new WindowInteropHelper(this).EnsureHandle();
+        Scene.PrepareEntrance(); Show(); ClampPosition(); Scene.BeginEntrance(); Activate();
+    }
     private void ShowFlyout(System.Drawing.Point? clicked = null)
     {
+        _ = new WindowInteropHelper(this).EnsureHandle();
         if (tray?.TryGetBounds(out var iconBounds) == true && (clicked is null || iconBounds.Contains(clicked.Value))) flyoutAnchor = iconBounds;
         else flyoutAnchor = new System.Drawing.Rectangle(clicked ?? Forms.Cursor.Position, System.Drawing.Size.Empty);
         flyoutScreen = Forms.Screen.FromPoint(new System.Drawing.Point(flyoutAnchor.Value.Left + flyoutAnchor.Value.Width / 2, flyoutAnchor.Value.Top + flyoutAnchor.Value.Height / 2));
-        ConfigureHost(); PositionFlyout(); Show(); Activate();
+        ConfigureHost(); PositionFlyout(); Scene.PrepareEntrance(); Show(); Scene.BeginEntrance(); Activate();
         if (snapshot is { } state) Render(state);
     }
     private void ConfigureHost()
@@ -348,6 +368,7 @@ public partial class FloatingWindow : Window
         Width = Math.Min(620, area.Width / dpi.DpiScaleX); Height = Math.Min(760, Math.Max(100, area.Height / dpi.DpiScaleY - 24));
         UpdateLayout();
         if (snapshot is { } state) Render(state);
+        else Scene.SetState([], preferences.Mode, connected, false, IsVisible);
     }
     private void PositionFlyout()
     {
@@ -416,7 +437,7 @@ public partial class FloatingWindow : Window
     private void OnClosing(object? sender, CancelEventArgs e)
     {
         SavePosition(); if (startServices && !exiting) { e.Cancel = true; Hide(); return; }
-        Scene.Stop(); lifetime.Cancel(); timer.Stop(); SystemEvents.UserPreferenceChanged -= PreferenceChanged;
+        Scene.Stop(); lifetime.Cancel(); timer.Stop(); trayDismissTimer.Stop(); SystemEvents.UserPreferenceChanged -= PreferenceChanged;
         _ = UnregisterHotKey(handle, 1);
         tray?.Dispose();
         http.Dispose();
@@ -439,6 +460,7 @@ public partial class FloatingWindow : Window
     [StructLayout(LayoutKind.Sequential)] private struct Rect { public int Left, Top, Right, Bottom; }
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool RegisterHotKey(nint hwnd, int id, uint modifiers, uint key);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool UnregisterHotKey(nint hwnd, int id);
+    [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int key);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetWindowRect(nint hwnd, out Rect rect);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool DestroyIcon(nint icon);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool SetWindowPos(nint hwnd, nint after, int x, int y, int cx, int cy, uint flags);
