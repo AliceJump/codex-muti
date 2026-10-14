@@ -17,6 +17,7 @@ internal sealed class StableTrayIcon : Forms.NativeWindow, IDisposable
     private bool registered, disposed;
     public Forms.ContextMenuStrip? ContextMenuStrip { get; set; }
     public event EventHandler<Forms.MouseEventArgs>? MouseClick;
+    public event EventHandler<Forms.MouseEventArgs>? ContextMenuRequested;
 
     internal delegate bool NotifyCall(uint operation, ref NotifyData data);
     public StableTrayIcon(System.Drawing.Icon icon, string text, NotifyCall? notify = null)
@@ -79,11 +80,14 @@ internal sealed class StableTrayIcon : Forms.NativeWindow, IDisposable
             if (notification is 0x400 or 0x401) // NIN_SELECT / NIN_KEYSELECT (version 4)
                 MouseClick?.Invoke(this, new Forms.MouseEventArgs(Forms.MouseButtons.Left, 1,
                     (short)((long)message.WParam & 0xffff), (short)(((long)message.WParam >> 16) & 0xffff), 0));
-            if (notification == 0x7b && ContextMenuStrip is { } menu)
+            if (notification == 0x7b)
             {
                 // Foreground ownership lets an outside click dismiss the menu normally.
                 _ = SetForegroundWindow(Handle);
-                menu.Show(Forms.Cursor.Position);
+                var args = new Forms.MouseEventArgs(Forms.MouseButtons.Right, 1,
+                    (short)((long)message.WParam & 0xffff), (short)(((long)message.WParam >> 16) & 0xffff), 0);
+                if (ContextMenuRequested is { } requested) requested.Invoke(this, args);
+                else if (ContextMenuStrip is { } menu) menu.Show(Forms.Cursor.Position);
             }
             return;
         }

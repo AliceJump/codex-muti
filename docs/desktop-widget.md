@@ -78,6 +78,6 @@ Mac：当前 Windows 环境仅能审查源码和构建脚本，原生编译、�
 
 ## 托盘右键菜单
 
-托盘图标右键改为与悬浮窗同主题的 WPF 玻璃弹出菜单（`GlassTrayMenu`）属于草稿 [PR #8](https://github.com/AliceJump/codex-muti/pull/8)，**尚未合入 `master`**。合入后保留六项：显示账户面板、打开悬浮窗、打开 Dashboard、刷新额度、任务栏图标显示设置、退出托盘面板。`StableTrayIcon` 的 GUID（`552bb14d-21b7-4a30-aed2-641f1fd39422`）升级时保持不变，避免 Windows 丢失托盘可见性偏好。
+托盘图标右键改为与悬浮窗同主题的 WPF 玻璃弹出菜单（`GlassTrayMenu`）已通过 [PR #8](https://github.com/AliceJump/codex-muti/pull/8) 合入 `master`，保留六项：显示账户面板、打开悬浮窗、打开 Dashboard、刷新额度、任务栏图标显示设置、退出托盘面板。`StableTrayIcon` 的 GUID（`552bb14d-21b7-4a30-aed2-641f1fd39422`）升级时保持不变，避免 Windows 丢失托盘可见性偏好。
 
-本地若已组合检出 #8，可与 Floating/Widget 一并验证；GitHub 上请仍按独立 draft PR 审查，勿与 #6 / #7 默认叠合。
+关闭重入、DPI 原生坐标与父窗主题继承已修复，11 项 UI 回归通过；混合 DPI、显示器切换和完整视觉验收仍需现场确认。

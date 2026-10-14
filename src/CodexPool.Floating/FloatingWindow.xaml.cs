@@ -30,6 +30,7 @@ public partial class FloatingWindow : Window
     private readonly CancellationTokenSource lifetime = new();
     private readonly HttpClient http = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = Timeout.InfiniteTimeSpan };
     private readonly StableTrayIcon? tray;
+    private GlassTrayMenu? glassMenu;
     private readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromSeconds(20) };
     private WindowPreferences preferences = new();
     private JsonElement? snapshot;
@@ -80,18 +81,7 @@ public partial class FloatingWindow : Window
         {
             tray = new StableTrayIcon(CreateIcon(), "Codex Pool · 账户状态 · " + shortcut);
             UpdateTrayQuota(null);
-            var menu = new Forms.ContextMenuStrip();
-            menu.Items.Add("显示账户面板", null, (_, _) => Dispatcher.Invoke(ToggleVisibility));
-            menu.Items.Add("打开悬浮窗", null, (_, _) => Dispatcher.Invoke(LaunchFloating));
-            menu.Items.Add("打开 Dashboard", null, (_, _) => Dispatcher.Invoke(async () => await DashboardAsync()));
-            menu.Items.Add("刷新额度", null, (_, _) => Dispatcher.Invoke(async () => await RefreshQuotaAsync(notify: true)));
-            menu.Items.Add("任务栏图标显示设置", null, (_, _) => Dispatcher.Invoke(() =>
-            {
-                try { Process.Start(new ProcessStartInfo("ms-settings:taskbar") { UseShellExecute = true }); }
-                catch { SetNotice("请打开 Windows 设置 → 个性化 → 任务栏 → 其他系统托盘图标。"); }
-            }));
-            menu.Items.Add("退出托盘面板", null, (_, _) => Dispatcher.Invoke(() => { exiting = true; Close(); }));
-            tray.ContextMenuStrip = menu;
+            tray.ContextMenuRequested += (_, e) => Dispatcher.Invoke(() => ShowGlassTrayMenu(e));
             tray.MouseClick += (_, e) =>
             {
                 if (e.Button != Forms.MouseButtons.Left) return;
@@ -101,6 +91,7 @@ public partial class FloatingWindow : Window
                     // should dismiss the visible flyout, rather than reopen it after Deactivated.
                     var cursor = Forms.Cursor.Position;
                     if (Environment.TickCount64 - dismissedAt < 500 && Math.Abs(cursor.X - dismissedPoint.X) <= 2 && Math.Abs(cursor.Y - dismissedPoint.Y) <= 2) return;
+                    glassMenu?.Close();
                     ToggleVisibility(new System.Drawing.Point(e.X, e.Y));
                 });
             };
@@ -609,6 +600,30 @@ public partial class FloatingWindow : Window
     private async void OpenDashboard(object sender, RoutedEventArgs e) => await DashboardAsync();
     private void OpenFloating(object sender, RoutedEventArgs e) => LaunchFloating();
     private async void RefreshQuota(object sender, RoutedEventArgs e) => await RefreshQuotaAsync(notify: true);
+
+    private void ShowGlassTrayMenu(Forms.MouseEventArgs e)
+    {
+        glassMenu?.Close();
+        System.Drawing.Rectangle? bounds = null;
+        if (tray?.TryGetBounds(out var rect) == true) bounds = rect;
+        var cursor = Forms.Cursor.Position;
+        var items = new (string, Action)[]
+        {
+            ("显示账户面板", () => ToggleVisibility()),
+            ("打开悬浮窗", LaunchFloating),
+            ("打开 Dashboard", () => _ = DashboardAsync()),
+            ("刷新额度", () => _ = RefreshQuotaAsync(notify: true)),
+            ("任务栏图标显示设置", () =>
+            {
+                try { Process.Start(new ProcessStartInfo("ms-settings:taskbar") { UseShellExecute = true }); }
+                catch { SetNotice("请打开 Windows 设置 → 个性化 → 任务栏 → 其他系统托盘图标。"); }
+            }),
+            ("退出托盘面板", () => { exiting = true; Close(); }),
+        };
+        glassMenu = new GlassTrayMenu(items, () => glassMenu = null, preferences.Theme);
+        glassMenu.ShowNear(cursor, bounds);
+    }
+
     private void LaunchFloating()
     {
         var executable = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "Floating", "CodexPool.Floating.exe"));

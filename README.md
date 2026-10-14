@@ -15,19 +15,17 @@
 
 验收细节见 [docs/native-acceptance-results.md](docs/native-acceptance-results.md)。不要把小会话通过当成完整发布门槛已清。
 
-### 进行中的草稿 PR（尚未合入 `master`）
+### 已合入的本轮功能
 
-本仓库当前用**分 PR** 在 GitHub 上审查，与**本地组合检出/部署**是两条线：
+以下改动已于 2026-10-14 分别通过 Squash Merge 合入 `master`：
 
 | PR | 主题 | 说明 |
 |----|------|------|
-| [#6](https://github.com/AliceJump/codex-muti/pull/6) | Responses 连字符头透传 + 产品显示名 | 透传 `session-id` / `thread-id`；Floating 显示名为 `Codex Pool` |
-| [#7](https://github.com/AliceJump/codex-muti/pull/7) | Desktop WHAM usage 改写 | 按账户池可用性改写 `wham/usage`；`~/.codex/config.toml` 增加 `chatgpt_base_url` |
-| [#8](https://github.com/AliceJump/codex-muti/pull/8) | 托盘右键玻璃菜单 | WPF `GlassTrayMenu`，与悬浮窗主题一致 |
+| [#6](https://github.com/AliceJump/codex-muti/pull/6) | Responses 请求头与产品名 | 透传两种 session/thread 拼写，metadata 会话身份与缓存亲和性分开 |
+| [#7](https://github.com/AliceJump/codex-muti/pull/7) | Desktop WHAM usage | 按真实模型路由许可返回 allowed，未知套餐返回必填的 unknown |
+| [#8](https://github.com/AliceJump/codex-muti/pull/8) | 玻璃托盘菜单 | 修复关闭重入、DPI 坐标和主题继承 |
 
-- **GitHub**：上述均为 **draft**，互不强制叠合；审查/合并请按各自 PR 进行。
-- **本地**：可在同一 worktree 组合 cherry-pick / 合并后再用 `deploy-local.ps1` 做整包验证；本地组合部署**不等于**这些 PR 已合入 `master`。
-
+合入源代码与本机实际运行的构建可能不同；真实多账户、Desktop 和完整桌面验收仍以验收报告为准。
 ## 组件与端口
 
 | 组件 | 作用 | 默认地址 / 入口 |
@@ -100,9 +98,9 @@ chatgpt_base_url = "http://127.0.0.1:3210/backend-api"
 | 键 | 作用 |
 |----|------|
 | `openai_base_url` | 模型请求转到本机池（`master` 已支持相关入口说明） |
-| `chatgpt_base_url` | 让 ChatGPT Desktop 的用量查询打到 Daemon；**完整 WHAM 改写见草稿 [PR #7](https://github.com/AliceJump/codex-muti/pull/7)**，说明见 [docs/wham-usage-rewrite.md](docs/wham-usage-rewrite.md) |
+| `chatgpt_base_url` | 让 ChatGPT Desktop 的用量查询打到 Daemon；完整 WHAM 改写已在 [PR #7](https://github.com/AliceJump/codex-muti/pull/7) 合入，说明见 [docs/wham-usage-rewrite.md](docs/wham-usage-rewrite.md) |
 
-可选：`CODEX_API_BASE_URL=http://127.0.0.1:3210`（对应 `GET /api/codex/usage`，语义与 WHAM 改写相同，同样依赖 #7）。
+可选：`CODEX_API_BASE_URL=http://127.0.0.1:3210`（对应 `GET /api/codex/usage`，语义与 WHAM 改写相同，已随 #7 合入）。
 
 模型入口可接受池内原生 access token，或只读核对 Daemon `CODEX_HOME/auth.json` 中的当前 ChatGPT 登录；代理不导入、复制、刷新或写入该文件。实际上游账户仍由 sticky 调度决定。
 
@@ -127,8 +125,8 @@ pwsh -NoProfile -File .\scripts\deploy-local.ps1 -Dashboard
 说明：
 
 - 部署脚本只动本仓库（及 worktree）`.local` 下的代理与 UI；不改账户凭据/阈值，不停止 Codex 本身。
-- **本地组合部署**：你可以把未合入的草稿改动一并检出后再部署，用于本机验证。
-- **GitHub 分 PR**：#6 / #7 / #8 仍是独立 draft，审查时请分开看，不要默认它们已经在 `master`。
+- 本机运行版本以实际部署构建为准；更新源码不会自动替换已经运行的 Daemon。
+- #6 / #7 / #8 已分别合入 `master`，无需组合草稿分支。
 
 账户改名：`pool.ps1 rename <account-id> "新名称"` 或 Dashboard 卡片操作，见 [docs/account-rename.md](docs/account-rename.md)。
 
@@ -139,7 +137,7 @@ pwsh -NoProfile -File .\scripts\deploy-local.ps1 -Dashboard
 - Floating：Acrylic、完整/紧凑/胶囊、主题、置顶、拖动、位置保存；`×` / Alt+F4 只关该窗，Daemon 继续跑。
 - Widget：托盘面板，展示账户与额度，可打开悬浮窗/Web；与 Floating 可同时运行，经 `/events` 同步。
 - 快捷方式/`open-floating.ps1` 在代理未运行时可自动拉起 Daemon（可带 `--live-boundary-probe`）；完整真实验收仍以报告为准。
-- 托盘右键玻璃菜单（与悬浮窗同主题）在草稿 [PR #8](https://github.com/AliceJump/codex-muti/pull/8)；合入前 `master` 行为以已发布代码为准。
+- 托盘右键玻璃菜单（与悬浮窗同主题）已在 [PR #8](https://github.com/AliceJump/codex-muti/pull/8) 合入。
 
 详见 [docs/desktop-widget.md](docs/desktop-widget.md)。
 
@@ -190,7 +188,7 @@ node scripts/phase0-live.mjs
 - [docs/phase0-results.md](docs/phase0-results.md) — Phase 0 已通过 / 待验证
 - [docs/native-acceptance-results.md](docs/native-acceptance-results.md) — 原生多账户验收范围
 - [docs/native-auth-adapter.md](docs/native-auth-adapter.md) — 原生登录与额度适配
-- [docs/wham-usage-rewrite.md](docs/wham-usage-rewrite.md) — Desktop WHAM 改写（对应草稿 PR #7）
+- [docs/wham-usage-rewrite.md](docs/wham-usage-rewrite.md) — Desktop WHAM 改写（PR #7 已合入）
 - [docs/desktop-widget.md](docs/desktop-widget.md) — Floating / Widget / Mac
 - [docs/model-errors.md](docs/model-errors.md) — 错误与账户池汇总
 - [docs/local-provider-acceptance.md](docs/local-provider-acceptance.md) — 本地 provider 验收

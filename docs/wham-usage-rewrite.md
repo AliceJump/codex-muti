@@ -1,10 +1,10 @@
 # ChatGPT Desktop 用量改写（WHAM）
 
-> **合入状态**：实现与路由在草稿 [PR #7](https://github.com/AliceJump/codex-muti/pull/7)。未合入前，`master` 上的 Daemon **不保证**提供下列改写接口；本地若已组合检出 #7，可按本文配置验证。
+> **合入状态**：实现、路由与审阅修复已通过 [PR #7](https://github.com/AliceJump/codex-muti/pull/7) 合入 `master`；源码合入不代表本机已部署或 Desktop 已通过验收。
 
 ChatGPT Desktop 在订阅额度耗尽时，会根据 `GET …/wham/usage` 的 `rate_limit.allowed === false` 硬禁用发送，即使 `openai_base_url` 已指向自定义 provider。见 [openai/codex#48816](https://github.com/openai/codex/issues/48816)。
 
-Codex Pool 在 loopback 上提供改写后的用量接口：Desktop 仍可使用本机 ChatGPT 登录的远端能力，同时按**账户池**是否还有可用账户决定是否放行本地发送。
+Codex Pool 在 loopback 上提供改写后的用量接口：Desktop 仍可使用本机 ChatGPT 登录的远端能力，同时按**模型路由**能否选择账户决定是否放行本地发送。
 
 ## 配置
 
@@ -28,10 +28,13 @@ Daemon 仅监听 `127.0.0.1:3210`，拒绝非 loopback Host / 异源 Origin。
 
 | 条件 | `rate_limit.allowed` | `rate_limit.limit_reached` |
 |------|----------------------|----------------------------|
-| 池内任一账户 Available（复用 `PoolRuntime.Availability`） | `true` | `false` |
+| 当前账户可用 | `true` | `false` |
+| 当前账户不可用，允许自动切换且同 provider 内有可用备用 | `true` | `false` |
+| 当前账户不可用且自动切换关闭，或同 provider 内无可用账户 | `false` | `true` |
+| 未选中账户且池内有可用初始账户 | `true` | `false` |
 | 池为空或全部不可用 | `false` | `true` |
 
-该路径不要求本地控制密钥（Desktop 带 ChatGPT bearer），但仍受 loopback 与 Host/Origin 约束。不会把 Desktop 登录导入账户池，也不会用其 token 向上游查真实用量。
+用量查询只读复用 `PoolRuntime.CanRouteModelRequest`，不改变 active、epoch、凭据或请求预留。`plan_type` 始终存在，未知时为 `unknown`。该路径不要求本地控制密钥（Desktop 带 ChatGPT bearer），但仍受 loopback 与 Host/Origin 约束。不会把 Desktop 登录导入账户池，也不会用其 token 向上游查真实用量。
 
 ## 与原生额度的关系
 
@@ -39,4 +42,4 @@ Daemon 仅监听 `127.0.0.1:3210`，拒绝非 loopback Host / 异源 Origin。
 
 ## Desktop 验收
 
-CLI / app-server 路径已有原生验收；**ChatGPT Desktop 经池发送的端到端验收仍待完成**。合入 #7 后仍需单独做 Desktop 真机确认。
+CLI / app-server 路径已有原生验收；**ChatGPT Desktop 经池发送的端到端验收仍待完成**。#7 合入后仍需单独做 Desktop 真机确认。

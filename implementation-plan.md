@@ -2,7 +2,7 @@
 
 Date: 2026-10-12 (Asia/Shanghai). Phases are separate commits; research artifacts stay in the primary checkout's ignored `.research/`. Architecture decisions are in architecture.md.
 
-> 状态指针（2026-10-14）：原生多账户**核心**已通过小范围真实验收，完整发布门槛未清；ChatGPT Desktop 验收仍待完成；macOS 为原型。进行中的工程草稿见 README 中的 PR #6 / #7 / #8（分 PR 审查；本地可组合部署）。详见 [docs/native-acceptance-results.md](docs/native-acceptance-results.md)。
+> 状态指针（2026-10-14）：原生多账户**核心**已通过小范围真实验收，完整发布门槛未清；ChatGPT Desktop 验收仍待完成；macOS 为原型。PR #6 / #7 / #8 已分别 Squash Merge 合入，功能与部署入口见 README；源码合入不扩大真实验收范围。详见 [docs/native-acceptance-results.md](docs/native-acceptance-results.md)。
 
 
 ## Phase 0 — protocol and feasibility gate

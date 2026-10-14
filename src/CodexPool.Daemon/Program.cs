@@ -1,7 +1,6 @@
 
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -63,7 +62,9 @@ try
         context.Response.Headers.ContentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
         context.Response.Headers["Referrer-Policy"] = "no-referrer";
         var path = context.Request.Path.Value ?? "";
-        var publicPath = path is "/" or "/health" or "/auth/callback" or "/dashboard.js" or "/dashboard.css" || path.StartsWith("/dashboard/open/", StringComparison.Ordinal);
+        var publicPath = path is "/" or "/health" or "/auth/callback" or "/dashboard.js" or "/dashboard.css"
+            || path is "/backend-api/wham/usage" or "/api/codex/usage"
+            || path.StartsWith("/dashboard/open/", StringComparison.Ordinal);
         var bearer = LocalCommands.EqualSecret(context.Request.Headers.Authorization.ToString(), "Bearer " + vault.LocalKey);
         var modelBearer = !bearer && await officialModelAuth.AcceptsAsync(context.Request.Method, path,
             context.Request.Headers.Authorization.ToString(), context.RequestAborted);
@@ -126,6 +127,16 @@ try
         if (pool.Settings.AutoSwitch) try { pool.Select(); } catch (NoEligibleAccountException) { }
         return quota.Views;
     });
+    // ChatGPT Desktop / Codex 在 chatgpt_base_url 或 CODEX_API_BASE_URL 指向本机时读取用量；按池可用性改写 allowed。
+    IResult WhamUsageEndpoint(HttpContext context)
+    {
+        var availability = pool.Availability();
+        var plan = availability.Select(x => x.Plan).FirstOrDefault(p => !string.IsNullOrWhiteSpace(p))
+            ?? vault.Accounts.Select(x => quota.Snapshot(x.Id)?.Plan).FirstOrDefault(p => !string.IsNullOrWhiteSpace(p));
+        return Results.Json(WhamUsage.Response(pool.CanRouteModelRequest(), WhamUsage.HeaderAccountId(context.Request), plan));
+    }
+    app.MapGet("/backend-api/wham/usage", WhamUsageEndpoint);
+    app.MapGet("/api/codex/usage", WhamUsageEndpoint);
     app.MapPost("/accounts/native-login", async (HttpContext context) =>
     {
         var input = await context.Request.ReadFromJsonAsync<LoginInput>(context.RequestAborted) ?? throw new AuthFailure("invalid_login_request");
@@ -264,15 +275,8 @@ try
         var account = candidates[0];
         var headers = context.Request.Headers.ToDictionary(x => x.Key, x => x.Value.ToString(), StringComparer.OrdinalIgnoreCase);
         headers.Remove("ChatGPT-Account-Id"); // Backend account routing is supplied only by validated credentials.
-        if (headers.TryGetValue("session_id", out var session))
-        {
-            var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(session)));
-            if (!sessionOwners.TryGetValue(hash, out var prior) || prior != account.AccountId) headers.Remove("x-codex-turn-state");
-            // Bounded transport ownership hints, never conversation contents or Codex workflow state.
-            if (sessionOwners.Count >= 1024) sessionOwners.Clear();
-            sessionOwners[hash] = account.AccountId;
-        }
-        else headers.Remove("x-codex-turn-state");
+        // Global sticky selection is unchanged. This only decides whether account-bound turn state still belongs here.
+        ResponsesHeaders.BindTurnState(headers, sessionOwners, account.AccountId);
         var started = Stopwatch.GetTimestamp(); var requestId = Guid.NewGuid().ToString("N");
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted); lifetime.CancelAfter(TimeSpan.FromMinutes(10));
         RelayResult result;
@@ -301,7 +305,7 @@ try
             if (attemptCount > 0) statistics.Record(attemptedAccount, modelValue.GetString()!, tokenUsage);
         }
         pool.Complete(selection, result, failoverReason, requestedModel);
-        if (headers.TryGetValue("session_id", out var completedSession)) sessionOwners[Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(completedSession)))] = result.AccountId;
+        ResponsesHeaders.Remember(headers, sessionOwners, result.AccountId);
         recent.Enqueue(new { timestamp = DateTimeOffset.UtcNow, requestId, account = result.AccountId, model = modelValue.GetString(),
             durationMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds, status = result.StatusCode, result.Outcome, result.Attempts,
             failover = result.Attempts > 1, failoverReason, rejections, tokenUsage,
