@@ -70,6 +70,14 @@ Windows 无法直接运行 SwiftUI/AppKit 原生 `.app`。可以在当前 Window
 
 ## 验收边界
 
+**ChatGPT Desktop** 经 Codex Pool 发送的端到端验收仍待完成（与 CLI/app-server 原生验收分开）。
+
 Windows：构建、真实代理状态/额度显示、与原浮窗共存、隐藏启动、快捷键展开、启动器单实例唤醒、打开浮窗后收起已验证。原代理持续运行，未更改额度阈值或 Codex 配置。手动 Radio 切换/自动切换同步、真实托盘鼠标操作、多显示器和长期离线重连还需进一步验收；账户迁移仍以独立真实验收报告为准。
 
 Mac：当前 Windows 环境仅能审查源码和构建脚本，原生编译、材质与生命周期未验证。
+
+## 托盘右键菜单
+
+托盘图标右键改为与悬浮窗同主题的 WPF 玻璃弹出菜单（`GlassTrayMenu`）属于草稿 [PR #8](https://github.com/AliceJump/codex-muti/pull/8)，**尚未合入 `master`**。合入后保留六项：显示账户面板、打开悬浮窗、打开 Dashboard、刷新额度、任务栏图标显示设置、退出托盘面板。`StableTrayIcon` 的 GUID（`552bb14d-21b7-4a30-aed2-641f1fd39422`）升级时保持不变，避免 Windows 丢失托盘可见性偏好。
+
+本地若已组合检出 #8，可与 Floating/Widget 一并验证；GitHub 上请仍按独立 draft PR 审查，勿与 #6 / #7 默认叠合。
