@@ -1,4 +1,4 @@
 <Window x:Class="CodexPool.Floating.FloatingWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:local="clr-namespace:CodexPool.Floating"
-        Title="Codex Pool" Icon="pack://application:,,,/Assets/codex-pool.ico" Width="620" Height="700" SizeToContent="Manual" WindowStyle="None" AllowsTransparency="True" ResizeMode="NoResize" Topmost="True" ShowInTaskbar="False" Background="Transparent" FontFamily="Segoe UI, Microsoft YaHei UI">
+        Title="Codex Pool" Icon="pack://application:,,,/CodexPool.Floating;component/Assets/codex-pool.ico" Width="620" Height="700" SizeToContent="Manual" WindowStyle="None" AllowsTransparency="True" ResizeMode="NoResize" Topmost="True" ShowInTaskbar="False" Background="Transparent" FontFamily="Segoe UI, Microsoft YaHei UI">
     <local:PoolScene x:Name="Scene"/>
 </Window>

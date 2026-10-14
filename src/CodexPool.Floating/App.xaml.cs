@@ -7,10 +7,12 @@ public partial class App : System.Windows.Application
     private Mutex? owner;
     private EventWaitHandle? showSignal;
     private RegisteredWaitHandle? showListener;
+    private ProxyTrayController? proxyTray;
     protected override void OnStartup(System.Windows.StartupEventArgs e)
     {
         base.OnStartup(e);
-        const string instance = "CodexPoolWidget";
+        var proxyMode = e.Args.Contains("--proxy-tray", StringComparer.Ordinal);
+        var instance = proxyMode ? "CodexPoolProxyTray" : "CodexPoolWidget";
         var signalName = "Local\\" + instance + "Show-" + Environment.UserName;
         // Hold the event before claiming ownership so a concurrent launcher can
         // queue its wake-up even while the first window is being constructed.
@@ -20,6 +22,12 @@ public partial class App : System.Windows.Application
         {
             showSignal.Set();
             owner.Dispose(); owner = null; Shutdown(); return;
+        }
+        if (proxyMode)
+        {
+            proxyTray = new ProxyTrayController(Dispatcher);
+            showListener = ThreadPool.RegisterWaitForSingleObject(showSignal, (_, _) => Dispatcher.BeginInvoke(proxyTray.ShowMenu), null, Timeout.Infinite, false);
+            return;
         }
         var window = new FloatingWindow() { ShowInTaskbar = e.Args.Contains("--review", StringComparer.Ordinal) };
         showListener = ThreadPool.RegisterWaitForSingleObject(showSignal, (_, _) => window.Dispatcher.BeginInvoke(window.ShowFromLauncher), null, Timeout.Infinite, false);
@@ -32,6 +40,7 @@ public partial class App : System.Windows.Application
     }
     protected override void OnExit(System.Windows.ExitEventArgs e)
     {
+        proxyTray?.Dispose();
         showListener?.Unregister(null); showSignal?.Dispose();
         if (owner is not null) { owner.ReleaseMutex(); owner.Dispose(); }
         base.OnExit(e);

@@ -93,9 +93,9 @@ function script:Stop-Process {
 }
 function script:Get-CimInstance {
     param($ClassName,$Filter)
-    foreach ($taskId in @(201,202)) {
+    foreach ($taskId in @(201,202,203)) {
         $taskProcess = $taskTestState.Processes[$taskId]
-        [pscustomobject]@{ProcessId=$taskId;ExecutablePath=$taskProcess.Path;CommandLine=$(if ($taskId -eq 201) {'--tray'} else {''})}
+        [pscustomobject]@{ProcessId=$taskId;ExecutablePath=$taskProcess.Path;CommandLine=$(if ($taskId -eq 203) {'--proxy-tray'} elseif ($taskId -eq 201) {'--tray'} else {''})}
     }
 }
 function script:Start-Process {
@@ -118,6 +118,7 @@ foreach ($taskCase in @('All','Core','Components','FailCore','FailAllCore','Fail
         $null = New-TestProcess $taskId (Join-Path $taskTestState.Sandbox ".local/desktop/$taskKind/CodexPool.Floating.exe")
         New-TestFile (Join-Path $taskTestState.Sandbox ".local/desktop/$taskKind/source-build.txt") (Join-Path $taskTestState.Sandbox '.local/base')
     }
+    $null = New-TestProcess 203 (Join-Path $taskTestState.Sandbox '.local/desktop/Proxy/CodexPool.Floating.exe')
     $taskStatusStub = @'
 function Get-PoolStatus([string]$Path) {
     [pscustomobject]@{boundaryProbe=$true;accounts=@();nativeLoginAttempts=@();settings=[pscustomobject]@{autoSwitch=$false;fiveHourThreshold=95;weeklyThreshold=95;windowThreshold=$null}}
@@ -143,6 +144,7 @@ function Start-PoolDesktopClient {
     try { & $taskSourcePath -Target $taskTarget }
     catch { $taskFailed = $true; $taskFailureMessage = $_.Exception.Message }
     Assert-Test ($taskFailed -eq $taskCase.StartsWith('Fail')) "Unexpected result for ${taskCase}: $taskFailureMessage"
+    Assert-Test (-not $taskTestState.Processes[203].HasExited -and $taskTestState.Trace -notcontains 'stop:203') 'Independent proxy tray was stopped by account panel deployment.'
     $taskPointer = Get-Content -LiteralPath (Join-Path $taskTestState.Sandbox '.local/current-build.json') -Raw | ConvertFrom-Json
     if ($taskTarget -eq 'Core') {
         Assert-Test (-not ($taskTestState.Trace | Where-Object {$_ -match 'ui|stop:20'})) 'Core deployment touched UI.'

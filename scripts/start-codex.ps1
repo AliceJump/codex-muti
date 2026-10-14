@@ -61,6 +61,9 @@ try {
         . (Join-Path $PSScriptRoot 'desktop-client.ps1')
         Start-PoolDesktopClient -BuildDirectory $taskBuild -Tray -NoDaemonStart
     }
+    if (Test-Path -LiteralPath (Join-Path $taskRoot '.local/proxy-tray/current-build.json')) {
+        & (Join-Path $PSScriptRoot 'start-proxy-tray.ps1') -CompactBridge
+    }
     & (Join-Path $PSScriptRoot 'desktop-compact-bridge.ps1') -CodexPath $taskDesktop.CodexPath -DesktopPath $taskDesktop.DesktopPath -BridgePath $taskDesktop.BridgePath -ReuseRunning
     if (-not $taskDesktop.RunningThroughBridge) {
         # Hold the launch mutex until the child is visible, so a rapid second click

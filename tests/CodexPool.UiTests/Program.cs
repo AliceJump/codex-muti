@@ -11,8 +11,24 @@ using System.Text.Json;
 internal static class Program
 {
     [STAThread]
-    private static int Main()
+    private static int Main(string[] args)
     {
+        if (args.Length == 1 && args[0] == "--proxy-icon-check")
+        {
+            foreach (var guid in new[] { StableTrayIcon.Identity, ProxyTrayController.Identity })
+            {
+                var identifier = new PublishedIconIdentifier { Size = (uint)Marshal.SizeOf<PublishedIconIdentifier>(), Guid = guid };
+                Check(Shell_NotifyIconGetRect(ref identifier, out _) == 0);
+            }
+            Console.WriteLine("PASS read-only Explorer check: account and proxy icons are both registered");
+            return 0;
+        }
+        if (args.Length == 2 && args[0] == "--proxy-owner-check")
+        {
+            var identity = ProxyDaemonProcess.Capture(args[1]);
+            Console.WriteLine($"PASS read-only proxy identity: PID={identity.Pid}, executable={System.IO.Path.GetFileName(identity.Path)}");
+            return 0;
+        }
         var failed = 0; var total = 0;
         void Run(string name, Action test)
         {
@@ -20,6 +36,34 @@ internal static class Program
             try { test(); Console.WriteLine("PASS " + name); }
             catch (Exception ex) { failed++; Console.WriteLine("FAIL " + name + " " + ex.GetType().Name + ": " + ex.Message); Console.WriteLine(ex.StackTrace); }
         }
+        Run("Proxy and account trays have independent Explorer identities", () =>
+        {
+            var calls = new List<StableTrayIcon.NotifyData>();
+            bool Record(uint operation, ref StableTrayIcon.NotifyData data) { calls.Add(data); return true; }
+            using var tray = new StableTrayIcon(QuotaTrayIcon.Create(50), "代理预览", Record, ProxyTrayController.Identity);
+            Check(ProxyTrayController.Identity != StableTrayIcon.Identity);
+            tray.Dispose();
+            Check(calls.Count > 0 && calls.All(x => x.Guid == ProxyTrayController.Identity));
+        });
+        Run("Proxy switch toggle preserves unified and legacy non-default thresholds", () =>
+        {
+            var state = JsonSerializer.SerializeToElement(new { settings = new { autoSwitch = true, fiveHourThreshold = 98, weeklyThreshold = 92, windowThreshold = (double?)null } });
+            var settings = ProxyTrayController.ToggleSettings(state);
+            Check(!settings.AutoSwitch && settings.FiveHourThreshold == 98 && settings.WeeklyThreshold == 92 && settings.WindowThreshold is null);
+            state = JsonSerializer.SerializeToElement(new { settings = new { autoSwitch = false, fiveHourThreshold = 98, weeklyThreshold = 92, windowThreshold = 87d } });
+            settings = ProxyTrayController.ToggleSettings(state);
+            Check(settings.AutoSwitch && settings.WindowThreshold == 87);
+        });
+        Run("Proxy process control excludes Codex, foreign roots and path traversal", () =>
+        {
+            const string root = @"D:\items\codex-pool";
+            Check(ProxyDaemonProcess.OwnedPath(root + @"\.local\builds\one\Daemon\CodexPool.Daemon.exe", root));
+            Check(!ProxyDaemonProcess.OwnedPath(root + @"\.local\builds\codex.exe", root));
+            Check(!ProxyDaemonProcess.OwnedPath(root + @"\.local-other\CodexPool.Daemon.exe", root));
+            Check(!ProxyDaemonProcess.OwnedPath(root + @"\.local\..\foreign\CodexPool.Daemon.exe", root));
+            Check(!ProxyDaemonProcess.OwnedPath(@"C:\other\.local\CodexPool.Daemon.exe", root));
+            Check(!ProxyDaemonProcess.OwnedPath(root + @"\.local\CodexPool.Daemon.exe", ""));
+        });
         Run("Either quota window exhausted marks the account, unknown alone does not", () =>
         {
             Check(QuotaIndicator.IsExhausted(0, 70));
@@ -131,6 +175,8 @@ internal static class Program
         return failed == 0 ? 0 : 1;
     }
     private static void Check(bool value) { if (!value) throw new InvalidOperationException(); }
+    [StructLayout(LayoutKind.Sequential)] private struct PublishedIconIdentifier { public uint Size; public nint Window; public uint Id; public Guid Guid; }
+    [DllImport("shell32.dll")] private static extern int Shell_NotifyIconGetRect(ref PublishedIconIdentifier identity, out WindowRect rect);
     private static void Pump(int milliseconds)
     {
         var frame = new DispatcherFrame();
