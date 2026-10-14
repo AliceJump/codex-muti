@@ -1,11 +1,26 @@
-# Native Codex authorization adapter
+# 原生 Codex 授权适配器
 
-The daemon supports two separate grant profiles. SIWC registrations use the documented public Responses route. Native Codex registrations use the installed official CLI's login flow and the source-confirmed Codex backend route. A SIWC token is never sent to a private Codex endpoint.
+Daemon 支持两套相互独立的 grant：
 
-`native-login <name>` launches official `codex login` with a fresh, isolated `CODEX_HOME` and file credential storage in the daemon's CurrentUser-only data directory. It never reads or changes the user's default Codex auth.json. After the helper exits, the daemon validates the ID-token signature, audience and account identity, deletes the helper's auth.json, then saves one DPAPI-protected credential generation. Only the daemon refreshes that generation. A crash between deletion and persistence requires a new login; it does not leave two refresh owners.
+| 类型 | 路线 | 额度 |
+|------|------|------|
+| SIWC | 文档化的公开 Responses 路由 | 显示为未知 |
+| Native | 官方 CLI 登录 + 源码确认的 Codex backend 路由 | 真实 5h / weekly 等窗口 |
 
-This is an authorization adapter, not a session or agent adapter. Native usage is read from the endpoint and fields used by the pinned official source (`chatgpt.com/backend-api/wham/usage`). Window duration identifies 5h and weekly windows; missing values remain unknown. Cached per-account snapshots survive restart and become visibly stale. This private interface is version-sensitive and is not a public API guarantee.
+SIWC token **不会**发往私有 Codex 端点。
 
-For ChatGPT Desktop composer unblocking when routing through the local pool, see [wham-usage-rewrite.md](wham-usage-rewrite.md).
+## `native-login`
 
-Native A/B login, two refresh rotations on each account and real quota mapping passed on 2026-10-13. Native continuation, compact/resume, reasoning, MCP proof retention and configured threshold switching also passed in small-session tests. See [native-acceptance-results.md](native-acceptance-results.md) for the scope and remaining gates. Automatic migration remains opt-in under the explicit live-boundary probe gate until the broader live matrix passes.
+`native-login <name>` 在独立临时 `CODEX_HOME` 中启动官方 `codex login`（file 凭据），**不读不改**用户默认 Codex `auth.json`。helper 退出后，Daemon 校验 ID token，删除 helper 的 `auth.json`，再写入一代 DPAPI 凭据；之后只有 Daemon 刷新。若在删除与持久化之间崩溃，需要重新登录，而不会留下两个 refresh 持有者。
+
+这是**授权适配**，不是 session / agent 适配。
+
+## 额度
+
+原生用量读取固定官方源码中的 endpoint 与字段（`chatgpt.com/backend-api/wham/usage`）。窗口时长区分 5h、weekly 等；缺失保持未知。每账户快照独立缓存，过期后界面可见陈旧，不伪装成 0%。该私有接口版本敏感，不是公开 API 承诺。
+
+ChatGPT Desktop 经本机池发送时的用量改写（按**模型路由许可**返回 `rate_limit.allowed`）见 [wham-usage-rewrite.md](wham-usage-rewrite.md)（已合入的 [PR #7](https://github.com/AliceJump/codex-muti/pull/7)）。那是 Desktop UI 放行逻辑，**不是**上游真实额度源。
+
+## 验收指针
+
+原生 A/B 登录、双侧 refresh 轮换、真实额度映射，以及小会话续接 / Compact / Resume / MCP 与配置阈值自动切换，已于 2026-10-13 通过小范围真实账户测试。范围与未清门槛见 [native-acceptance-results.md](native-acceptance-results.md)。自动迁移仍为 opt-in（`--live-boundary-probe`），小会话通过 ≠ 发布验收完成。
