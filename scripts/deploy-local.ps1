@@ -36,6 +36,19 @@ function Get-PoolSettingsSnapshot($Settings) {
     [ordered]@{autoSwitch=[bool]$Settings.autoSwitch;fiveHourThreshold=[double]$Settings.fiveHourThreshold;
         weeklyThreshold=[double]$Settings.weeklyThreshold;windowThreshold=$Settings.windowThreshold} | ConvertTo-Json -Compress
 }
+function Get-PoolRefreshGuard($Status) {
+    $taskActive = @()
+    $taskReauthorize = @()
+    $taskUnknown = @()
+    foreach ($taskAccount in @($Status.accounts | Where-Object auth -EQ 'refresh_pending')) {
+        $taskAvailability = @($Status.accountAvailability | Where-Object accountId -EQ $taskAccount.id)
+        if ($taskAvailability.Count -eq 0) { $taskUnknown += $taskAccount.id }
+        elseif ($taskAvailability[0].reason -eq 'auth_temporarily_unavailable') { $taskActive += $taskAccount.id }
+        elseif ($taskAvailability[0].reason -eq 'auth_unavailable') { $taskReauthorize += $taskAccount.id }
+        else { $taskUnknown += $taskAccount.id }
+    }
+    [pscustomobject]@{Active=$taskActive;Reauthorize=$taskReauthorize;Unknown=$taskUnknown}
+}
 function Wait-PoolDaemon($Process, [string]$Path) {
     for ($taskAttempt=0; $taskAttempt -lt 30; $taskAttempt++) {
         $Process.Refresh()
@@ -84,13 +97,17 @@ try {
         if ($LASTEXITCODE -ne 0) { throw '无法验证当前账户存储。请在原代理相同的 CODEX_POOL_DATA_DIR 环境中运行。' }
         $taskStatus = $taskRaw | ConvertFrom-Json
         if (@($taskStatus.nativeLoginAttempts | Where-Object state -EQ 'waiting_for_browser').Count) { throw '账户正在登录，请完成或取消登录后再部署。' }
-        for ($taskAttempt=0; @($taskStatus.accounts | Where-Object auth -EQ 'refresh_pending').Count -gt 0 -and $taskAttempt -lt 20; $taskAttempt++) {
+        $taskRefreshGuard = Get-PoolRefreshGuard $taskStatus
+        for ($taskAttempt=0; $taskRefreshGuard.Active.Count -gt 0 -and $taskAttempt -lt 20; $taskAttempt++) {
             Start-Sleep -Milliseconds 500
             $taskRaw = & $taskNewExe status
             if ($LASTEXITCODE -ne 0) { throw '刷新期间无法验证代理状态，未停止服务。' }
             $taskStatus = $taskRaw | ConvertFrom-Json
+            $taskRefreshGuard = Get-PoolRefreshGuard $taskStatus
         }
-        if (@($taskStatus.accounts | Where-Object auth -EQ 'refresh_pending').Count) { throw 'Token 仍在刷新，未中止它；稍后重试部署。' }
+        if ($taskRefreshGuard.Active.Count) { throw 'Token 仍在主动刷新，未中止它；刷新完成后再部署。' }
+        if ($taskRefreshGuard.Unknown.Count) { throw '旧代理未提供可确认的刷新状态，无法安全停止；请先处理账户授权状态。' }
+        if ($taskRefreshGuard.Reauthorize.Count) { Write-Host '检测到持久 refresh_pending：这些账户需要重新授权；部署会保留其状态，不重用旧刷新令牌。' }
         $taskBoundary = [bool]$taskStatus.boundaryProbe; $taskOld.Boundary = $taskBoundary
     }
     $taskOldUi = @(Get-CimInstance Win32_Process -Filter "Name='CodexPool.Floating.exe'" | Where-Object { Test-PoolPath $_.ExecutablePath } | ForEach-Object {
