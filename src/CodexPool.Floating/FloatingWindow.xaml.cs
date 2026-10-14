@@ -53,6 +53,7 @@ public partial class FloatingWindow : Window
     private bool preparingShape;
     private bool pendingState;
     private bool backdropSuspended;
+    private IDisposable? shapeFrames;
     private readonly Dictionary<string, AccountElements> accountElements = new();
     private IEnumerable<FrameworkElement> SharedParts => accountElements.Values.SelectMany(x => x.Parts)
         .Concat(new FrameworkElement[] { Header, Footer, WidgetSummary });
@@ -513,8 +514,8 @@ public partial class FloatingWindow : Window
         {
             if (animate)
             {
-                // Native acrylic HWND stays fixed during every animation frame. Measure the target
-                // content explicitly instead of first letting SizeToContent resize it to the end state.
+                // Measure the final content before animating the native bounds.
+                // Keep its layout fixed so text does not reflow on every resize frame.
                 SizeToContent = SizeToContent.Manual; Width = previousWidth; Height = previousHeight;
                 preparingShape = true;
                 try { Render(state); } finally { preparingShape = false; }
@@ -538,6 +539,8 @@ public partial class FloatingWindow : Window
     private void StopShapeAnimation()
     {
         shapeGeneration++; changingShape = false;
+        shapeFrames?.Dispose(); shapeFrames = null;
+        BeginAnimation(WidthProperty, null); BeginAnimation(HeightProperty, null);
         Surface.BeginAnimation(WidthProperty, null); Surface.BeginAnimation(HeightProperty, null);
         Surface.Width = double.NaN; Surface.Height = double.NaN;
         Surface.HorizontalAlignment = System.Windows.HorizontalAlignment.Stretch;
@@ -560,15 +563,14 @@ public partial class FloatingWindow : Window
         var generation = shapeGeneration; changingShape = true; pendingState = false;
         if (backdrop && handle != 0)
         {
-            // Acrylic paints the whole native client area. Suspend it while the fixed host is
-            // larger than the visible surface, otherwise a rectangular backdrop flashes behind it.
+            // Keep a solid surface during native resize to avoid acrylic redraw flashes.
             var none = 1; _ = DwmSetWindowAttribute(handle, 38, ref none, 4);
             backdropSuspended = true;
             if (Resources["SurfaceBrush"] is Brush background)
                 Resources["SurfaceBrush"] = new Brush(MediaColor.FromRgb(background.Color.R, background.Color.G, background.Color.B));
         }
         SizeToContent = SizeToContent.Manual;
-        Width = Math.Max(fromWidth, toWidth); Height = Math.Max(fromHeight, toHeight);
+        Width = fromWidth; Height = fromHeight;
         Surface.HorizontalAlignment = System.Windows.HorizontalAlignment.Center;
         Surface.VerticalAlignment = VerticalAlignment.Bottom;
         Surface.Width = toWidth; Surface.Height = toHeight;
@@ -588,8 +590,7 @@ public partial class FloatingWindow : Window
             pendingState = false;
             UpdateLayout(); ClampPosition();
         };
-        Surface.ApplyAnimationClock(WidthProperty, (AnimationClock)clock.Children[0]);
-        Surface.ApplyAnimationClock(HeightProperty, (AnimationClock)clock.Children[1]);
+        shapeFrames = ShapeMotion.Apply(this, Surface, clock);
         if (widget) PositionFlyout();
         return clock;
     }

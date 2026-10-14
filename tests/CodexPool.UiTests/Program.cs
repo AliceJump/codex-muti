@@ -134,7 +134,7 @@ internal static class Program
                 finally { menu.Close(); }
             }
         });
-        Run("Shape transition keeps the native host fixed and animates only its surface", () =>
+        Run("Shape transition drives the host and surface together without a final frame jump", () =>
         {
             var previous = Environment.GetEnvironmentVariable("CODEX_POOL_DATA_DIR");
             Environment.SetEnvironmentVariable("CODEX_POOL_DATA_DIR", System.IO.Path.GetFullPath(".research/ui-animation-fixture"));
@@ -146,13 +146,46 @@ internal static class Program
                 Check(window.SizeToContent == SizeToContent.Manual);
                 var surface = (Border)window.FindName("Surface");
                 clock.Controller!.SeekAlignedToLastTick(TimeSpan.FromMilliseconds(190), TimeSeekOrigin.BeginTime);
-                Check(window.Width == 380 && window.Height == 330);
+                Check(window.Width > 206 && window.Width < 380 && window.Height > 53 && window.Height < 330);
+                Check(Math.Abs(window.Width - surface.Width) < .01 && Math.Abs(window.Height - surface.Height) < .01);
                 Check(surface.Width > 206 && surface.Width < 380 && surface.Height > 53 && surface.Height < 330);
                 clock.Controller.SeekAlignedToLastTick(TimeSpan.FromMilliseconds(381), TimeSeekOrigin.BeginTime);
                 Pump(30);
                 Check(window.SizeToContent == SizeToContent.Height && window.Width == 380);
             }
             finally { Environment.SetEnvironmentVariable("CODEX_POOL_DATA_DIR", previous); }
+        });
+        Run("Native frame follows the surface on intermediate expansion and shrink frames", () =>
+        {
+            foreach (var expand in new[] { true, false })
+            {
+                var from = expand ? new Size(206, 53) : new Size(380, 330);
+                var to = expand ? new Size(380, 330) : new Size(206, 53);
+                var surface = new Border();
+                var host = new Window { Width = from.Width, Height = from.Height, Content = surface, Opacity = 0,
+                    ShowActivated = false, ShowInTaskbar = false, WindowStyle = WindowStyle.None, ResizeMode = ResizeMode.NoResize,
+                    SizeToContent = SizeToContent.Manual };
+                try
+                {
+                    host.Show();
+                    var timeline = new ParallelTimeline { Duration = TimeSpan.FromMilliseconds(380), FillBehavior = FillBehavior.HoldEnd };
+                    timeline.Children.Add(new DoubleAnimation(from.Width, to.Width, timeline.Duration));
+                    timeline.Children.Add(new DoubleAnimation(from.Height, to.Height, timeline.Duration));
+                    var clock = (ClockGroup)timeline.CreateClock(); using var frames = ShapeMotion.Apply(host, surface, clock);
+                    var elapsed = 0;
+                    foreach (var milliseconds in new[] { 95, 95, 95, 120 })
+                    {
+                        Pump(milliseconds); elapsed += milliseconds; host.UpdateLayout();
+                        Check(GetWindowRect(new System.Windows.Interop.WindowInteropHelper(host).Handle, out var rect));
+                        var dpi = VisualTreeHelper.GetDpi(host);
+                        if (Math.Abs(rect.Right - rect.Left - surface.Width * dpi.DpiScaleX) > 2
+                            || Math.Abs(rect.Bottom - rect.Top - surface.Height * dpi.DpiScaleY) > 2)
+                            throw new InvalidOperationException($"frame {elapsed}: native={rect.Right - rect.Left}x{rect.Bottom - rect.Top}, surface={surface.Width}x{surface.Height}, host={host.Width}x{host.Height}, dpi={dpi.DpiScaleX}x{dpi.DpiScaleY}");
+                        if (elapsed == 190) Check(host.Width > 206 && host.Width < 380 && host.Height > 53 && host.Height < 330);
+                    }
+                }
+                finally { host.Close(); }
+            }
         });
         Run("Three layouts reuse account controls and hidden windows cancel unfinished motion", () =>
         {
@@ -304,7 +337,7 @@ internal static class Program
             }
             finally { Environment.SetEnvironmentVariable("CODEX_POOL_DATA_DIR", previous); }
         });
-        Console.WriteLine($"{12 - failed}/12 passed; popup placement shown briefly, no credentials, real tray registration or proxy processes");
+        Console.WriteLine($"{13 - failed}/13 passed; popup/frame fixtures shown briefly, no credentials, real tray registration or proxy processes");
         return failed == 0 ? 0 : 1;
     }
     private static void Check(bool value) { if (!value) throw new InvalidOperationException(); }

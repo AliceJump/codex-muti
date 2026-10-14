@@ -43,6 +43,6 @@
     </StackPanel>
     </Grid>
   </Border>
-  <Canvas x:Name="MotionLayer" IsHitTestVisible="False" ClipToBounds="True" HorizontalAlignment="Center" VerticalAlignment="Bottom"/>
+  <Canvas x:Name="MotionLayer" IsHitTestVisible="False" ClipToBounds="True" HorizontalAlignment="Left" VerticalAlignment="Top"/>
   </Grid>
 </Window>
