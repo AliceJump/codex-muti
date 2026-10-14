@@ -65,18 +65,8 @@ try {
         & (Join-Path $PSScriptRoot 'start-proxy-tray.ps1') -CompactBridge
     }
     & (Join-Path $PSScriptRoot 'desktop-compact-bridge.ps1') -CodexPath $taskDesktop.CodexPath -DesktopPath $taskDesktop.DesktopPath -BridgePath $taskDesktop.BridgePath -ReuseRunning
-    if (-not $taskDesktop.RunningThroughBridge) {
-        # Hold the launch mutex until the child is visible, so a rapid second click
-        # cannot launch another Desktop while the first instance is initializing.
-        $taskDeadline = [DateTimeOffset]::UtcNow.AddSeconds(20)
-        $taskReady = $false
-        do {
-            $taskRunning = & (Join-Path $PSScriptRoot 'desktop-compact-bridge.ps1') -CodexPath $taskDesktop.CodexPath -DesktopPath $taskDesktop.DesktopPath -BridgePath $taskDesktop.BridgePath -CheckOnly -PassThru
-            if ($taskRunning.RunningThroughBridge) { $taskReady = $true; break }
-            Start-Sleep -Milliseconds 500
-        } while ([DateTimeOffset]::UtcNow -lt $taskDeadline)
-        if (-not $taskReady) { throw 'Desktop 已请求启动，但尚未确认桥接子进程。请检查应用启动状态，不要重复启动或结束当前工作。' }
-    }
+    # The bridge launcher waits for the actual child connection before returning;
+    # keep the mutex for the complete startup, including slower cold launches.
     Write-Host 'Codex Pool 已就绪。代理、账户和阈值沿用本机配置。'
 } finally {
     if ($taskOwned) { $taskMutex.ReleaseMutex() }

@@ -66,7 +66,9 @@ dotnet run --project src/CodexPool.Daemon --no-launch-profile -- serve --live-bo
 pwsh -NoProfile -File scripts/desktop-compact-bridge.ps1
 ```
 
-脚本通过当前进程的环境设置 `CODEX_CLI_PATH` / `CODEX_POOL_UPSTREAM_CLI` / `CODEX_POOL_COMPACT_BRIDGE=1`；不修改注册表、用户配置或已有进程。路径可通过 `-CodexPath`、`-DesktopPath`、`-BridgePath` 明确指定。当前 Desktop 包 `26.1007.2314.0` 的静态代码已确认支持 `CODEX_CLI_PATH`；这是安装版本的实现证据，不是公开稳定接口承诺。启动检查只确认入口和官方 CLI 版本，不证明 Desktop 的真实压缩行为。
+脚本读取 AppX 清单中的 `App` 实际入口，通过 `UseShellExecute=false` 直接启动，并只在子进程环境设置 `CODEX_CLI_PATH` / `CODEX_POOL_UPSTREAM_CLI` / `CODEX_POOL_COMPACT_BRIDGE=1` / `CODEX_APP_SERVER_FORCE_CLI=1`；不修改父进程环境、注册表、用户配置或已有进程。不要按文件名优先启动 `Codex.exe`：在 Desktop 包 `26.1007.9446.0` 中它是启动中转程序，清单实际入口为 `app/ChatGPT.exe`，这仍是 Codex 桌面版。路径可通过 `-CodexPath`、`-DesktopPath`、`-BridgePath` 明确指定。
+
+正常启动最多等待 60 秒，确认实际 Desktop 子进程中出现所选桥接后才提示成功。提前退出会报告退出码；已有 Desktop 但没有桥接与完全没有 Desktop 的超时会分别提示，不自动重试或停止进程。`-CheckOnly` 仍只读检查入口、版本及现有进程，不启动应用，也不证明真实压缩行为。两个已核对 Desktop 包 `26.1007.2314.0` / `26.1007.9446.0` 静态代码支持 `CODEX_CLI_PATH`，但不是公开稳定接口承诺；显式 host CLI command 可能优先于环境覆盖。
 
 回滚：退出使用桥接的 Desktop 后，从原来的快捷方式正常启动；Daemon 重新以普通 `serve` 启动即可禁用实验能力。脚本不会自动完成这两个进程切换。
 
@@ -89,3 +91,5 @@ Core、桥接及账户安全测试使用合成数据。新增控制 API 测试�
 同日用户自行启用后的只读核对：18:17:18（北京时间）官方 rollout 中出现 `compacted`，代理 `/status` 记录 `compaction_completed` 并切换账户；随后新账户多条请求返回 200，包含加密上下文的请求也成功继续。这证明该次真实压缩及切换后继续请求，尚不覆盖所有线程、故障和长会话情形。对应 rollout 保持原线程 ID，双 UUID 文件名是官方支持的记录形式。
 
 便捷入口验证：本机 `start-codex.ps1 -CheckOnly` 通过；已运行桥接复用、普通 Desktop 冲突拒绝、启动环境传递和失败时环境恢复的隔离检查通过。检查及快捷方式安装没有重启当前 Desktop 或代理，也没有更改 98% 阈值。
+
+2026-10-15 启动回归：`scripts/tests/desktop-launch.ps1` 使用合成清单及进程覆盖清单入口优先、路径边界、子进程环境、只读检查、桥接就绪、已有实例复用、普通实例拒绝、提前退出与超时。新版包入口只读检查选中 `app/ChatGPT.exe`。当前 Desktop 仍在使用，未由测试重启；本次真实冷启动需用户结束工作后再次通过快捷方式验证。

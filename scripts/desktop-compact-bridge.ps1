@@ -1,7 +1,9 @@
 #requires -Version 7.0
-param([string]$CodexPath, [string]$DesktopPath, [string]$BridgePath, [switch]$CheckOnly, [switch]$PassThru, [switch]$ReuseRunning)
+param([string]$CodexPath, [string]$DesktopPath, [string]$BridgePath, [switch]$CheckOnly, [switch]$PassThru, [switch]$ReuseRunning,
+    [ValidateRange(1,120)][int]$StartupTimeoutSeconds = 60)
 $ErrorActionPreference = 'Stop'
 $taskRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+. (Join-Path $PSScriptRoot 'desktop-launch.ps1')
 $taskCodex = if ($CodexPath) { [IO.Path]::GetFullPath($CodexPath) } else { (Get-Command codex.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source }
 if (-not (Test-Path -LiteralPath $taskCodex) -or [IO.Path]::GetExtension($taskCodex) -ne '.exe') { throw '请用 -CodexPath 指定官方原生 codex.exe。' }
 $taskVersion = & $taskCodex --version
@@ -15,24 +17,24 @@ if (-not (Test-Path -LiteralPath $taskBridge) -or $taskBridge.Equals($taskCodex,
 $taskDesktop = if ($DesktopPath) { [IO.Path]::GetFullPath($DesktopPath) } else {
     $taskPackage = Get-AppxPackage -Name OpenAI.Codex
     if (-not $taskPackage -or @($taskPackage).Count -ne 1) { throw '请用 -DesktopPath 指定 Codex Desktop 可执行文件。' }
-    $taskNativeDesktop = Join-Path $taskPackage.InstallLocation 'app/Codex.exe'
-    if (Test-Path -LiteralPath $taskNativeDesktop) { $taskNativeDesktop } else {
-        $taskManifest = $taskPackage | Get-AppxPackageManifest
-        $taskApplication = @($taskManifest.Package.Applications.Application | Where-Object Id -EQ 'App')
-        if ($taskApplication.Count -ne 1) { throw '无法唯一确定 Desktop 入口，请用 -DesktopPath 指定。' }
-        Join-Path $taskPackage.InstallLocation $taskApplication[0].Executable
-    }
+    Resolve-PoolDesktopExecutable -Package $taskPackage -Manifest ($taskPackage | Get-AppxPackageManifest)
 }
 if (-not (Test-Path -LiteralPath $taskDesktop)) { throw 'Desktop 可执行文件不存在。' }
 $taskDesktopFolder = Split-Path $taskDesktop -Parent
 $taskDesktopCandidates = @($taskDesktop, (Join-Path $taskDesktopFolder 'Codex.exe'), (Join-Path $taskDesktopFolder 'ChatGPT.exe'))
-$taskDesktopProcesses = @(Get-CimInstance Win32_Process -Filter "Name='Codex.exe' OR Name='ChatGPT.exe'" | Where-Object {
+function Read-PoolDesktopProcesses {
+    @(Get-CimInstance Win32_Process -Filter "Name='Codex.exe' OR Name='ChatGPT.exe'" | Where-Object {
     $_.ExecutablePath -and $taskDesktopCandidates -contains $_.ExecutablePath
-})
-$taskBridgeProcesses = @(Get-CimInstance Win32_Process -Filter "Name='CodexPool.Bridge.exe'" | Where-Object {
+    })
+}
+function Read-PoolBridgeProcesses($DesktopProcesses) {
+    @(Get-CimInstance Win32_Process -Filter "Name='CodexPool.Bridge.exe'" | Where-Object {
     $_.ExecutablePath -and $_.ExecutablePath.Equals($taskBridge,[StringComparison]::OrdinalIgnoreCase) -and
-    $taskDesktopProcesses.ProcessId -contains $_.ParentProcessId
-})
+    $DesktopProcesses.ProcessId -contains $_.ParentProcessId
+    })
+}
+$taskDesktopProcesses = @(Read-PoolDesktopProcesses)
+$taskBridgeProcesses = @(Read-PoolBridgeProcesses $taskDesktopProcesses)
 $taskAlreadyBridged = $taskDesktopProcesses.Count -gt 0 -and $taskBridgeProcesses.Count -gt 0
 if ($CheckOnly) {
     if ($PassThru) { return [pscustomobject]@{ DesktopPath=$taskDesktop; CodexPath=$taskCodex; BridgePath=$taskBridge; DesktopRunning=($taskDesktopProcesses.Count -gt 0); RunningThroughBridge=$taskAlreadyBridged } }
@@ -42,19 +44,29 @@ if ($taskAlreadyBridged -and $ReuseRunning) { Write-Host 'Codex Desktop 已通�
 if ($taskDesktopProcesses.Count -gt 0) {
     throw '请先结束工作并退出 Codex Desktop。启动覆盖仅对新进程生效；脚本不会停止现有实例。'
 }
-$taskNames = @('CODEX_CLI_PATH','CODEX_POOL_UPSTREAM_CLI','CODEX_POOL_COMPACT_BRIDGE','CODEX_APP_SERVER_FORCE_CLI')
-$taskPrevious = @{}
-foreach ($taskName in $taskNames) { $taskPrevious[$taskName] = [Environment]::GetEnvironmentVariable($taskName,'Process') }
+$taskStart = New-PoolDesktopStartInfo -DesktopPath $taskDesktop -CodexPath $taskCodex -BridgePath $taskBridge
+$taskChild = Start-PoolDesktopProcess -StartInfo $taskStart
+if (-not $taskChild) { throw 'Desktop 进程未能创建。' }
+Write-Host '已请求启动 Desktop，正在等待桥接连接…'
+$taskDeadline = [DateTimeOffset]::UtcNow.AddSeconds($StartupTimeoutSeconds)
 try {
-    $env:CODEX_CLI_PATH = $taskBridge
-    $env:CODEX_POOL_UPSTREAM_CLI = $taskCodex
-    $env:CODEX_POOL_COMPACT_BRIDGE = '1'
-    $env:CODEX_APP_SERVER_FORCE_CLI = '1'
-    Start-Process -FilePath $taskDesktop -WindowStyle Normal
-    Write-Host 'Desktop 已通过实验桥接启动。Daemon 须显式开启实验能力；原有模型 provider 配置继续生效。'
-} finally {
-    foreach ($taskName in $taskNames) {
-        $taskRestore = if ($null -eq $taskPrevious[$taskName]) { [NullString]::Value } else { $taskPrevious[$taskName] }
-        [Environment]::SetEnvironmentVariable($taskName,$taskRestore,'Process')
+    do {
+        $taskObservedDesktop = @(Read-PoolDesktopProcesses)
+        $taskObservedBridges = @(Read-PoolBridgeProcesses $taskObservedDesktop)
+        if ($taskObservedBridges.Count -gt 0) {
+            Write-Host 'Desktop 和实验桥接已启动。原有模型 provider、账户和阈值继续生效。'
+            return
+        }
+        $taskChild.Refresh()
+        if ($taskChild.HasExited -and $taskObservedDesktop.Count -eq 0) {
+            throw "Desktop 在桥接建立前退出（退出码 $($taskChild.ExitCode)）。请检查应用启动状态；没有自动重试或结束其他进程。"
+        }
+        Start-Sleep -Milliseconds 500
+    } while ([DateTimeOffset]::UtcNow -lt $taskDeadline)
+    if ($taskObservedDesktop.Count -gt 0) {
+        throw 'Desktop 进程已启动，但未连接所选桥接。请先结束工作并完全退出 Desktop 后重试 Codex Pool；没有自动停止现有进程。'
     }
+    throw 'Desktop 未在预期时间内启动。请检查应用安装状态；没有自动重试或结束其他进程。'
+} finally {
+    $taskChild.Dispose()
 }
