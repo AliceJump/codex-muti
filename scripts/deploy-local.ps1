@@ -81,6 +81,7 @@ function Start-PoolUi([string]$Path, [bool]$Tray) {
 try {
     try { $taskOwned = $taskMutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $taskOwned = $true }
     if (-not $taskOwned) { throw '已有部署在运行。' }
+    . (Join-Path $PSScriptRoot 'desktop-client.ps1')
     $taskWorktrees = & git -C $taskRoot worktree list --porcelain
     if ($LASTEXITCODE -ne 0) { throw '无法确认本仓库工作树，停止部署。' }
     $taskCheckouts = @($taskWorktrees | Where-Object { $_.StartsWith('worktree ') } | ForEach-Object { [IO.Path]::GetFullPath($_.Substring(9)) })
@@ -132,7 +133,6 @@ try {
         $taskNewStatus = Wait-PoolDaemon $taskNew $taskNewExe
         if ($taskOld -and (Get-PoolSettingsSnapshot $taskNewStatus.settings) -ne (Get-PoolSettingsSnapshot $taskStatus.settings)) { throw '账户池设置校验失败。' }
     }
-    . (Join-Path $PSScriptRoot 'desktop-client.ps1')
     if ($taskDeployUi) {
         $taskClient = Start-PoolDesktopClient -BuildDirectory $taskBuild -Tray -PassThru -NoDaemonStart:($Target -eq 'Components')
         $taskNewUi += [pscustomobject]@{Id=$taskClient.Id;Path=$taskClient.Path;StartTicks=$taskClient.StartTime.ToUniversalTime().Ticks}

@@ -17,6 +17,7 @@ if ($Target -ne 'All') {
         $taskExe = if ($taskKind -eq 'Daemon') { 'CodexPool.Daemon.exe' } else { 'CodexPool.Floating.exe' }
         if (-not (Test-Path -LiteralPath (Join-Path $taskSource $taskExe))) { throw '现有版本不完整，请先完整部署。' }
     }
+    if (Test-Path -LiteralPath $taskRelease) { throw '部分构建的输出目录必须不存在，请选择新的独立目录。' }
     $null = New-Item -ItemType Directory -Path $taskRelease -Force
     foreach ($taskKind in $taskRetain) { Copy-Item -LiteralPath (Join-Path $taskBase $taskKind) -Destination $taskRelease -Recurse }
 }

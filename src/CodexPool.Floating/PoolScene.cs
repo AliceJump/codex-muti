@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Windows;
 using System.Windows.Automation;
@@ -26,6 +27,10 @@ namespace CodexPool.Floating;
 // tooltips and automation, but never lay out the text or scale the native HWND.
 public sealed class PoolScene : Canvas
 {
+    private static readonly ConcurrentDictionary<string, SolidColorBrush> brushes = new();
+    private static readonly ConcurrentDictionary<(string, double), Pen> pens = new();
+    private static readonly LinearGradientBrush lightBackground = Gradient("#F0F6FAFF", "#E7E3ECF8");
+    private static readonly LinearGradientBrush darkBackground = Gradient("#EE1B2331", "#E4101621");
     private sealed class Card(PoolAccountView model, MorphSpring pose, Button hit)
     { internal PoolAccountView Model = model; internal MorphSpring Pose = pose; internal Button Hit = hit; }
     private readonly SceneDrawing drawing;
@@ -226,7 +231,15 @@ public sealed class PoolScene : Canvas
     }
     private MediaBrush Foreground => highContrast ? SystemColors.WindowTextBrush : B(light ? "#1D293B" : "#EFF4FD");
     private MediaBrush Muted => highContrast ? SystemColors.WindowTextBrush : B(light ? "#56677D" : "#95A6BE");
-    private static SolidColorBrush B(string color) { var b = new SolidColorBrush((Color)ColorConverter.ConvertFromString(color)); b.Freeze(); return b; }
+    private static SolidColorBrush B(string color) => brushes.GetOrAdd(color, static key =>
+    { var brush = new SolidColorBrush((Color)ColorConverter.ConvertFromString(key)); brush.Freeze(); return brush; });
+    private static Pen P(MediaBrush brush, double thickness) => pens.GetOrAdd((brush.ToString(), thickness), static (key, source) =>
+    { var pen = new Pen(source, key.Item2); pen.Freeze(); return pen; }, brush);
+    private static LinearGradientBrush Gradient(string top, string bottom)
+    {
+        var brush = new LinearGradientBrush((Color)ColorConverter.ConvertFromString(top), (Color)ColorConverter.ConvertFromString(bottom), 90);
+        brush.Freeze(); return brush;
+    }
     private void Text(DrawingContext dc, string value, Point point, double size, MediaBrush brush, double opacity = 1, double maxWidth = 1000, bool bold = false, bool trim = false)
     {
         if (opacity <= .005 || maxWidth < 1 || string.IsNullOrEmpty(value)) return;
@@ -248,8 +261,8 @@ public sealed class PoolScene : Canvas
     {
         var root = SurfaceBounds; var s = Shape.Value; var fg = Foreground; var muted = Muted;
         if (!highContrast) for (var i = 8; i > 0; i--) dc.DrawRoundedRectangle(B("#05000000"), null, new(root.X - i * .5, root.Y - i * .3, root.Width + i, root.Height + i), s[2] + i * .5, s[2] + i * .5);
-        dc.DrawRoundedRectangle(highContrast ? SystemColors.WindowBrush : new LinearGradientBrush((Color)ColorConverter.ConvertFromString(light ? "#F0F6FAFF" : "#EE1B2331"),
-            (Color)ColorConverter.ConvertFromString(light ? "#E7E3ECF8" : "#E4101621"), 90), new Pen(highContrast ? SystemColors.WindowTextBrush : B(light ? "#BEB3C8E3" : "#5A8BAAD6"), 1), root, s[2], s[2]);
+        dc.DrawRoundedRectangle(highContrast ? SystemColors.WindowBrush : light ? lightBackground : darkBackground,
+            P(highContrast ? SystemColors.WindowTextBrush : B(light ? "#BEB3C8E3" : "#5A8BAAD6"), 1), root, s[2], s[2]);
         dc.PushClip(new RectangleGeometry(root, s[2], s[2]));
         Text(dc, "Codex Pool", new(root.X + 20, root.Y + 15), 18, fg, s[3], root.Width - 158, true);
         Text(dc, status, new(root.X + 20, root.Y + 42), 10, muted, s[3], root.Width - 40);
@@ -262,7 +275,7 @@ public sealed class PoolScene : Canvas
             var active = a.Active && a.Selectable;
             var accent = highContrast ? SystemColors.HighlightBrush : B(light ? "#679DD8" : "#82B9FF");
             dc.DrawRoundedRectangle(highContrast ? SystemColors.WindowBrush : B(active ? light ? "#EBD0E4FF" : "#BE345687" : light ? "#87FFFFFF" : "#19748FB8"),
-                new Pen(c.Hit.IsKeyboardFocused ? fg : active ? accent : B("#338297B8"), c.Hit.IsKeyboardFocused ? 2 : 1), r, 14, 14);
+                P(c.Hit.IsKeyboardFocused ? fg : active ? accent : B("#338297B8"), c.Hit.IsKeyboardFocused ? 2 : 1), r, 14, 14);
             dc.PushClip(new RectangleGeometry(r, 14, 14));
             var compact = Math.Clamp(s[3] - s[4], 0, 1); var capsule = 1 - s[3];
             var leftWidth = (r.Width - 26) * (1 - compact * .64) - capsule * 36;
@@ -283,13 +296,13 @@ public sealed class PoolScene : Canvas
                 {
                     var center = new Point(r.X + r.Width * .38 + 14, r.Y + rowY + 12);
                     dc.PushOpacity(compact);
-                    dc.DrawEllipse(null, new Pen(B("#337C9ABB"), 3), center, 12, 12);
+                    dc.DrawEllipse(null, P(B("#337C9ABB"), 3), center, 12, 12);
                     if (w.Remaining is { } remaining && remaining > 0)
                     {
                         dc.PushTransform(new TranslateTransform(center.X - 14, center.Y - 14));
                         var key = Math.Round(remaining, 1);
                         if (!rings.TryGetValue(key, out var geometry)) { geometry = QuotaIndicator.Ring(key, 28, 3); geometry.Freeze(); rings[key] = geometry; }
-                        dc.DrawGeometry(null, new Pen(highContrast ? SystemColors.HighlightBrush : B(remaining < 15 ? "#FF7069" : remaining < 30 ? "#FFC65F" : "#7DB8FF"), 3), geometry); dc.Pop();
+                        dc.DrawGeometry(null, P(highContrast ? SystemColors.HighlightBrush : B(remaining < 15 ? "#FF7069" : remaining < 30 ? "#FFC65F" : "#7DB8FF"), 3), geometry); dc.Pop();
                     }
                     dc.Pop();
                 }
