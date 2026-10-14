@@ -359,14 +359,12 @@ public partial class FloatingWindow : Window
                 var name = account.GetProperty("name").GetString() ?? "Codex Pool";
                 if (name.Length > 20) name = name[..10] + "…" + name[^9..];
                 var quota = snapshot.GetProperty("usage").EnumerateArray().FirstOrDefault(x => x.GetProperty("accountId").GetString() == id);
-                var windows = QuotaDisplay.Windows(quota);
-                var accountWindows = windows.Where(w => w.Key.StartsWith("codex:", StringComparison.Ordinal) && w.Remaining is not null
-                    && !(w.Remaining <= 0 && QuotaDisplay.AllowsContinuation(quota))).ToArray();
-                // The icon represents the tightest account-wide window; model-only limits stay in the panel.
-                remaining = accountWindows.Length > 0 ? accountWindows.Min(w => w.Remaining) : null;
-                exhausted = accountWindows.Any(w => w.Remaining <= 0);
-                tooltip = name + (accountWindows.Length == 0 ? "\n" + QuotaDisplay.State(quota)
-                    : "\n" + string.Join("\n", accountWindows.Select(w => w.Label + " " + QuotaDisplay.Percent(w) + " · " + ResetLeft(w.Window))));
+                snapshot.TryGetProperty("settings", out var settings);
+                var window = QuotaDisplay.TrayWindow(quota, settings);
+                remaining = window?.Remaining;
+                exhausted = window?.Remaining is <= 0;
+                tooltip = name + (window is null ? "\n" + QuotaDisplay.State(quota)
+                    : "\n" + window.Label + " " + QuotaDisplay.Percent(window) + " · " + ResetLeft(window.Window));
             }
             else tooltip = "Codex Pool\n尚未选择账户";
         }

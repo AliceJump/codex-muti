@@ -3,7 +3,7 @@ using CodexPool.Core;
 
 namespace CodexPool.Floating;
 
-internal sealed record DisplayQuotaWindow(string Key, string Kind, string Label, JsonElement Window, double? Remaining);
+internal sealed record DisplayQuotaWindow(string Key, string Kind, string Label, JsonElement Window, double? Remaining, int? Seconds, string Family);
 internal static class QuotaDisplay
 {
     internal static bool Fresh(JsonElement quota) => quota.ValueKind == JsonValueKind.Object
@@ -18,13 +18,28 @@ internal static class QuotaDisplay
             var kind = w.GetProperty("kind").GetString() ?? "window";
             int? seconds = w.TryGetProperty("windowSeconds", out var length) && length.ValueKind == JsonValueKind.Number && length.TryGetInt32(out var value) ? value
                 : kind == "5h" ? 18000 : kind == "weekly" ? 604800 : null;
-            var family = w.TryGetProperty("limitId", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() : "codex";
+            var family = w.TryGetProperty("limitId", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() ?? "codex" : "codex";
             var label = QuotaLabels.Duration(seconds);
             if (family != "codex") label = (w.TryGetProperty("limitName", out var name) && name.ValueKind == JsonValueKind.String ? name.GetString() : "附加额度") + " · " + label;
             double? remaining = fresh && w.TryGetProperty("resetAt", out var reset) && reset.ValueKind == JsonValueKind.String && reset.TryGetDateTimeOffset(out var at) && at > DateTimeOffset.UtcNow
                 ? w.TryGetProperty("remainingPercent", out var amount) && amount.ValueKind == JsonValueKind.Number && amount.TryGetDouble(out var percent) && double.IsFinite(percent) ? Math.Clamp(percent, 0, 100) : null : null;
-            return new DisplayQuotaWindow(family + ":" + kind + ":" + seconds + ":" + index, kind, label, w, remaining);
+            return new DisplayQuotaWindow(family + ":" + kind + ":" + seconds + ":" + index, kind, label, w, remaining, seconds, family);
         }).ToArray();
+    }
+    internal static DisplayQuotaWindow? TrayWindow(JsonElement quota, JsonElement settings = default)
+    {
+        var policy = settings.ValueKind == JsonValueKind.Object ? settings.Deserialize<PoolSettings>(JsonSerializerOptions.Web) ?? new() : new PoolSettings();
+        var windows = Windows(quota).Where(w => w.Family == "codex"
+            && !(w.Remaining <= 0 && AllowsContinuation(quota))).ToArray();
+        bool Weekly(DisplayQuotaWindow w) => w.Seconds == 604800;
+        bool Limited(DisplayQuotaWindow w) => w.Remaining is { } remaining
+            && !(remaining <= 0 && AllowsContinuation(quota))
+            && (remaining <= 0 || policy.AutoSwitch && 100 - remaining >= policy.Threshold(w.Seconds));
+        // Weekly usage being numerically higher does not make it a routing limit.
+        // Show a limiting window first; otherwise retain the ordinary short window.
+        return windows.Where(Limited).OrderByDescending(Weekly).ThenBy(w => w.Remaining).FirstOrDefault()
+            ?? windows.Where(w => !Weekly(w)).OrderBy(w => w.Remaining is null)
+                .ThenByDescending(w => w.Kind is "5h" or "primary_window").ThenBy(w => w.Seconds ?? int.MaxValue).FirstOrDefault();
     }
     internal static string State(JsonElement quota)
     {

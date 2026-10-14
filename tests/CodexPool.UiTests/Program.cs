@@ -54,6 +54,28 @@ internal static class Program
             var ready = CapsuleLayout.Account("账户", "5h 20%", "待命", false, true, Brushes.Black, Brushes.Blue, Brushes.Gray);
             Check(ready.IsEnabled && ready.Opacity == 1);
         });
+        Run("Tray keeps short quota until weekly routing is actually limited", () =>
+        {
+            JsonElement Quota(double weekly, int shortSeconds = 18000, bool stale = false, bool continuation = false, bool reset = false, double shortRemaining = 80) => JsonSerializer.SerializeToElement(new
+            {
+                updatedAt = stale ? DateTimeOffset.UtcNow.AddMinutes(-3) : DateTimeOffset.UtcNow, allowed = continuation,
+                windows = new[] {
+                    new { kind = "primary_window", windowSeconds = shortSeconds, limitId = "codex", remainingPercent = shortRemaining, resetAt = DateTimeOffset.UtcNow.AddHours(2) },
+                    new { kind = "secondary_window", windowSeconds = 604800, limitId = "codex", remainingPercent = weekly, resetAt = reset ? DateTimeOffset.UtcNow.AddSeconds(-1) : DateTimeOffset.UtcNow.AddDays(2) },
+                    new { kind = "primary_window", windowSeconds = 3600, limitId = "additional_0", remainingPercent = 0d, resetAt = DateTimeOffset.UtcNow.AddHours(1) } }
+            });
+            var automatic = JsonSerializer.SerializeToElement(new { autoSwitch = true, windowThreshold = 95 });
+            foreach (var seconds in new[] { 18000, 25200, 32400 })
+                Check(QuotaDisplay.TrayWindow(Quota(20, seconds), automatic)!.Seconds == seconds);
+            Check(QuotaDisplay.TrayWindow(Quota(4), automatic)!.Label == "周");
+            Check(QuotaDisplay.TrayWindow(Quota(4))!.Seconds == 18000);
+            Check(QuotaDisplay.TrayWindow(Quota(0))!.Label == "周");
+            Check(QuotaDisplay.TrayWindow(Quota(0, continuation: true))!.Seconds == 18000);
+            Check(QuotaDisplay.TrayWindow(Quota(0, continuation: true, shortRemaining: 0)) is null);
+            Check(QuotaDisplay.TrayWindow(Quota(0, reset: true), automatic)!.Seconds == 18000);
+            Check(QuotaDisplay.TrayWindow(Quota(0, stale: true), automatic)!.Remaining is null);
+            Check(QuotaDisplay.Windows(Quota(20)).Length == 3); // Other layouts retain all windows.
+        });
         Run("Tray GUID survives updates, version 4 callbacks and Explorer restart", () =>
         {
             var calls = new List<(uint Operation, StableTrayIcon.NotifyData Data)>();
@@ -282,7 +304,7 @@ internal static class Program
             }
             finally { Environment.SetEnvironmentVariable("CODEX_POOL_DATA_DIR", previous); }
         });
-        Console.WriteLine($"{11 - failed}/11 passed; popup placement shown briefly, no credentials, real tray registration or proxy processes");
+        Console.WriteLine($"{12 - failed}/12 passed; popup placement shown briefly, no credentials, real tray registration or proxy processes");
         return failed == 0 ? 0 : 1;
     }
     private static void Check(bool value) { if (!value) throw new InvalidOperationException(); }
