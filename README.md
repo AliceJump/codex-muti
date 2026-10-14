@@ -32,7 +32,7 @@
 |------|------|-----------------|
 | **Daemon** | 模型代理、账户、额度、本地 API、Dashboard 静态页 | `http://127.0.0.1:3210`（仅 loopback） |
 | **Dashboard** | 浏览器账户/额度/阈值控制台 | 同端口；`pool.ps1 dashboard` 建立短期安全会话 |
-| **Floating** | 可拖动 Acrylic 悬浮窗 | `pool.ps1 window` / `Ctrl+Alt+C` |
+| **Floating** | 可拖动透明着色悬浮窗 | `pool.ps1 window` / `Ctrl+Alt+C` |
 | **Widget** | 托盘状态面板（独立进程） | `pool.ps1 widget` / `Ctrl+Alt+W` |
 
 Daemon 本身不依赖 Node。协议基准为官方 Codex CLI `0.157.1`（Node 22 仅用于验证脚本/MCP 夹具）。
@@ -141,7 +141,7 @@ pwsh -NoProfile -File .\scripts\deploy-local.ps1 -Target Core -Dashboard
 
 ### Windows Floating / Widget
 
-- Floating：Acrylic、完整/紧凑/胶囊、主题、置顶、拖动、位置保存；`×` / Alt+F4 只关该窗，Daemon 继续跑。
+- Floating：固定透明宿主，完整/紧凑/胶囊连续形变、主题、置顶、拖动、位置保存；`×` / Alt+F4 只关该窗，Daemon 继续跑。当前使用透明着色材质，真实 Acrylic 模糊留待独立验收。
 - Widget：托盘面板，展示账户与额度，可打开悬浮窗/Web；与 Floating 可同时运行，经 `/events` 同步。
 - 快捷方式/`open-floating.ps1` 在代理未运行时可自动拉起 Daemon（可带 `--live-boundary-probe`）；完整真实验收仍以报告为准。
 - 托盘右键玻璃菜单（与悬浮窗同主题）已在 [PR #8](https://github.com/AliceJump/codex-muti/pull/8) 合入。
