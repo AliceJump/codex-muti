@@ -9,26 +9,28 @@ namespace CodexPool.Floating;
 
 internal static class ShapeMotion
 {
-    internal static IDisposable Apply(Window host, FrameworkElement surface, ClockGroup clock)
+    internal static IDisposable Apply(Window host, FrameworkElement surface, ClockGroup clock,
+        Func<System.Drawing.Size, System.Drawing.Point>? placement = null)
     {
-        // One clock drives both the native frame and visible surface. A fixed
-        // target content layout inside the surface preserves the existing morph.
+        // Only the surface owns animation clocks. Animating Window dimensions
+        // as well would make WPF submit extra, partially updated HWND resizes.
         var width = (AnimationClock)clock.Children[0];
         var height = (AnimationClock)clock.Children[1];
-        host.ApplyAnimationClock(FrameworkElement.WidthProperty, width);
-        host.ApplyAnimationClock(FrameworkElement.HeightProperty, height);
         surface.ApplyAnimationClock(FrameworkElement.WidthProperty, width);
         surface.ApplyAnimationClock(FrameworkElement.HeightProperty, height);
-        return new NativeFrames(host, clock);
+        return new NativeFrames(host, surface, clock, placement);
     }
     private sealed class NativeFrames : IDisposable
     {
         private readonly Window host;
+        private readonly FrameworkElement surface;
+        private readonly Func<System.Drawing.Size, System.Drawing.Point>? placement;
         private readonly ClockGroup clock;
         private bool disposed;
-        internal NativeFrames(Window host, ClockGroup clock)
+        internal NativeFrames(Window host, FrameworkElement surface, ClockGroup clock,
+            Func<System.Drawing.Size, System.Drawing.Point>? placement)
         {
-            this.host = host; this.clock = clock;
+            this.host = host; this.surface = surface; this.clock = clock; this.placement = placement;
             CompositionTarget.Rendering += Render;
             clock.Completed += Completed;
             host.Closed += Closed;
@@ -37,15 +39,16 @@ internal static class ShapeMotion
         {
             if (disposed) return;
             var handle = new WindowInteropHelper(host).Handle;
-            var width = host.Width; var height = host.Height;
+            var width = surface.Width; var height = surface.Height;
             if (handle == 0 || !double.IsFinite(width) || !double.IsFinite(height)) return;
             var dpi = VisualTreeHelper.GetDpi(host);
             var pixelsX = (int)Math.Ceiling(width * dpi.DpiScaleX);
             var pixelsY = (int)Math.Ceiling(height * dpi.DpiScaleY);
-            // Commit both dimensions after the animation/layout phase; separate
-            // Window property invalidations can submit one old native dimension.
-            if (GetWindowRect(handle, out var rect) && (rect.Right - rect.Left != pixelsX || rect.Bottom - rect.Top != pixelsY))
-                _ = SetWindowPos(handle, 0, 0, 0, pixelsX, pixelsY, 0x0002 | 0x0004 | 0x0010);
+            if (!GetWindowRect(handle, out var rect)) return;
+            var point = placement?.Invoke(new(pixelsX, pixelsY)) ?? new System.Drawing.Point(rect.Left, rect.Top);
+            // Size and anchor position are a single native transaction per frame.
+            if (rect.Right - rect.Left != pixelsX || rect.Bottom - rect.Top != pixelsY || rect.Left != point.X || rect.Top != point.Y)
+                _ = SetWindowPos(handle, 0, point.X, point.Y, pixelsX, pixelsY, 0x0004 | 0x0010);
         }
         private void Completed(object? sender, EventArgs e)
         {

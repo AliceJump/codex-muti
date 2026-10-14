@@ -134,7 +134,7 @@ internal static class Program
                 finally { menu.Close(); }
             }
         });
-        Run("Shape transition drives the host and surface together without a final frame jump", () =>
+        Run("Shape transition freezes content coordinates while the surface animates", () =>
         {
             var previous = Environment.GetEnvironmentVariable("CODEX_POOL_DATA_DIR");
             Environment.SetEnvironmentVariable("CODEX_POOL_DATA_DIR", System.IO.Path.GetFullPath(".research/ui-animation-fixture"));
@@ -146,8 +146,9 @@ internal static class Program
                 Check(window.SizeToContent == SizeToContent.Manual);
                 var surface = (Border)window.FindName("Surface");
                 clock.Controller!.SeekAlignedToLastTick(TimeSpan.FromMilliseconds(190), TimeSeekOrigin.BeginTime);
-                Check(window.Width > 206 && window.Width < 380 && window.Height > 53 && window.Height < 330);
-                Check(Math.Abs(window.Width - surface.Width) < .01 && Math.Abs(window.Height - surface.Height) < .01);
+                var motionHost = (Grid)window.FindName("MotionHost");
+                Check(motionHost.Width == 380 && motionHost.Height == 330);
+                Check(!System.Windows.DependencyPropertyHelper.GetValueSource(window, Window.WidthProperty).IsAnimated);
                 Check(surface.Width > 206 && surface.Width < 380 && surface.Height > 53 && surface.Height < 330);
                 clock.Controller.SeekAlignedToLastTick(TimeSpan.FromMilliseconds(381), TimeSeekOrigin.BeginTime);
                 Pump(30);
@@ -161,17 +162,30 @@ internal static class Program
             {
                 var from = expand ? new Size(206, 53) : new Size(380, 330);
                 var to = expand ? new Size(380, 330) : new Size(206, 53);
-                var surface = new Border();
-                var host = new Window { Width = from.Width, Height = from.Height, Content = surface, Opacity = 0,
+                var inner = new Border { Width = 180, Height = 30, HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top };
+                var surface = new Border { Child = inner, HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top };
+                var fixedRoot = new Grid { Width = 380, Height = 330, HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top };
+                fixedRoot.Children.Add(surface);
+                var host = new Window { Width = from.Width, Height = from.Height, Content = fixedRoot, Opacity = 0,
                     ShowActivated = false, ShowInTaskbar = false, WindowStyle = WindowStyle.None, ResizeMode = ResizeMode.NoResize,
                     SizeToContent = SizeToContent.Manual };
                 try
                 {
                     host.Show();
+                    var nativeSizes = new List<(int Width, int Height)>();
+                    var nativeHandle = new System.Windows.Interop.WindowInteropHelper(host).Handle;
+                    System.Windows.Interop.HwndSource.FromHwnd(nativeHandle).AddHook((nint _, int message, nint wParam, nint lParam, ref bool handled) =>
+                    {
+                        if (message == 5) nativeSizes.Add(((int)((long)lParam & 0xffff), (int)(((long)lParam >> 16) & 0xffff)));
+                        return 0;
+                    });
+                    var work = System.Windows.Forms.Screen.PrimaryScreen!.WorkingArea;
+                    var anchorX = work.Left + work.Width / 2; var anchorBottom = work.Bottom - 20;
                     var timeline = new ParallelTimeline { Duration = TimeSpan.FromMilliseconds(380), FillBehavior = FillBehavior.HoldEnd };
                     timeline.Children.Add(new DoubleAnimation(from.Width, to.Width, timeline.Duration));
                     timeline.Children.Add(new DoubleAnimation(from.Height, to.Height, timeline.Duration));
-                    var clock = (ClockGroup)timeline.CreateClock(); using var frames = ShapeMotion.Apply(host, surface, clock);
+                    var clock = (ClockGroup)timeline.CreateClock(); using var frames = ShapeMotion.Apply(host, surface, clock,
+                        size => new System.Drawing.Point(anchorX - size.Width / 2, anchorBottom - size.Height));
                     var elapsed = 0;
                     foreach (var milliseconds in new[] { 95, 95, 95, 120 })
                     {
@@ -181,8 +195,13 @@ internal static class Program
                         if (Math.Abs(rect.Right - rect.Left - surface.Width * dpi.DpiScaleX) > 2
                             || Math.Abs(rect.Bottom - rect.Top - surface.Height * dpi.DpiScaleY) > 2)
                             throw new InvalidOperationException($"frame {elapsed}: native={rect.Right - rect.Left}x{rect.Bottom - rect.Top}, surface={surface.Width}x{surface.Height}, host={host.Width}x{host.Height}, dpi={dpi.DpiScaleX}x{dpi.DpiScaleY}");
-                        if (elapsed == 190) Check(host.Width > 206 && host.Width < 380 && host.Height > 53 && host.Height < 330);
+                        Check(Math.Abs((rect.Left + rect.Right) / 2d - anchorX) <= 1 && Math.Abs(rect.Bottom - anchorBottom) <= 1);
+                        Check(inner.TransformToAncestor(surface).Transform(new Point()) == new Point());
                     }
+                    Check(nativeSizes.Count > 2);
+                    for (var i = 1; i < nativeSizes.Count; i++)
+                        Check(expand ? nativeSizes[i].Width >= nativeSizes[i - 1].Width && nativeSizes[i].Height >= nativeSizes[i - 1].Height
+                            : nativeSizes[i].Width <= nativeSizes[i - 1].Width && nativeSizes[i].Height <= nativeSizes[i - 1].Height);
                 }
                 finally { host.Close(); }
             }

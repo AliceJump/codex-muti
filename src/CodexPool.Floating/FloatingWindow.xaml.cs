@@ -119,7 +119,7 @@ public partial class FloatingWindow : Window
         {
             Deactivated += (_, _) => { dismissedAt = Environment.TickCount64; dismissedPoint = Forms.Cursor.Position; Hide(); };
             PreviewKeyDown += (_, e) => { if (e.Key == System.Windows.Input.Key.Escape) { Hide(); e.Handled = true; } };
-            SizeChanged += (_, _) => { if (IsVisible) PositionFlyout(); };
+            SizeChanged += (_, _) => { if (IsVisible && !changingShape) PositionFlyout(); };
         }
         timer.Tick += (_, _) => { SavePosition(); if (snapshot is { } s) Render(s); };
         Closing += OnClosing;
@@ -540,7 +540,9 @@ public partial class FloatingWindow : Window
     {
         shapeGeneration++; changingShape = false;
         shapeFrames?.Dispose(); shapeFrames = null;
-        BeginAnimation(WidthProperty, null); BeginAnimation(HeightProperty, null);
+        MotionHost.Width = double.NaN; MotionHost.Height = double.NaN;
+        MotionHost.HorizontalAlignment = System.Windows.HorizontalAlignment.Stretch;
+        MotionHost.VerticalAlignment = VerticalAlignment.Stretch;
         Surface.BeginAnimation(WidthProperty, null); Surface.BeginAnimation(HeightProperty, null);
         Surface.Width = double.NaN; Surface.Height = double.NaN;
         Surface.HorizontalAlignment = System.Windows.HorizontalAlignment.Stretch;
@@ -571,8 +573,12 @@ public partial class FloatingWindow : Window
         }
         SizeToContent = SizeToContent.Manual;
         Width = fromWidth; Height = fromHeight;
-        Surface.HorizontalAlignment = System.Windows.HorizontalAlignment.Center;
-        Surface.VerticalAlignment = VerticalAlignment.Bottom;
+        // Native WM_SIZE must not change the coordinate system of the content.
+        MotionHost.Width = Math.Max(fromWidth, toWidth); MotionHost.Height = Math.Max(fromHeight, toHeight);
+        MotionHost.HorizontalAlignment = System.Windows.HorizontalAlignment.Left;
+        MotionHost.VerticalAlignment = VerticalAlignment.Top;
+        Surface.HorizontalAlignment = System.Windows.HorizontalAlignment.Left;
+        Surface.VerticalAlignment = VerticalAlignment.Top;
         Surface.Width = toWidth; Surface.Height = toHeight;
         MotionLayer.Width = toWidth; MotionLayer.Height = toHeight;
         var duration = new Duration(TimeSpan.FromMilliseconds(380));
@@ -590,8 +596,7 @@ public partial class FloatingWindow : Window
             pendingState = false;
             UpdateLayout(); ClampPosition();
         };
-        shapeFrames = ShapeMotion.Apply(this, Surface, clock);
-        if (widget) PositionFlyout();
+        shapeFrames = ShapeMotion.Apply(this, Surface, clock, widget ? ShapePosition : null);
         return clock;
     }
     private void CycleTheme(object sender, RoutedEventArgs e) { preferences = preferences with { Theme = (preferences.Theme + 1) % 3 }; ApplyTheme(); if (snapshot is { } state) Render(state); SavePosition(); }
@@ -666,7 +671,7 @@ public partial class FloatingWindow : Window
     }
     private void PositionFlyout()
     {
-        if (!widget || positioningFlyout || handle == 0 || !IsVisible) return;
+        if (!widget || changingShape || positioningFlyout || handle == 0 || !IsVisible) return;
         positioningFlyout = true;
         try
         {
@@ -681,6 +686,12 @@ public partial class FloatingWindow : Window
             _ = SetWindowPos(handle, 0, position.X, position.Y, 0, 0, 0x0001 | 0x0004 | 0x0010);
         }
         finally { positioningFlyout = false; }
+    }
+    private System.Drawing.Point ShapePosition(System.Drawing.Size size)
+    {
+        var area = (flyoutScreen ?? Forms.Screen.FromPoint(Forms.Cursor.Position)).WorkingArea;
+        var anchor = flyoutAnchor ?? new System.Drawing.Rectangle(Forms.Cursor.Position, System.Drawing.Size.Empty);
+        return FlyoutPlacement.Above(area, anchor, size.Width, size.Height, (int)Math.Round(12 * VisualTreeHelper.GetDpi(this).DpiScaleX));
     }
     private void RestorePosition() { if (handle == 0) return; _ = SetWindowPos(handle, 0, preferences.X, preferences.Y, 0, 0, 0x0001 | 0x0004 | 0x0010); ClampPosition(); }
     private void ClampPosition()
