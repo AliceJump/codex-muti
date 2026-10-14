@@ -26,6 +26,9 @@ internal sealed class GlassTrayMenu : Window
     private bool closing;
     private readonly Action? onClosed;
     private readonly int theme;
+    private System.Drawing.Point placementCursor;
+    private System.Drawing.Rectangle? placementAnchor;
+    private bool positioning;
 
     public GlassTrayMenu(IReadOnlyList<(string Label, Action Invoke)> items, Action? onClosed = null, int theme = 0)
     {
@@ -89,6 +92,7 @@ internal sealed class GlassTrayMenu : Window
         {
             handle = new WindowInteropHelper(this).Handle;
             var source = HwndSource.FromHwnd(handle);
+            source?.AddHook(PositionBeforeDisplay);
             if (source?.CompositionTarget is { } target) target.BackgroundColor = Colors.Transparent;
             var acrylic = 3;
             backdrop = OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22621)
@@ -97,7 +101,7 @@ internal sealed class GlassTrayMenu : Window
             _ = DwmSetWindowAttribute(handle, 33, ref corners, 4);
             ApplyTheme();
         };
-        Closing += (_, _) => closing = true;
+        Closing += (_, _) => { closing = true; positioning = false; };
         Deactivated += (_, _) => { if (!closing) Close(); };
         PreviewKeyDown += (_, e) => { if (e.Key == Key.Escape) { Close(); e.Handled = true; } };
         Closed += (_, _) => onClosed?.Invoke();
@@ -105,25 +109,57 @@ internal sealed class GlassTrayMenu : Window
 
     public void ShowNear(System.Drawing.Point cursor, System.Drawing.Rectangle? trayBounds)
     {
+        placementCursor = cursor;
+        placementAnchor = trayBounds;
         ApplyTheme();
-        Opacity = 0;
-        Show();
+        ShowActivated = false;
+        _ = new WindowInteropHelper(this).EnsureHandle();
         // WinForms supplies physical pixels; WPF Left/Top and ActualWidth/Height
         // are device-independent units. Move the HWND to the target monitor first
         // so WPF has its DPI before measuring and placing the popup.
-        _ = SetWindowPos(handle, 0, cursor.X, cursor.Y, 0, 0, 0x0001 | 0x0004 | 0x0010);
+        if (!SetWindowPos(handle, 0, cursor.X, cursor.Y, 0, 0, 0x0001 | 0x0004 | 0x0010)) { Close(); return; }
+        // Window.Opacity only covers WPF content, not the native DWM backdrop.
+        // Measure and position the hidden HWND before its first visible frame.
+        var content = (UIElement)Content;
+        content.Measure(new System.Windows.Size(double.PositiveInfinity, double.PositiveInfinity));
+        var dpi = VisualTreeHelper.GetDpi(this);
+        var width = Math.Max(1, (int)Math.Ceiling(content.DesiredSize.Width * dpi.DpiScaleX));
+        var height = Math.Max(1, (int)Math.Ceiling(content.DesiredSize.Height * dpi.DpiScaleY));
+        var point = Placement(width, height);
+        if (!SetWindowPos(handle, 0, point.X, point.Y, width, height, 0x0004 | 0x0010)) { Close(); return; }
+        positioning = true;
+        Show();
         UpdateLayout();
-        if (!GetWindowRect(handle, out var rect)) { Close(); return; }
-        var screen = Forms.Screen.FromPoint(cursor);
-        var work = screen.WorkingArea;
-        var anchor = trayBounds is { Width: > 0, Height: > 0 } b
-            ? b
-            : new System.Drawing.Rectangle(cursor.X - 8, cursor.Y - 8, 16, 16);
-        var gap = (int)Math.Round(8 * VisualTreeHelper.GetDpi(this).DpiScaleX);
-        var point = FlyoutPlacement.Above(work, anchor, rect.Right - rect.Left, rect.Bottom - rect.Top, gap);
-        _ = SetWindowPos(handle, 0, point.X, point.Y, 0, 0, 0x0001 | 0x0004 | 0x0010);
-        Opacity = 1;
         Activate();
+    }
+
+    private System.Drawing.Point Placement(int width, int height)
+    {
+        var screen = Forms.Screen.FromPoint(placementCursor);
+        var work = screen.WorkingArea;
+        var anchor = placementAnchor is { Width: > 0, Height: > 0 } b
+            ? b
+            : new System.Drawing.Rectangle(placementCursor.X - 8, placementCursor.Y - 8, 16, 16);
+        var gap = (int)Math.Round(8 * VisualTreeHelper.GetDpi(this).DpiScaleX);
+        return FlyoutPlacement.Above(work, anchor, width, height, gap);
+    }
+
+    private nint PositionBeforeDisplay(nint window, int message, nint wParam, nint lParam, ref bool handled)
+    {
+        if (message != 0x0046 || !positioning || closing || lParam == 0) return 0; // WM_WINDOWPOSCHANGING
+        var position = Marshal.PtrToStructure<WindowPosition>(lParam);
+        var width = position.Width; var height = position.Height;
+        if ((position.Flags & 0x0001) != 0 && GetWindowRect(window, out var rect))
+        { width = rect.Right - rect.Left; height = rect.Bottom - rect.Top; }
+        // SizeToContent may adjust native dimensions during Show(). Anchor that
+        // resize in the same native transaction, before Windows paints the backdrop.
+        if (width > 0 && height > 0)
+        {
+            var point = Placement(width, height);
+            position.X = point.X; position.Y = point.Y; position.Flags &= ~0x0002u; // clear SWP_NOMOVE
+            Marshal.StructureToPtr(position, lParam, false);
+        }
+        return 0;
     }
 
     private void ApplyTheme()
@@ -140,6 +176,7 @@ internal sealed class GlassTrayMenu : Window
 
     [DllImport("dwmapi.dll")] private static extern int DwmSetWindowAttribute(nint hwnd, int attribute, ref int value, int size);
     [StructLayout(LayoutKind.Sequential)] private struct WindowRect { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)] private struct WindowPosition { public nint Window, After; public int X, Y, Width, Height; public uint Flags; }
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetWindowRect(nint hwnd, out WindowRect rect);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool SetWindowPos(nint hwnd, nint after, int x, int y, int cx, int cy, uint flags);
 }

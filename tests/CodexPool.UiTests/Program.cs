@@ -147,6 +147,43 @@ internal static class Program
             var overflow = FlyoutPlacement.Above(work, new(1600, 850, 24, 24), 206, 53, 12);
             Check(overflow.Y + 53 + 12 == 850);
         });
+        Run("Glass menu is created hidden and every visible native position is anchored on the target monitor", () =>
+        {
+            foreach (var screen in System.Windows.Forms.Screen.AllScreens)
+            {
+                var work = screen.WorkingArea;
+                var cursor = new System.Drawing.Point(work.Right - 20, work.Bottom - 20);
+                var anchor = new System.Drawing.Rectangle(cursor.X - 12, cursor.Y - 12, 24, 24);
+                var visible = new List<(WindowRect Rect, uint Dpi)>();
+                var createdHidden = false;
+                var menu = new GlassTrayMenu([("首次显示位置", () => { }), ("第二行菜单", () => { })]);
+                menu.SourceInitialized += (_, _) =>
+                {
+                    var handle = new System.Windows.Interop.WindowInteropHelper(menu).Handle;
+                    createdHidden = !IsWindowVisible(handle);
+                    System.Windows.Interop.HwndSource.FromHwnd(handle)!.AddHook((nint window, int message, nint wParam, nint lParam, ref bool handled) =>
+                    {
+                        if (message is 0x0047 or 0x0018 && IsWindowVisible(window) && GetWindowRect(window, out var rect))
+                            visible.Add((rect, GetDpiForWindow(window)));
+                        return 0;
+                    });
+                };
+                try
+                {
+                    menu.ShowNear(cursor, anchor); Pump(50);
+                    Check(createdHidden && visible.Count > 0);
+                    Check(GetWindowRect(new System.Windows.Interop.WindowInteropHelper(menu).Handle, out var finalRect));
+                    Check(visible.All(x => x.Rect.Left == finalRect.Left && x.Rect.Top == finalRect.Top
+                        && x.Rect.Right == finalRect.Right && x.Rect.Bottom == finalRect.Bottom));
+                    foreach (var (rect, dpi) in visible)
+                    {
+                        var point = FlyoutPlacement.Above(work, anchor, rect.Right - rect.Left, rect.Bottom - rect.Top, (int)Math.Round(8 * dpi / 96d));
+                        Check(rect.Left == point.X && rect.Top == point.Y);
+                    }
+                }
+                finally { menu.Close(); }
+            }
+        });
         Run("Glass menu uses native pixels on each monitor and closes before invoking an action", () =>
         {
             foreach (var screen in System.Windows.Forms.Screen.AllScreens)
@@ -186,6 +223,8 @@ internal static class Program
     }
     [DllImport("user32.dll")] private static extern nint SendMessage(nint window, uint message, nint wParam, nint lParam);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern uint RegisterWindowMessage(string name);
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool IsWindowVisible(nint window);
+    [DllImport("user32.dll")] private static extern uint GetDpiForWindow(nint window);
     [StructLayout(LayoutKind.Sequential)] private struct WindowRect { public int Left, Top, Right, Bottom; }
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetWindowRect(nint window, out WindowRect rect);
 }
