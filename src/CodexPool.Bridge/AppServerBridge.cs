@@ -42,6 +42,7 @@ public sealed class AppServerBridge(ICompactionControl control, TimeSpan? pollIn
         public bool ItemCompleted { get; set; }
         public string? TurnStatus { get; set; }
         public bool Failed { get; set; }
+        public bool RpcRejected { get; set; }
     }
     private sealed record Pending(string Method, string? ThreadId);
     private sealed record Frame(int Source, string? Line);
@@ -119,6 +120,7 @@ public sealed class AppServerBridge(ICompactionControl control, TimeSpan? pollIn
                     if (operation is { } current && (current.Failed || current.TurnStatus is not null))
                     {
                         if (current.Failed && current.TurnId is not null && current.TurnStatus is null) continue;
+                        if (current.Failed && current.TurnId is null && !current.CheckingGoal && !current.RpcRejected) continue;
                         if (!current.Failed && !current.Acknowledged) continue;
                         var success = !current.Failed && current.Acknowledged && current.ItemCompleted && current.TurnStatus == "completed";
                         await FinishAsync(success ? "completed" : "failed", token);
@@ -208,7 +210,7 @@ public sealed class AppServerBridge(ICompactionControl control, TimeSpan? pollIn
     {
         if (internalResponse && operation is { } op)
         {
-            if (root.TryGetProperty("error", out _)) op.Failed = true;
+            if (root.TryGetProperty("error", out _)) { op.Failed = true; op.RpcRejected = true; }
             else if (root.TryGetProperty("result", out _)) op.Acknowledged = true;
             return;
         }

@@ -16,7 +16,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Unexpected EOF cannot report completion or replay deferred input", Eof),
     ("Daemon outage preserves original protocol and Unicode", Outage),
     ("Late internal replies never escape into the client RPC stream", LateReply),
-    ("A truncated client frame is rejected before forwarding", Truncated)
+    ("A truncated client frame is rejected before forwarding", Truncated),
+    ("An error before turn/started cannot release queued work without a terminal outcome", EarlyError)
 };
 var failed = 0;
 foreach (var (name, run) in tests)
@@ -127,6 +128,17 @@ static async Task Truncated()
     try { await f.Run.WaitAsync(TimeSpan.FromSeconds(3)); Check(false); }
     catch (BridgeFailure ex) { Check(ex.Code == "protocol_read_failed"); }
     Check(f.Control.Reserved == 0);
+}
+static async Task EarlyError()
+{
+    await using var f = new Fixture(TimeSpan.FromMilliseconds(200)); await f.InitializeAsync(); var id = await f.BeginAsync();
+    await f.Server.WriteLineAsync(JsonSerializer.Serialize(new { id, result = new { } }));
+    await f.Client.WriteLineAsync("""{"id":9,"method":"turn/start","params":{"threadId":"thread","input":[]}}""");
+    await f.EventAsync("""{"method":"error","params":{"threadId":"thread","willRetry":false,"error":{"message":"private-canary"}}}""");
+    Check(f.Control.Finished.Count == 0);
+    try { await f.Run.WaitAsync(TimeSpan.FromSeconds(3)); Check(false); }
+    catch (BridgeFailure ex) { Check(ex.Code == "compaction_outcome_unknown"); }
+    Check(f.Control.Finished.SequenceEqual(["unknown"]));
 }
 
 sealed class Control : ICompactionControl
