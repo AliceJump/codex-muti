@@ -399,14 +399,15 @@ Task DynamicQuotaRouting()
 }
 Task WhamUsageRewrite()
 {
-    var empty = WhamUsage.Response(Array.Empty<AccountAvailability>());
+    var empty = WhamUsage.Response(false);
     using (var emptyJson = JsonDocument.Parse(JsonSerializer.Serialize(empty)))
     {
         var rate = emptyJson.RootElement.GetProperty("rate_limit");
+        Check(emptyJson.RootElement.GetProperty("plan_type").GetString() == "unknown");
         Check(rate.GetProperty("allowed").GetBoolean() == false);
         Check(rate.GetProperty("limit_reached").GetBoolean() == true);
     }
-    var usable = WhamUsage.Response([new AccountAvailability("A", null, Plan: "plus")], "acct-1", "plus");
+    var usable = WhamUsage.Response(true, "acct-1", "plus");
     using (var usableJson = JsonDocument.Parse(JsonSerializer.Serialize(usable)))
     {
         var root = usableJson.RootElement;
@@ -415,11 +416,33 @@ Task WhamUsageRewrite()
         Check(root.GetProperty("rate_limit").GetProperty("allowed").GetBoolean());
         Check(root.GetProperty("rate_limit").GetProperty("limit_reached").GetBoolean() == false);
     }
-    var exhausted = WhamUsage.Response([new AccountAvailability("A", "quota_exhausted", "insufficient_quota")]);
+    var exhausted = WhamUsage.Response(false);
     using (var exhaustedJson = JsonDocument.Parse(JsonSerializer.Serialize(exhausted)))
         Check(exhaustedJson.RootElement.GetProperty("rate_limit").GetProperty("allowed").GetBoolean() == false);
-    Check(WhamUsage.PoolAllowed([new("A", null), new("B", "paused")]));
-    Check(!WhamUsage.PoolAllowed([new("A", "quota_exhausted"), new("B", "auth_unavailable")]));
+    using (var invalidPlan = JsonDocument.Parse(JsonSerializer.Serialize(WhamUsage.Response(false, planType: "invalid plan"))))
+        Check(invalidPlan.RootElement.GetProperty("plan_type").GetString() == "unknown");
+    var vault = Store("wham-routing");
+    using var issuer = new FakeIssuer(); using var http = new HttpClient(issuer);
+    var auth = new OAuth(http, vault);
+    var pool = new PoolRuntime(vault, auth, new Quota(http, auth, vault), true);
+    Check(!pool.CanRouteModelRequest());
+    vault.Add(Account("A")); vault.Add(Account("B"));
+    pool = new(vault, auth, new Quota(http, auth, vault), true);
+    Check(pool.CanRouteModelRequest());
+    Check(vault.Control("A", "pause"));
+    Check(pool.Availability().Any(x => x.Available) && !pool.CanRouteModelRequest());
+    pool.UpdateSettings(new(true));
+    Check(pool.CanRouteModelRequest() && pool.Active == "A" && vault.ActiveId == "A" && pool.History.Length == 0);
+    using (var reservation = pool.ReserveModelRequest()) Check(reservation.Selection.AccountId == "B");
+    Check(vault.Control("B", "pause"));
+    Check(!pool.CanRouteModelRequest());
+    var mixed = Store("wham-provider-routing"); mixed.Add(Account("A"));
+    var native = Account("N"); native.ProviderKind = "native"; native.BackendAccountId = "backend-N"; mixed.Add(native);
+    mixed.SaveSettings(new(true)); Check(mixed.Control("A", "pause"));
+    var mixedAuth = new OAuth(http, mixed);
+    var mixedPool = new PoolRuntime(mixed, mixedAuth, new Quota(http, mixedAuth, mixed), true);
+    Check(mixedPool.Availability().Any(x => x.Available) && !mixedPool.CanRouteModelRequest());
+    Check(!new PoolRuntime(vault, auth, new Quota(http, auth, vault), false).CanRouteModelRequest());
     return Task.CompletedTask;
 }
 async Task LocalApi()

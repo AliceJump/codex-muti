@@ -57,7 +57,7 @@ openai_base_url = "http://127.0.0.1:3210/v1"
 chatgpt_base_url = "http://127.0.0.1:3210/backend-api"
 ```
 
-`openai_base_url` 把模型流量转到本机池；`chatgpt_base_url` 让 ChatGPT Desktop 的用量查询打到 Daemon 的 `GET /backend-api/wham/usage`。池内任一可用账户时该接口返回 `rate_limit.allowed: true`，避免 Desktop 因本机 ChatGPT 订阅额度耗尽而硬禁用发送；池耗尽时为 `false`。本机 ChatGPT 登录仍可用于远端能力，账户池可继续使用其他账户。可选环境变量 `CODEX_API_BASE_URL=http://127.0.0.1:3210` 时，对应路径为 `GET /api/codex/usage`，语义相同。Daemon 仅监听 loopback。
+`openai_base_url` 把模型流量转到本机池；`chatgpt_base_url` 让 ChatGPT Desktop 的用量查询打到 Daemon 的 `GET /backend-api/wham/usage`。模型路由可选择账户时该接口返回 `rate_limit.allowed: true`，避免 Desktop 因本机 ChatGPT 订阅额度耗尽而硬禁用发送；当前账户不可用且自动切换关闭，或同 provider 池耗尽时为 `false`。用量查询不会切换当前账户。本机 ChatGPT 登录仍可用于远端能力，账户池可继续使用其他账户。可选环境变量 `CODEX_API_BASE_URL=http://127.0.0.1:3210` 时，对应路径为 `GET /api/codex/usage`，语义相同。Daemon 仅监听 loopback。
 
 模型入口接受账户池中任一原生登录的当前 access token，或只读核对 Daemon 的 `CODEX_HOME/auth.json` 中当前 ChatGPT 登录。现有文件由官方 Codex 维护，代理不导入、复制、刷新或写入该登录。请求入口认证和账户选择独立；实际上游账户仍由 sticky 调度决定。此只读适配目前针对官方 file 存储；keyring/ephemeral 中的其他 grant 没有自动读取支持。
 

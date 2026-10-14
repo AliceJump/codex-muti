@@ -134,7 +134,7 @@ try
         var availability = pool.Availability();
         var plan = availability.Select(x => x.Plan).FirstOrDefault(p => !string.IsNullOrWhiteSpace(p))
             ?? vault.Accounts.Select(x => quota.Snapshot(x.Id)?.Plan).FirstOrDefault(p => !string.IsNullOrWhiteSpace(p));
-        return Results.Json(WhamUsage.Response(availability, WhamUsage.HeaderAccountId(context.Request), plan));
+        return Results.Json(WhamUsage.Response(pool.CanRouteModelRequest(), WhamUsage.HeaderAccountId(context.Request), plan));
     }
     app.MapGet("/backend-api/wham/usage", WhamUsageEndpoint);
     app.MapGet("/api/codex/usage", WhamUsageEndpoint);

@@ -102,10 +102,24 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
     {
         lock (gate)
         {
-            var provider = scheduler.Active is { } current ? vault.Find(current)?.ProviderKind : null;
-            var accounts = Accounts(model).Where(x => provider is null || vault.Find(x.Id)?.ProviderKind == provider).ToArray();
-            var selection = scheduler.Select(accounts, Settings, DateTimeOffset.UtcNow);
+            var selection = scheduler.Select(RoutingAccounts(model), Settings, DateTimeOffset.UtcNow);
             return selection;
+        }
+    }
+    private PoolAccount[] RoutingAccounts(string? model)
+    {
+        var provider = scheduler.Active is { } current ? vault.Find(current)?.ProviderKind : null;
+        return Accounts(model).Where(x => provider is null || vault.Find(x.Id)?.ProviderKind == provider).ToArray();
+    }
+    public bool CanRouteModelRequest(string? model = null)
+    {
+        lock (gate)
+        {
+            // Use the same selection rules without publishing an owner, epoch or
+            // durable selection from a read-only usage request.
+            var probe = new StickyScheduler(scheduler.Active);
+            try { probe.Select(RoutingAccounts(model), Settings, DateTimeOffset.UtcNow); return true; }
+            catch (NoEligibleAccountException) { return false; }
         }
     }
     public void Activate(string id)
