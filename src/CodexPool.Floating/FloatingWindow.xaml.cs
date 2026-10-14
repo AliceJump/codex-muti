@@ -620,7 +620,7 @@ public partial class FloatingWindow : Window
             }),
             ("退出托盘面板", () => { exiting = true; Close(); }),
         };
-        glassMenu = new GlassTrayMenu(items, () => glassMenu = null);
+        glassMenu = new GlassTrayMenu(items, () => glassMenu = null, preferences.Theme);
         glassMenu.ShowNear(cursor, bounds);
     }
 

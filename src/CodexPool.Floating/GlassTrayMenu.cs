@@ -23,11 +23,14 @@ internal sealed class GlassTrayMenu : Window
 {
     private nint handle;
     private bool backdrop;
+    private bool closing;
     private readonly Action? onClosed;
+    private readonly int theme;
 
-    public GlassTrayMenu(IReadOnlyList<(string Label, Action Invoke)> items, Action? onClosed = null)
+    public GlassTrayMenu(IReadOnlyList<(string Label, Action Invoke)> items, Action? onClosed = null, int theme = 0)
     {
         this.onClosed = onClosed;
+        this.theme = theme;
         Title = "Codex Pool · 托盘菜单";
         WindowStyle = WindowStyle.None;
         ResizeMode = ResizeMode.NoResize;
@@ -61,7 +64,9 @@ internal sealed class GlassTrayMenu : Window
                 Background = MediaBrushes.Transparent,
                 Cursor = MediaCursors.Hand
             };
-            button.Click += (_, _) => { capture.Invoke(); Close(); };
+            // Actions may activate another window or shut down the application.
+            // Release this popup before handing control to them.
+            button.Click += (_, _) => { Close(); capture.Invoke(); };
             list.Children.Add(button);
         }
 
@@ -92,7 +97,8 @@ internal sealed class GlassTrayMenu : Window
             _ = DwmSetWindowAttribute(handle, 33, ref corners, 4);
             ApplyTheme();
         };
-        Deactivated += (_, _) => Close();
+        Closing += (_, _) => closing = true;
+        Deactivated += (_, _) => { if (!closing) Close(); };
         PreviewKeyDown += (_, e) => { if (e.Key == Key.Escape) { Close(); e.Handled = true; } };
         Closed += (_, _) => onClosed?.Invoke();
     }
@@ -100,24 +106,29 @@ internal sealed class GlassTrayMenu : Window
     public void ShowNear(System.Drawing.Point cursor, System.Drawing.Rectangle? trayBounds)
     {
         ApplyTheme();
+        Opacity = 0;
         Show();
+        // WinForms supplies physical pixels; WPF Left/Top and ActualWidth/Height
+        // are device-independent units. Move the HWND to the target monitor first
+        // so WPF has its DPI before measuring and placing the popup.
+        _ = SetWindowPos(handle, 0, cursor.X, cursor.Y, 0, 0, 0x0001 | 0x0004 | 0x0010);
         UpdateLayout();
-        var width = (int)Math.Ceiling(ActualWidth);
-        var height = (int)Math.Ceiling(ActualHeight);
+        if (!GetWindowRect(handle, out var rect)) { Close(); return; }
         var screen = Forms.Screen.FromPoint(cursor);
         var work = screen.WorkingArea;
         var anchor = trayBounds is { Width: > 0, Height: > 0 } b
             ? b
             : new System.Drawing.Rectangle(cursor.X - 8, cursor.Y - 8, 16, 16);
-        var point = FlyoutPlacement.Above(work, anchor, width, height, 8);
-        Left = point.X;
-        Top = point.Y;
+        var gap = (int)Math.Round(8 * VisualTreeHelper.GetDpi(this).DpiScaleX);
+        var point = FlyoutPlacement.Above(work, anchor, rect.Right - rect.Left, rect.Bottom - rect.Top, gap);
+        _ = SetWindowPos(handle, 0, point.X, point.Y, 0, 0, 0x0001 | 0x0004 | 0x0010);
+        Opacity = 1;
         Activate();
     }
 
     private void ApplyTheme()
     {
-        var light = Registry.GetValue(@"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "AppsUseLightTheme", 0) is int value && value == 1;
+        var light = theme == 1 || theme == 0 && Registry.GetValue(@"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "AppsUseLightTheme", 0) is int value && value == 1;
         var highContrast = SystemParameters.HighContrast;
         Resources["ForegroundBrush"] = highContrast ? SystemColors.WindowTextBrush : new Brush(light ? MediaColor.FromRgb(26, 38, 53) : MediaColor.FromRgb(237, 242, 249));
         Resources["SurfaceBrush"] = highContrast ? SystemColors.WindowBrush : new Brush(light ? MediaColor.FromArgb(backdrop ? (byte)190 : (byte)255, 245, 248, 253) : MediaColor.FromArgb(backdrop ? (byte)185 : (byte)255, 24, 30, 39));
@@ -128,4 +139,7 @@ internal sealed class GlassTrayMenu : Window
     }
 
     [DllImport("dwmapi.dll")] private static extern int DwmSetWindowAttribute(nint hwnd, int attribute, ref int value, int size);
+    [StructLayout(LayoutKind.Sequential)] private struct WindowRect { public int Left, Top, Right, Bottom; }
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetWindowRect(nint hwnd, out WindowRect rect);
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool SetWindowPos(nint hwnd, nint after, int x, int y, int cx, int cy, uint flags);
 }
