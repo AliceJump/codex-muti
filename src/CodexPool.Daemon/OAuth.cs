@@ -79,11 +79,17 @@ public sealed class OAuth(HttpClient http, Vault vault)
             if (refreshBackoff.TryGetValue(id, out var retryAt) && retryAt > DateTimeOffset.UtcNow) throw new AuthFailure("auth_temporarily_unavailable");
             if (account.EarliestRefreshAt > DateTimeOffset.UtcNow) throw new AuthFailure("refresh_not_yet_allowed");
             TokenResponse token;
+            cancellationToken.ThrowIfCancellationRequested();
+            // Once rotation starts, a disconnected model/UI caller must not
+            // discard the only copy of a new refresh generation.
+            using var refreshLifetime = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            var refreshToken = refreshLifetime.Token;
+            var requestStarted = false;
             // Crash between remote rotation and local replacement must not reuse the old token.
             vault.SetAuthStatus(id, "refresh_pending");
-            try { token = account.ProviderKind == "native" ? await RefreshNativeAsync(account, cancellationToken)
+            try { token = account.ProviderKind == "native" ? await RefreshNativeAsync(account, refreshToken, () => requestStarted = true)
                 : await ExchangeAsync(new() { ["grant_type"] = "refresh_token", ["client_id"] = account.ClientId,
-                    ["refresh_token"] = account.RefreshToken, ["resource"] = Resource }, cancellationToken); }
+                    ["refresh_token"] = account.RefreshToken, ["resource"] = Resource }, refreshToken, () => requestStarted = true); }
             catch (AuthFailure ex)
             {
                 health[id] = ex.Code == "auth_temporarily_unavailable" ? ex.Code : "reauth_required";
@@ -92,29 +98,36 @@ public sealed class OAuth(HttpClient http, Vault vault)
                 { vault.SetAuthStatus(id, "ready"); refreshBackoff[id] = DateTimeOffset.UtcNow.AddSeconds(30); }
                 throw;
             }
-            catch (OperationCanceledException)
+            catch (Exception ex) when (ex is OperationCanceledException or HttpRequestException)
             {
+                if (!requestStarted)
+                {
+                    health[id] = "auth_temporarily_unavailable"; vault.SetAuthStatus(id, "ready");
+                    refreshBackoff[id] = DateTimeOffset.UtcNow.AddSeconds(30);
+                    throw new AuthFailure("auth_temporarily_unavailable");
+                }
                 // Token endpoint may have rotated while the response was lost. Never reuse blindly.
-                health[id] = "reauth_required";
-                vault.RequireReauthorization(id);
-                throw new AuthFailure("refresh_outcome_unknown");
-            }
-            catch (HttpRequestException)
-            {
                 health[id] = "reauth_required";
                 vault.RequireReauthorization(id);
                 throw new AuthFailure("refresh_outcome_unknown");
             }
             try
             {
-                if (token.IdToken.Length > 0 && await ValidateIdTokenAsync(token.IdToken, account.ClientId, null, cancellationToken) != account.Subject)
+                if (!string.IsNullOrEmpty(token.IdToken) && await ValidateIdTokenAsync(token.IdToken, account.ClientId, null, refreshToken) != account.Subject)
                     throw new AuthFailure("account_identity_mismatch");
+            }
+            catch (OperationCanceledException)
+            {
+                health[id] = "reauth_required"; vault.RequireReauthorization(id);
+                throw new AuthFailure("refresh_validation_timeout");
             }
             catch { health[id] = "reauth_required"; vault.RequireReauthorization(id); throw; }
             try { vault.ReplaceTokens(id, account.RefreshToken, token); }
             catch
             { health[id] = "reauth_required"; throw new AuthFailure("rotated_token_persistence_failed"); }
-            health.TryRemove(id, out _); refreshBackoff.TryRemove(id, out _); return vault.Find(id)!;
+            health.TryRemove(id, out _); refreshBackoff.TryRemove(id, out _);
+            cancellationToken.ThrowIfCancellationRequested();
+            return vault.Find(id)!;
         }
         finally { refreshLock.Release(); }
     }
@@ -139,32 +152,43 @@ public sealed class OAuth(HttpClient http, Vault vault)
         if (string.IsNullOrWhiteSpace(jwt.Subject)) throw new AuthFailure("missing_account_subject");
         return jwt.Subject;
     }
-    private async Task<TokenResponse> RefreshNativeAsync(AccountCredential account, CancellationToken cancellationToken)
+    private async Task<TokenResponse> RefreshNativeAsync(AccountCredential account, CancellationToken cancellationToken, Action requestStarted)
     {
         // Matches the pinned official codex-login native refresh wire shape; separate from SIWC.
+        cancellationToken.ThrowIfCancellationRequested(); requestStarted();
         using var response = await http.PostAsJsonAsync(Issuer + "/oauth/token", new
         { grant_type = "refresh_token", client_id = account.ClientId, refresh_token = account.RefreshToken }, cancellationToken);
         var text = await ReadLimitedAsync(response.Content, cancellationToken);
         if (!response.IsSuccessStatusCode) throw new AuthFailure(response.StatusCode is HttpStatusCode.BadRequest or HttpStatusCode.Unauthorized ? "reauth_required" : "auth_temporarily_unavailable");
-        var token = JsonSerializer.Deserialize<TokenResponse>(text) ?? throw new AuthFailure("invalid_token_response");
-        if (string.IsNullOrEmpty(token.AccessToken)) throw new AuthFailure("invalid_token_response");
-        if (string.IsNullOrEmpty(token.RefreshToken)) token.RefreshToken = account.RefreshToken;
-        var seconds = (new JsonWebToken(token.AccessToken).ValidTo - DateTime.UtcNow).TotalSeconds;
-        if (seconds < 1) throw new AuthFailure("invalid_token_expiry");
-        token.Scope = "native_codex"; token.ExpiresIn = (int)Math.Min(seconds, 86400);
-        if (!string.IsNullOrEmpty(token.IdToken))
+        try
         {
-            var jwt = new JsonWebToken(token.IdToken);
-            if (!jwt.TryGetClaim("https://api.openai.com/auth", out var metadata)) throw new AuthFailure("native_account_metadata_missing");
-            using var claims = JsonDocument.Parse(metadata.Value);
-            if (claims.RootElement.GetProperty("chatgpt_account_id").GetString() != account.BackendAccountId) throw new AuthFailure("account_identity_mismatch");
+            var token = JsonSerializer.Deserialize<TokenResponse>(text) ?? throw new AuthFailure("invalid_token_response");
+            if (string.IsNullOrEmpty(token.AccessToken)) throw new AuthFailure("invalid_token_response");
+            if (string.IsNullOrEmpty(token.RefreshToken)) token.RefreshToken = account.RefreshToken;
+            var seconds = (new JsonWebToken(token.AccessToken).ValidTo - DateTime.UtcNow).TotalSeconds;
+            if (seconds < 1) throw new AuthFailure("invalid_token_expiry");
+            token.Scope = "native_codex"; token.ExpiresIn = (int)Math.Min(seconds, 86400);
+            if (!string.IsNullOrEmpty(token.IdToken))
+            {
+                var jwt = new JsonWebToken(token.IdToken);
+                if (!jwt.TryGetClaim("https://api.openai.com/auth", out var metadata)) throw new AuthFailure("native_account_metadata_missing");
+                using var claims = JsonDocument.Parse(metadata.Value);
+                if (claims.RootElement.ValueKind != JsonValueKind.Object
+                    || !claims.RootElement.TryGetProperty("chatgpt_account_id", out var accountValue)
+                    || accountValue.ValueKind != JsonValueKind.String)
+                    throw new AuthFailure("invalid_token_response");
+                if (accountValue.GetString() != account.BackendAccountId) throw new AuthFailure("account_identity_mismatch");
+            }
+            return token;
         }
-        return token;
+        catch (Exception ex) when (ex is JsonException or ArgumentException or InvalidOperationException or FormatException or OverflowException)
+        { throw new AuthFailure("invalid_token_response"); }
     }
 
-    private async Task<TokenResponse> ExchangeAsync(Dictionary<string, string> fields, CancellationToken cancellationToken)
+    private async Task<TokenResponse> ExchangeAsync(Dictionary<string, string> fields, CancellationToken cancellationToken, Action? requestStarted = null)
     {
         var endpoints = await GetMetadataAsync(cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested(); requestStarted?.Invoke();
         using var response = await http.PostAsync(endpoints.Token, new FormUrlEncodedContent(fields), cancellationToken);
         var text = await ReadLimitedAsync(response.Content, cancellationToken);
         if (!response.IsSuccessStatusCode)

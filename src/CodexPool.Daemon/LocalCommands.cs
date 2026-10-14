@@ -10,6 +10,24 @@ namespace CodexPool.Daemon;
 public static class LocalCommands
 {
     public static bool EqualSecret(string a, string b) => CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(a), Encoding.UTF8.GetBytes(b));
+    public static PoolSettings? ParseSettings(string[] args)
+    {
+        if (args.Length is not (2 or 3 or 4) || args[0] is not ("on" or "off")
+            || !double.TryParse(args[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var five)) return null;
+        var settings = new PoolSettings(args[0] == "on", WindowThreshold: five);
+        if (args.Length >= 3)
+        {
+            if (!double.TryParse(args[2], NumberStyles.Float, CultureInfo.InvariantCulture, out var weekly)) return null;
+            settings = new(args[0] == "on", five, weekly);
+        }
+        if (args.Length == 4 && args[3] != "null")
+        {
+            if (!double.TryParse(args[3], NumberStyles.Float, CultureInfo.InvariantCulture, out var window)) return null;
+            settings = settings with { WindowThreshold = window };
+        }
+        try { StickyScheduler.Validate(settings); return settings; }
+        catch (ArgumentException) { return null; }
+    }
     public static async Task<int> RunAsync(string command, string[] args, string directory)
     {
         if (command == "help")
@@ -37,17 +55,10 @@ public static class LocalCommands
         }
         using var client = new HttpClient(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(30) };
         client.DefaultRequestHeaders.Authorization = new("Bearer", key);
-        if (command == "settings" && args.Length is 0 or 2 or 3)
+        if (command == "settings" && args.Length is 0 or 2 or 3 or 4)
         {
             if (args.Length == 0) { Console.WriteLine(await client.GetStringAsync("http://127.0.0.1:3210/settings")); return 0; }
-            if (args[0] is not ("on" or "off") || !double.TryParse(args[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var five)) return 1;
-            var settings = new PoolSettings(args[0] == "on", WindowThreshold: five);
-            if (args.Length == 3)
-            {
-                if (!double.TryParse(args[2], NumberStyles.Float, CultureInfo.InvariantCulture, out var weekly)) return 1;
-                settings = new(args[0] == "on", five, weekly);
-            }
-            StickyScheduler.Validate(settings);
+            var settings = ParseSettings(args); if (settings is null) return 1;
             using var response = await client.PostAsJsonAsync("http://127.0.0.1:3210/settings", settings); response.EnsureSuccessStatusCode();
             Console.WriteLine(await response.Content.ReadAsStringAsync()); return 0;
         }

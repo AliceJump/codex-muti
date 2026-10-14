@@ -7,6 +7,8 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
 {
     private readonly object gate = new();
     private long requestsStarted;
+    private string? quotaSelectionError;
+    public string? QuotaSelectionError { get { lock (gate) return quotaSelectionError; } }
     private readonly Dictionary<string, (ModelError Error, DateTimeOffset Until)> failures = new(StringComparer.Ordinal);
     private readonly StickyScheduler scheduler = new(vault.ActiveId, id =>
     { if (!vault.ActivateForProbe(id)) throw new NoEligibleAccountException(); });
@@ -120,6 +122,17 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
             var probe = new StickyScheduler(scheduler.Active);
             try { probe.Select(RoutingAccounts(model), Settings, DateTimeOffset.UtcNow); return true; }
             catch (NoEligibleAccountException) { return false; }
+        }
+    }
+    public void SelectAfterQuotaRefresh()
+    {
+        lock (gate)
+        {
+            if (!Settings.AutoSwitch) return;
+            try { Select(); quotaSelectionError = null; }
+            catch (NoEligibleAccountException) { quotaSelectionError = null; }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.Cryptography.CryptographicException)
+            { quotaSelectionError = "quota_selection_persistence_failed"; }
         }
     }
     public void Activate(string id)

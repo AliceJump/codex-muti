@@ -100,7 +100,8 @@ try
     app.MapGet("/health", () => new { status = "running", stage = "acceptance", automaticSwitching = pool.Settings.AutoSwitch });
     object Status() => new { activeAccountId = vault.ActiveId, stage = "acceptance", automaticSwitching = pool.Settings.AutoSwitch, settings = pool.Settings,
         boundaryProbe, distinctUsers = vault.DistinctUsers, nativeDistinctUsers = vault.NativeDistinctUsers, liveMigrationValidated = false, quotaSource = "per_registration", accounts = vault.Views(auth.Health), accountAvailability = pool.Availability(),
-        nativeLoginAttempts = nativeLogin.PublicAttempts, usage = quota.Views, tokenStatistics = statistics.View(), inFlightRequests = inFlight.ToArray(), recentRequests = recent.ToArray(), recentSwitches = pool.History };
+        nativeLoginAttempts = nativeLogin.PublicAttempts, usage = quota.Views, quotaRefreshErrors = quota.RefreshErrors, quotaSelectionError = pool.QuotaSelectionError,
+        tokenStatistics = statistics.View(), inFlightRequests = inFlight.ToArray(), recentRequests = recent.ToArray(), recentSwitches = pool.History };
     app.MapGet("/status", () => Status());
     app.MapGet("/statistics", () => statistics.View());
     app.MapGet("/events", (HttpContext context) => events.StreamAsync(context, Status));
@@ -120,11 +121,9 @@ try
     app.MapGet("/accounts", () => vault.Views(auth.Health));
     app.MapGet("/usage", async (HttpContext context) =>
     {
-        foreach (var account in vault.Accounts.Where(x => x.ProviderKind == "native"))
-            try { await quota.RefreshAsync(account.Id, context.RequestAborted); }
-            catch (AuthFailure ex) when (ex.Code == "account_not_found") { }
+        await quota.RefreshAllAsync(vault.Accounts.Where(x => x.ProviderKind == "native").Select(x => x.Id), context.RequestAborted);
         // Reuse sticky auto-switch after explicit refresh so exhausted weekly/5h can fail over without waiting for a model request.
-        if (pool.Settings.AutoSwitch) try { pool.Select(); } catch (NoEligibleAccountException) { }
+        pool.SelectAfterQuotaRefresh();
         return quota.Views;
     });
     // ChatGPT Desktop / Codex 在 chatgpt_base_url 或 CODEX_API_BASE_URL 指向本机时读取用量；按池可用性改写 allowed。
@@ -334,10 +333,9 @@ try
         {
             while (await timer.WaitForNextTickAsync(app.Lifetime.ApplicationStopping))
             {
-                foreach (var account in vault.Accounts.Where(x => x.ProviderKind == "native" && x.Enabled && x.AuthStatus == "ready"))
-                    try { await quota.RefreshAsync(account.Id, app.Lifetime.ApplicationStopping); }
-                    catch (Exception ex) when (ex is AuthFailure or HttpRequestException or JsonException or OperationCanceledException) { }
-                if (pool.Settings.AutoSwitch) try { pool.Select(); } catch (NoEligibleAccountException) { }
+                await quota.RefreshAllAsync(vault.Accounts.Where(x => x.ProviderKind == "native" && x.Enabled && x.AuthStatus == "ready")
+                    .Select(x => x.Id), app.Lifetime.ApplicationStopping);
+                pool.SelectAfterQuotaRefresh();
             }
         }
         catch (OperationCanceledException) when (app.Lifetime.ApplicationStopping.IsCancellationRequested) { }

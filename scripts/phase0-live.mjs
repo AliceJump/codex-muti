@@ -26,6 +26,8 @@ const accountB = initial.accounts.find(x => x.provider === profile && x.name ===
 assert(accountA && accountB);
 const autoTest = profile === 'native' && process.env.CODEX_POOL_TEST_AUTO === '1';
 const originalSettings = initial.settings;
+const restoreSettings = (automatic = originalSettings.autoSwitch) => control(['settings', automatic ? 'on' : 'off',
+  String(originalSettings.fiveHourThreshold), String(originalSettings.weeklyThreshold), String(originalSettings.windowThreshold ?? 'null')]);
 let autoThresholds;
 if (autoTest) {
   const usage = JSON.parse(await control(['usage']));
@@ -115,7 +117,7 @@ try {
   if (autoTest) {
     assert.equal(JSON.parse(await control(['status'])).activeAccountId, accountA.id, 'Real 5h threshold selects native A');
     summary.automaticThresholdSwitches = ['weekly_threshold:A->B', '5h_threshold:B->A'];
-    await control(['settings', 'off', String(originalSettings.fiveHourThreshold), String(originalSettings.weeklyThreshold)]);
+    await restoreSettings(false);
   }
   await rpc.close('before-resume'); rpc = startRpc(); await rpc.initialize(); await rpc.call('thread/resume', { threadId });
   await control(['activate', accountB.id]);
@@ -145,7 +147,9 @@ try {
   await writeFile(join(scratch, 'summary.json'), JSON.stringify(summary, null, 2));
   console.error(`Live gate not passed: ${error.message}\nEvidence: ${scratch}`); process.exitCode = 1;
 } finally {
-  if (rpc) await rpc.close('final');
-  if (autoTest) await control(['settings', originalSettings.autoSwitch ? 'on' : 'off', String(originalSettings.fiveHourThreshold), String(originalSettings.weeklyThreshold)]);
-  await control(['activate', accountA.id]);
+  try { if (rpc) await rpc.close('final'); }
+  finally {
+    try { if (autoTest) await restoreSettings(); }
+    finally { await control(['activate', accountA.id]); }
+  }
 }

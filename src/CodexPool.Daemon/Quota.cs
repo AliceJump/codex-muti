@@ -1,12 +1,14 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Security.Cryptography;
 
 namespace CodexPool.Daemon;
 
 public sealed record QuotaWindow(string Kind, int? WindowSeconds, double UsedPercent, double RemainingPercent, DateTimeOffset? ResetAt,
     string LimitId = "codex", string? Model = null, string? LimitName = null);
 public sealed record QuotaCredits(bool HasCredits, bool Unlimited, decimal? Balance);
+public sealed record QuotaRefreshFailure(string AccountId, string Code, DateTimeOffset At);
 public sealed record QuotaSnapshot(string AccountId, string Source, string? Plan, DateTimeOffset UpdatedAt, IReadOnlyList<QuotaWindow> Windows,
     bool? Allowed = null, bool? LimitReached = null, QuotaCredits? Credits = null, bool? SpendControlReached = null,
     string WindowState = "unknown")
@@ -21,10 +23,35 @@ public sealed class Quota(HttpClient http, OAuth auth, Vault vault)
 {
     private readonly ConcurrentDictionary<string, QuotaSnapshot> snapshots = new(vault.Quotas.Select(x => new KeyValuePair<string, QuotaSnapshot>(x.AccountId, x)));
     private readonly ConcurrentDictionary<string, SemaphoreSlim> locks = new();
+    private readonly ConcurrentDictionary<string, QuotaRefreshFailure> refreshFailures = new();
+    public QuotaRefreshFailure[] RefreshErrors => refreshFailures.Values.Where(x => vault.Find(x.AccountId) is not null).ToArray();
     public object View(string id) => snapshots.TryGetValue(id, out var snapshot) ? snapshot : new { accountId = id, available = false, reason = "quota_source_unverified" };
     public object[] Views => vault.Accounts.Select(x => View(x.Id)).ToArray();
     public QuotaSnapshot? Snapshot(string id) => snapshots.GetValueOrDefault(id);
-    public void Forget(string id) => snapshots.TryRemove(id, out _);
+    public void Forget(string id) { snapshots.TryRemove(id, out _); refreshFailures.TryRemove(id, out _); }
+    public async Task RefreshAllAsync(IEnumerable<string> accountIds, CancellationToken cancellationToken)
+    {
+        foreach (var id in accountIds.ToArray())
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try { await RefreshAsync(id, cancellationToken); }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch (AuthFailure ex) when (ex.Code == "account_not_found") { Forget(id); }
+            catch (Exception ex) when (ex is AuthFailure or HttpRequestException or JsonException or IOException
+                or UnauthorizedAccessException or CryptographicException or OperationCanceledException)
+            {
+                // Only fixed classifications leave this boundary; never exception
+                // text, token payloads or upstream response bodies.
+                var code = ex switch
+                {
+                    AuthFailure => "quota_auth_unavailable", HttpRequestException => "quota_network_unavailable",
+                    JsonException => "invalid_quota_response", OperationCanceledException => "quota_refresh_timeout",
+                    _ => "quota_storage_or_io_failed"
+                };
+                refreshFailures[id] = new(id, code, DateTimeOffset.UtcNow);
+            }
+        }
+    }
     public async Task<object> RefreshAsync(string id, CancellationToken cancellationToken)
     {
         using var use = vault.AcquireUse(id);
@@ -40,12 +67,17 @@ public sealed class Quota(HttpClient http, OAuth auth, Vault vault)
             request.Headers.TryAddWithoutValidation("ChatGPT-Account-Id", account.BackendAccountId);
             request.Headers.UserAgent.ParseAdd("codex_pool/0.1.0");
             using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-            if (!response.IsSuccessStatusCode) return new { accountId = id, available = false, reason = "native_quota_unavailable", status = (int)response.StatusCode };
+            if (!response.IsSuccessStatusCode)
+            {
+                refreshFailures[id] = new(id, "native_quota_unavailable", DateTimeOffset.UtcNow);
+                return new { accountId = id, available = false, reason = "native_quota_unavailable", status = (int)response.StatusCode };
+            }
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
             using var buffer = new MemoryStream(); var bytes = new byte[8192];
             while (true) { var count = await stream.ReadAsync(bytes, cancellationToken); if (count == 0) break;
                 if (buffer.Length + count > 512 * 1024) throw new AuthFailure("oversized_quota_response"); buffer.Write(bytes, 0, count); }
-            var snapshot = Parse(id, buffer.ToArray()); vault.SaveQuota(snapshot); snapshots[id] = snapshot; return snapshot;
+            var snapshot = Parse(id, buffer.ToArray()); vault.SaveQuota(snapshot); snapshots[id] = snapshot;
+            refreshFailures.TryRemove(id, out _); return snapshot;
         }
         finally { singleFlight.Release(); }
     }

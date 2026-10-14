@@ -43,7 +43,13 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Concurrent token accounting is exact and failed writes retry without losing history", UsageConcurrency),
     ("Quota preserves arbitrary, absent, optional and scoped windows plus credit metadata", DynamicQuotaParser),
     ("Generic routing honors credits, explicit denial, budgets, model scope and stale snapshots", DynamicQuotaRouting),
-    ("WHAM usage rewrite exposes pool allowed shape for Desktop chatgpt_base_url", WhamUsageRewrite)
+    ("WHAM usage rewrite exposes pool allowed shape for Desktop chatgpt_base_url", WhamUsageRewrite),
+    ("Caller cancellation cannot abandon an accepted refresh rotation", RefreshCancellation),
+    ("Refresh timeouts distinguish discovery, exchange and identity validation", RefreshTimeoutStages),
+    ("Malformed native rotations fail closed without reusing credentials", NativeMalformedRefresh),
+    ("Quota batches isolate account IO and auth faults, recover, and preserve cancellation", QuotaBatchFailures),
+    ("Quota selection survives persistence faults without changing the owner", QuotaSelectionFailure),
+    ("Settings restoration preserves unified and legacy thresholds exactly", SettingsRestoration)
 };
 if (args.Length != 0)
 {
@@ -319,6 +325,141 @@ async Task NativeRefresh()
     var old = vault.Find("A")!.RefreshToken; issuer.OmitNativeRefresh = true;
     await oauth.ReadyAsync("A", default, forceRefresh: true);
     Check(vault.Find("A")!.RefreshToken == old && vault.Find("A")!.AuthStatus == "ready");
+}
+async Task RefreshCancellation()
+{
+    var vault = Store("refresh-caller-cancellation"); vault.Add(Account("A"));
+    using var issuer = new FakeIssuer(); using var http = new HttpClient(issuer); var auth = new OAuth(http, vault);
+    var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    issuer.Barrier = async token => { entered.TrySetResult(); await release.Task.WaitAsync(token); };
+    using var caller = new CancellationTokenSource();
+    var refreshing = auth.ReadyAsync("A", caller.Token, forceRefresh: true);
+    try
+    {
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(3)); caller.Cancel();
+        using var waiter = new CancellationTokenSource(); waiter.Cancel();
+        try { await auth.ReadyAsync("A", waiter.Token); Check(false); } catch (OperationCanceledException) { }
+    }
+    finally { release.TrySetResult(); }
+    try { await refreshing; Check(false); } catch (OperationCanceledException) { }
+    Check(issuer.RefreshCalls == 1 && vault.Find("A")!.AuthStatus == "ready" && auth.Health("A") is null);
+    Check(vault.Find("A")!.RefreshToken != "REFRESH-CANARY-A");
+    await auth.ReadyAsync("A", default); Check(issuer.RefreshCalls == 1);
+}
+async Task RefreshTimeoutStages()
+{
+    foreach (var stage in new[] { "discovery", "exchange", "validation" })
+    {
+        var vault = Store("refresh-timeout-" + stage); vault.Add(Account("A"));
+        using var issuer = new FakeIssuer(); using var http = new HttpClient(issuer); var auth = new OAuth(http, vault);
+        var started = 0;
+        Task TimeoutAtStage(CancellationToken _) { started++; throw new OperationCanceledException(); }
+        if (stage == "discovery") issuer.DiscoveryBarrier = TimeoutAtStage;
+        if (stage == "exchange") issuer.Barrier = TimeoutAtStage;
+        if (stage == "validation") issuer.JwksBarrier = TimeoutAtStage;
+        var expected = stage == "discovery" ? "auth_temporarily_unavailable" : stage == "exchange" ? "refresh_outcome_unknown" : "refresh_validation_timeout";
+        try { await auth.ReadyAsync("A", default, forceRefresh: true); Check(false); }
+        catch (AuthFailure ex) { Check(ex.Code == expected); }
+        Check(started == 1 && vault.Find("A")!.RefreshToken == "REFRESH-CANARY-A");
+        Check(vault.Find("A")!.AuthStatus == (stage == "discovery" ? "ready" : "reauth_required"));
+        Check(issuer.RefreshCalls == (stage == "validation" ? 1 : 0));
+        await Rejected(() => auth.ReadyAsync("A", default)); Check(started == 1);
+    }
+}
+async Task NativeMalformedRefresh()
+{
+    using var issuer = new FakeIssuer(); using var http = new HttpClient(issuer);
+    var access = issuer.Token("native-access", "sub-A", null);
+    var cases = new[]
+    {
+        "{", "[]", "{\"access_token\":null}", "{\"access_token\":\"bad-jwt\"}",
+        JsonSerializer.Serialize(new { access_token = access, id_token = "bad-jwt" }),
+        JsonSerializer.Serialize(new { access_token = access, id_token = issuer.Token(NativeLogin.NativeClientId, "sub-A", null,
+            nativeMetadata: new Dictionary<string, object> { ["other"] = "value" }) }),
+        JsonSerializer.Serialize(new { access_token = access, id_token = issuer.Token(NativeLogin.NativeClientId, "sub-A", null,
+            nativeMetadata: new Dictionary<string, object> { ["chatgpt_account_id"] = 7 }) })
+    };
+    for (var i = 0; i < cases.Length; i++)
+    {
+        var vault = Store("malformed-native-" + i); var template = Account("A");
+        var account = new AccountCredential { Id = "A", Name = "A", Subject = template.Subject, ClientId = NativeLogin.NativeClientId,
+            ProviderKind = "native", BackendAccountId = "backend-A", AccessToken = template.AccessToken, RefreshToken = template.RefreshToken,
+            IdToken = template.IdToken, Scope = "native_codex", ExpiresAt = template.ExpiresAt };
+        vault.Add(account);
+        issuer.NativeResponseBody = cases[i]; var before = issuer.RefreshCalls;
+        var auth = new OAuth(http, vault);
+        try { await auth.ReadyAsync("A", default, forceRefresh: true); Check(false); }
+        catch (AuthFailure ex) { Check(ex.Code == "invalid_token_response"); }
+        Check(vault.Find("A")!.AuthStatus == "reauth_required" && vault.Find("A")!.RefreshToken == account.RefreshToken);
+        await Rejected(() => auth.ReadyAsync("A", default)); Check(issuer.RefreshCalls == before + 1);
+    }
+}
+async Task QuotaBatchFailures()
+{
+    Vault NativeVault(string name)
+    {
+        var created = Store(name);
+        foreach (var id in new[] { "A", "B" }) { var account = Account(id); account.ProviderKind = "native"; account.BackendAccountId = "backend-" + id; account.ExpiresAt = DateTimeOffset.UtcNow.AddHours(1); created.Add(account); }
+        return created;
+    }
+    using var issuer = new FakeIssuer(); using var authHttp = new HttpClient(issuer);
+    var calls = new List<string>(); Exception? failure = new IOException("IO-CANARY");
+    using var quotaHttp = new HttpClient(new AsyncHandler((request, _) =>
+    {
+        var id = request.Headers.GetValues("ChatGPT-Account-Id").Single(); calls.Add(id);
+        if (id == "backend-A" && failure is not null) throw failure;
+        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"plan_type\":\"plus\",\"rate_limit\":{\"allowed\":true}}") });
+    }));
+    var sequence = 0;
+    foreach (var error in new Exception[] { new IOException("IO-CANARY"), new UnauthorizedAccessException("IO-CANARY"), new CryptographicException("IO-CANARY"),
+        new HttpRequestException("NETWORK-CANARY"), new JsonException("JSON-CANARY"), new AuthFailure("synthetic_auth_failure"), new OperationCanceledException() })
+    {
+        var fixture = NativeVault("quota-batch-" + sequence++); var fixtureAuth = new OAuth(authHttp, fixture);
+        failure = error; calls.Clear(); var quota = new Quota(quotaHttp, fixtureAuth, fixture);
+        await quota.RefreshAllAsync(["A", "B"], default);
+        Check(quota.RefreshErrors.Single().AccountId == "A" && !JsonSerializer.Serialize(quota.RefreshErrors).Contains("CANARY"));
+        Check(quota.Snapshot("B") is not null && calls.SequenceEqual(new[] { "backend-A", "backend-B" }));
+        failure = null; await quota.RefreshAllAsync(["A", "B"], default);
+        Check(quota.RefreshErrors.Length == 0 && quota.Snapshot("A") is not null);
+    }
+    var vault = NativeVault("quota-batch-cancel"); var auth = new OAuth(authHttp, vault);
+    var cancelled = new Quota(quotaHttp, auth, vault); using var cancellation = new CancellationTokenSource(); cancellation.Cancel(); calls.Clear();
+    try { await cancelled.RefreshAllAsync(["A", "B"], cancellation.Token); Check(false); } catch (OperationCanceledException) { }
+    Check(calls.Count == 0 && cancelled.RefreshErrors.Length == 0);
+    var blockingStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    using var blockingHttp = new HttpClient(new AsyncHandler(async (_, token) => { blockingStarted.TrySetResult(); await Task.Delay(Timeout.Infinite, token); throw new InvalidOperationException(); }));
+    var blocking = new Quota(blockingHttp, auth, vault); using var midway = new CancellationTokenSource();
+    var polling = blocking.RefreshAllAsync(["A", "B"], midway.Token);
+    await blockingStarted.Task.WaitAsync(TimeSpan.FromSeconds(3)); midway.Cancel();
+    try { await polling; Check(false); } catch (OperationCanceledException) { }
+    Check(blocking.RefreshErrors.Length == 0);
+}
+Task QuotaSelectionFailure()
+{
+    var vault = Store("quota-selection-io"); vault.Add(Account("A")); vault.Add(Account("B")); vault.SaveSettings(new(true)); vault.Control("A", "pause");
+    using var issuer = new FakeIssuer(); using var http = new HttpClient(issuer); var auth = new OAuth(http, vault);
+    var pool = new PoolRuntime(vault, auth, new Quota(http, auth, vault), true);
+    using (var locked = new FileStream(Path.Combine(root, "quota-selection-io", "vault.dpapi"), FileMode.Open, FileAccess.Read, FileShare.Read))
+    {
+        pool.SelectAfterQuotaRefresh();
+        Check(pool.QuotaSelectionError == "quota_selection_persistence_failed" && pool.Active == "A" && pool.History.Length == 0);
+    }
+    pool.SelectAfterQuotaRefresh(); Check(pool.QuotaSelectionError is null && pool.Active == "B" && vault.ActiveId == "B");
+    return Task.CompletedTask;
+}
+Task SettingsRestoration()
+{
+    foreach (var original in new[] { new PoolSettings(true, 83, 91, 88), new PoolSettings(false, 81, 89), new PoolSettings(false, 80, 90, 87.5) })
+    {
+        var restored = LocalCommands.ParseSettings([original.AutoSwitch ? "on" : "off", original.FiveHourThreshold.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            original.WeeklyThreshold.ToString(System.Globalization.CultureInfo.InvariantCulture), original.WindowThreshold?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "null"]);
+        Check(restored == original);
+    }
+    Check(LocalCommands.ParseSettings(["on", "90"]) == new PoolSettings(true, WindowThreshold: 90));
+    Check(LocalCommands.ParseSettings(["off", "80", "90"]) == new PoolSettings(false, 80, 90));
+    Check(LocalCommands.ParseSettings(["off", "80", "90", "NaN"]) is null);
+    return Task.CompletedTask;
 }
 Task QuotaParser()
 {
@@ -838,16 +979,20 @@ sealed class FakeIssuer : HttpMessageHandler
     public bool RejectRefresh { get; set; }
     public bool RejectRefreshAOnly { get; set; }
     public bool OmitNativeRefresh { get; set; }
+    public string? NativeResponseBody { get; set; }
     public Func<CancellationToken, Task>? Barrier { get; set; }
+    public Func<CancellationToken, Task>? DiscoveryBarrier { get; set; }
+    public Func<CancellationToken, Task>? JwksBarrier { get; set; }
     public int RefreshCalls { get; private set; }
     public int CodeCalls { get; private set; }
     public bool ValidPkce { get; private set; }
     public List<string> UsedRefreshTokens { get; } = [];
-    public string Token(string audience, string subject, string? nonce, string issuer = "https://auth.openai.com", bool expired = false, bool forged = false, string? nativeAccountId = null)
+    public string Token(string audience, string subject, string? nonce, string issuer = "https://auth.openai.com", bool expired = false, bool forged = false, string? nativeAccountId = null, object? nativeMetadata = null)
     {
         using var other = RSA.Create(2048); var key = new RsaSecurityKey(forged ? other : signing) { KeyId = "fixture-key" };
         var claims = new Dictionary<string, object> { ["sub"] = subject }; if (nonce is not null) claims["nonce"] = nonce;
         if (nativeAccountId is not null) claims["https://api.openai.com/auth"] = new Dictionary<string, object> { ["chatgpt_account_id"] = nativeAccountId };
+        if (nativeMetadata is not null) claims["https://api.openai.com/auth"] = nativeMetadata;
         var now = DateTime.UtcNow;
         return new JsonWebTokenHandler().CreateToken(new SecurityTokenDescriptor { Issuer = issuer, Audience = audience, Claims = claims,
             IssuedAt = now.AddHours(-2), NotBefore = now.AddHours(-2), Expires = expired ? now.AddMinutes(-10) : now.AddHours(1),
@@ -856,9 +1001,14 @@ sealed class FakeIssuer : HttpMessageHandler
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         var path = request.RequestUri!.AbsolutePath;
-        if (path == "/.well-known/openid-configuration") return Json(new { issuer = "https://auth.openai.com", authorization_endpoint = "https://auth.openai.com/api/accounts/authorize", token_endpoint = "https://auth.openai.com/api/accounts/oauth/token", jwks_uri = "https://auth.openai.com/.well-known/jwks.json" });
+        if (path == "/.well-known/openid-configuration")
+        {
+            if (DiscoveryBarrier is not null) await DiscoveryBarrier(cancellationToken);
+            return Json(new { issuer = "https://auth.openai.com", authorization_endpoint = "https://auth.openai.com/api/accounts/authorize", token_endpoint = "https://auth.openai.com/api/accounts/oauth/token", jwks_uri = "https://auth.openai.com/.well-known/jwks.json" });
+        }
         if (path == "/.well-known/jwks.json")
         {
+            if (JwksBarrier is not null) await JwksBarrier(cancellationToken);
             var key = signing.ExportParameters(false);
             return Json(new { keys = new[] { new { kty = "RSA", kid = "fixture-key", use = "sig", alg = "RS256", n = Base64UrlEncoder.Encode(key.Modulus!), e = Base64UrlEncoder.Encode(key.Exponent!) } } });
         }
@@ -869,6 +1019,7 @@ sealed class FakeIssuer : HttpMessageHandler
             using var native = JsonDocument.Parse(await request.Content.ReadAsStringAsync(cancellationToken)); var nativeFields = native.RootElement;
             if (nativeFields.GetProperty("client_id").GetString() != NativeLogin.NativeClientId || nativeFields.TryGetProperty("resource", out _)) throw new InvalidOperationException();
             var old = nativeFields.GetProperty("refresh_token").GetString()!; UsedRefreshTokens.Add(old); RefreshCalls++;
+            if (NativeResponseBody is not null) return new(HttpStatusCode.OK) { Content = new StringContent(NativeResponseBody, Encoding.UTF8, "application/json") };
             var id = old.Split('-').Last();
             return Json(new { access_token = Token("native-access", "sub-" + id, null),
                 refresh_token = OmitNativeRefresh ? "" : "native-refresh-" + RefreshCalls + "-" + id,
