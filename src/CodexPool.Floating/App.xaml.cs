@@ -10,24 +10,25 @@ public partial class App : System.Windows.Application
     protected override void OnStartup(System.Windows.StartupEventArgs e)
     {
         base.OnStartup(e);
-        var widget = e.Args.Any(x => x is "--tray" or "--widget");
-        var instance = widget ? "CodexPoolWidget" : "CodexPoolFloating";
-        owner = new Mutex(true, "Local\\" + instance + "-" + Environment.UserName, out var first);
+        const string instance = "CodexPoolWidget";
         var signalName = "Local\\" + instance + "Show-" + Environment.UserName;
+        // Hold the event before claiming ownership so a concurrent launcher can
+        // queue its wake-up even while the first window is being constructed.
+        showSignal = new EventWaitHandle(false, EventResetMode.AutoReset, signalName);
+        owner = new Mutex(true, "Local\\" + instance + "-" + Environment.UserName, out var first);
         if (!first)
         {
-            try { using var signal = EventWaitHandle.OpenExisting(signalName); signal.Set(); } catch (WaitHandleCannotBeOpenedException) { }
+            showSignal.Set();
             owner.Dispose(); owner = null; Shutdown(); return;
         }
-        var window = new FloatingWindow(widget) { ShowInTaskbar = e.Args.Contains("--review", StringComparer.Ordinal) };
-        showSignal = new EventWaitHandle(false, EventResetMode.AutoReset, signalName);
+        var window = new FloatingWindow() { ShowInTaskbar = e.Args.Contains("--review", StringComparer.Ordinal) };
         showListener = ThreadPool.RegisterWaitForSingleObject(showSignal, (_, _) => window.Dispatcher.BeginInvoke(window.ShowFromLauncher), null, Timeout.Infinite, false);
         MainWindow = window;
         // Initialize the HWND, tray and event subscription without flashing a desktop card.
-        window.ShowActivated = !widget;
-        if (widget) window.Opacity = 0;
-        window.Show();
-        if (widget) { window.Hide(); window.Opacity = 1; }
+        window.ShowActivated = false;
+        window.Opacity = 0;
+        window.Show(); window.Hide(); window.Opacity = 1; window.ShowActivated = true;
+        if (window.Pinned || !e.Args.Any(x => x is "--tray" or "--widget")) window.ShowFromLauncher();
     }
     protected override void OnExit(System.Windows.ExitEventArgs e)
     {

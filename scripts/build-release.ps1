@@ -4,14 +4,14 @@ $ErrorActionPreference = 'Stop'
 $taskRoot = Split-Path $PSScriptRoot -Parent
 $taskRelease = if ($OutputDirectory) { [IO.Path]::GetFullPath($OutputDirectory) } else { Join-Path $taskRoot '.local\release' }
 $taskMode = if ($SelfContained) { 'true' } else { 'false' }
-$taskProjects = if ($Target -eq 'Core') { @('Daemon') } elseif ($Target -eq 'Components') { @('Floating') } else { @('Daemon','Floating') }
+$taskProjects = if ($Target -eq 'Components') { @() } else { @('Daemon') }
 if ($Target -ne 'All') {
     if (-not $BaseDirectory) { throw '首次部署请选择全部；部分部署需要现有完整版本。' }
     $taskBase = [IO.Path]::GetFullPath($BaseDirectory)
     if (-not $taskBase.StartsWith((Join-Path $taskRoot '.local') + '\', [StringComparison]::OrdinalIgnoreCase) -or
         $taskRelease.Equals($taskBase, [StringComparison]::OrdinalIgnoreCase) -or
         $taskRelease.StartsWith($taskBase + '\', [StringComparison]::OrdinalIgnoreCase)) { throw '部分部署的基线或输出目录无效。' }
-    $taskRetain = if ($Target -eq 'Core') { @('Floating','Widget') } else { @('Daemon') }
+    $taskRetain = if ($Target -eq 'Core') { @('Widget') } else { @('Daemon') }
     foreach ($taskKind in $taskRetain) {
         $taskSource = Join-Path $taskBase $taskKind
         $taskExe = if ($taskKind -eq 'Daemon') { 'CodexPool.Daemon.exe' } else { 'CodexPool.Floating.exe' }

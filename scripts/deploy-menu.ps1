@@ -4,7 +4,7 @@ $ErrorActionPreference = 'Stop'
 if (-not $Target) {
     Write-Host '1. 全部部署（核心 + 桌面组件）'
     Write-Host '2. 仅部署核心（代理和 Dashboard）'
-    Write-Host '3. 仅部署桌面组件（托盘和悬浮窗）'
+    Write-Host '3. 仅部署桌面组件（托盘面板）'
     $taskChoice = Read-Host '请选择 [1-3]'
     $Target = switch ($taskChoice) {
         '1' { 'All' }

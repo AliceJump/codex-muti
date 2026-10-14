@@ -36,15 +36,16 @@ foreach ($taskTarget in @('All','Core','Components')) {
     $taskOutput = Join-Path $taskSandbox '.local/new'
     $global:taskPublishCalls = [Collections.Generic.List[string]]::new()
     & (Join-Path $taskSandbox 'scripts/build-release.ps1') -Target $taskTarget -BaseDirectory (Join-Path $taskSandbox '.local/base') -OutputDirectory $taskOutput
-    $taskExpected = if ($taskTarget -eq 'Core') { 'Daemon' } elseif ($taskTarget -eq 'Components') { 'Floating,Widget' } else { 'Daemon,Floating,Widget' }
+    $taskExpected = if ($taskTarget -eq 'Core') { 'Daemon' } elseif ($taskTarget -eq 'Components') { 'Widget' } else { 'Daemon,Widget' }
     Assert-Test (($global:taskPublishCalls -join ',') -eq $taskExpected) "Wrong publish scope: $taskTarget"
-    foreach ($taskKind in @('Daemon','Widget','Floating')) {
+    foreach ($taskKind in @('Daemon','Widget')) {
         $taskExe = if ($taskKind -eq 'Daemon') { 'CodexPool.Daemon.exe' } else { 'CodexPool.Floating.exe' }
         $taskValue = Get-Content -LiteralPath (Join-Path $taskOutput "$taskKind/$taskExe") -Raw
         $taskRetained = ($taskTarget -eq 'Core' -and $taskKind -ne 'Daemon') -or ($taskTarget -eq 'Components' -and $taskKind -eq 'Daemon')
         $taskExpectedValue = "$(if ($taskRetained) {'old'} else {'new'})-$taskKind"
         Assert-Test ($taskValue -eq $taskExpectedValue) "Wrong retained version: $taskTarget/$taskKind actual=$taskValue expected=$taskExpectedValue retained=$taskRetained"
     }
+    Assert-Test (-not (Test-Path -LiteralPath (Join-Path $taskOutput 'Floating'))) 'Removed floating UI was still published or retained.'
     Write-Output "PASS build scope and retained binaries: $taskTarget"
 }
 $taskSandbox = New-TestRoot 'no-baseline'
@@ -142,7 +143,10 @@ function Start-PoolDesktopClient {
         if ($taskTarget -eq 'Core') { Assert-Test ($global:taskTrace.Count -eq 3 -and $global:taskCore.Path -match '[\\/]base[\\/]') 'Old core was not restored.' }
         elseif ($taskCase -eq 'FailComponentsOffline') { Assert-Test ($global:taskTrace -contains 'restore:files' -and $global:taskTrace -notcontains 'restore:ui') 'Offline core was restarted by old UI rollback.' }
         else { Assert-Test ($global:taskTrace -contains 'restore:ui') 'Old UI was not restored.' }
-    } else { Assert-Test ($taskPointer.path -ne (Join-Path $taskSandbox '.local/base')) 'Success did not publish a new pointer.' }
+    } else {
+        Assert-Test ($taskPointer.path -ne (Join-Path $taskSandbox '.local/base')) 'Success did not publish a new pointer.'
+        if ($taskTarget -ne 'Core') { Assert-Test (@($global:taskTrace | Where-Object { $_ -match '^start:ui:' }).Count -eq 1) 'Unified tray panel must start only one UI.' }
+    }
     Write-Output "PASS deployment isolation and recovery: $taskCase"
 }
 $taskMenuRoot = New-TestRoot 'cmd-entry'

@@ -15,7 +15,7 @@ using Forms = System.Windows.Forms;
 
 namespace CodexPool.Floating;
 
-public sealed record WindowPreferences(int X = 80, int Y = 80, int Mode = 0, int Theme = 0, bool Pinned = true, int PositionVersion = 0);
+public sealed record WindowPreferences(int X = 80, int Y = 80, int Mode = 0, int Theme = 0, bool Pinned = false, int PositionVersion = 0);
 public partial class FloatingWindow : Window
 {
     private readonly string directory = Environment.GetEnvironmentVariable("CODEX_POOL_DATA_DIR")
@@ -29,8 +29,7 @@ public partial class FloatingWindow : Window
     private JsonElement? snapshot;
     private bool exiting, busy, connected;
     private readonly bool startServices;
-    private readonly bool widget;
-    private readonly string preferencesFile;
+    private const string PreferencesFile = "widget.json";
     private Forms.Screen? flyoutScreen;
     private System.Drawing.Rectangle? flyoutAnchor;
     private bool positioningFlyout;
@@ -40,23 +39,22 @@ public partial class FloatingWindow : Window
     private long dismissedAt;
     private System.Drawing.Point dismissedPoint;
     private nint handle;
-    public FloatingWindow(bool widget = false) : this(widget, true) { }
-    internal FloatingWindow(bool widget, bool startServices)
+    internal bool Pinned => preferences.Pinned;
+    public FloatingWindow() : this(true) { }
+    internal FloatingWindow(bool startServices)
     {
-        this.widget = widget; this.startServices = startServices;
-        preferencesFile = widget ? "widget.json" : "window.json";
+        this.startServices = startServices;
         InitializeComponent();
-        if (widget) preferences = new(120, 120, Pinned: false);
         if (startServices)
-            try { preferences = JsonSerializer.Deserialize<WindowPreferences>(File.ReadAllText(Path.Combine(directory, preferencesFile))) ?? preferences; } catch { }
+            try { preferences = JsonSerializer.Deserialize<WindowPreferences>(File.ReadAllText(Path.Combine(directory, PreferencesFile))) ?? preferences; } catch { }
         preferences = preferences with { Mode = Math.Clamp(preferences.Mode, 0, 2), Theme = Math.Clamp(preferences.Theme, 0, 2) };
-        Topmost = widget || preferences.Pinned;
-        Title = widget ? "Codex Pool · 托盘面板" : "Codex Pool";
-        Scene.FilterDisabled = widget;
+        Topmost = true;
+        Title = "Codex Pool · 账户面板";
+        Scene.SetPinned(Pinned);
         Scene.ActivateAccount = async id => { if (startServices && !busy && connected) await ActivateAsync(id); };
         Scene.InvokeAction = async action =>
         {
-            if (!startServices && action is "web" or "refresh" or "floating") { SetNotice("独立预览不连接代理或启动其他组件。"); return; }
+            if (!startServices && action is "web" or "refresh") { SetNotice("独立预览不连接代理。"); return; }
             switch (action)
             {
                 case "mode": CycleMode(this, new RoutedEventArgs()); break;
@@ -64,11 +62,11 @@ public partial class FloatingWindow : Window
                 case "close": DismissWindow(this, new RoutedEventArgs()); break;
                 case "web": await DashboardAsync(); break;
                 case "refresh": await RefreshQuotaAsync(true); break;
-                case "floating": LaunchFloating(); break;
+                case "pin": TogglePinned(); break;
             }
         };
-        Scene.DragRequested = () => { if (!widget) { DragMove(); SavePosition(); } };
-        if (widget && startServices)
+        Scene.DragRequested = () => { if (Pinned) { DragMove(); SavePosition(); } };
+        if (startServices)
         {
             tray = new StableTrayIcon(CreateIcon(), "Codex Pool · 账户状态 · Ctrl+Alt+W");
             UpdateTrayQuota(null);
@@ -88,7 +86,7 @@ public partial class FloatingWindow : Window
         {
             if (e.Key == System.Windows.Input.Key.M && System.Windows.Input.Keyboard.Modifiers == System.Windows.Input.ModifierKeys.Control)
             { CycleMode(this, new RoutedEventArgs()); e.Handled = true; }
-            if (widget && e.Key == System.Windows.Input.Key.Escape) Hide();
+            if (e.Key == System.Windows.Input.Key.Escape) { SavePosition(); Hide(); }
         };
         SourceInitialized += (_, _) =>
         {
@@ -96,11 +94,11 @@ public partial class FloatingWindow : Window
             HwndSource.FromHwnd(handle)?.AddHook(WindowMessage);
             ConfigureHost();
             if (!startServices) return;
-            var registered = RegisterHotKey(handle, 1, 0x0001 | 0x0002 | 0x4000, widget ? 0x57u : 0x43u);
+            var registered = RegisterHotKey(handle, 1, 0x0001 | 0x0002 | 0x4000, 0x57u);
             if (!registered) SetNotice("快捷键已被其他应用使用，可从托盘或启动入口显示窗口。");
-            if (!widget) RestorePosition(); _ = WatchAsync(); timer.Start();
+            if (Pinned) RestorePosition(); _ = WatchAsync(); timer.Start();
         };
-        if (widget) Deactivated += (_, _) => { dismissedAt = Environment.TickCount64; dismissedPoint = Forms.Cursor.Position; Scene.Stop(); Hide(); };
+        Deactivated += (_, _) => DismissOnDeactivation();
         timer.Tick += (_, _) => { SavePosition(); if (snapshot is { } state) Render(state); };
         Closing += OnClosing;
         SystemEvents.UserPreferenceChanged += PreferenceChanged;
@@ -148,11 +146,12 @@ public partial class FloatingWindow : Window
     {
         connected = false;
         if (snapshot is { } state) Render(state);
-        else if (widget) UpdateTrayQuota(null);
+        else { UpdateTrayQuota(null); Scene.SetState([], preferences.Mode, false, false, IsVisible); }
     }
     internal async void ShowFromLauncher()
     {
-        if (widget) ShowFlyout(); else { Show(); ClampPosition(); Activate(); }
+        if (Pinned) { Show(); ClampPosition(); Activate(); } else ShowFlyout();
+        if (!startServices) return;
         try { await ProxyStartup.EnsureRunningAsync(lifetime.Token); }
         catch (Exception ex) when (ex is HttpRequestException or IOException or System.ComponentModel.Win32Exception or OperationCanceledException)
         { SetNotice("代理未能启动，请检查本地服务。"); }
@@ -160,7 +159,7 @@ public partial class FloatingWindow : Window
     private void Render(JsonElement state)
     {
         snapshot = state;
-        if (widget) UpdateTrayQuota(connected ? state : null);
+        UpdateTrayQuota(connected ? state : null);
         NotifyActiveSwitch(state);
         Scene.SetState(PoolPresentation.Accounts(state, connected), preferences.Mode, connected,
             state.GetProperty("automaticSwitching").GetBoolean(), IsVisible,
@@ -290,9 +289,8 @@ public partial class FloatingWindow : Window
         SavePosition();
     }
     private void CycleTheme(object sender, RoutedEventArgs e) { preferences = preferences with { Theme = (preferences.Theme + 1) % 3 }; ApplyTheme(); if (snapshot is { } state) Render(state); SavePosition(); }
-    private void DismissWindow(object sender, RoutedEventArgs e) { if (widget) { SavePosition(); Hide(); } else Close(); }
+    private void DismissWindow(object sender, RoutedEventArgs e) { SavePosition(); Hide(); }
     private async void OpenDashboard(object sender, RoutedEventArgs e) => await DashboardAsync();
-    private void OpenFloating(object sender, RoutedEventArgs e) => LaunchFloating();
     private async void RefreshQuota(object sender, RoutedEventArgs e) => await RefreshQuotaAsync(notify: true);
 
     private void ShowGlassTrayMenu(Forms.MouseEventArgs e)
@@ -304,7 +302,7 @@ public partial class FloatingWindow : Window
         var items = new (string, Action)[]
         {
             ("显示账户面板", () => ToggleVisibility()),
-            ("打开悬浮窗", LaunchFloating),
+            (Pinned ? "取消固定面板" : "固定面板", () => { if (!IsVisible) ShowFromLauncher(); TogglePinned(); }),
             ("打开 Dashboard", () => _ = DashboardAsync()),
             ("刷新额度", () => _ = RefreshQuotaAsync(notify: true)),
             ("任务栏图标显示设置", () =>
@@ -318,14 +316,20 @@ public partial class FloatingWindow : Window
         glassMenu.ShowNear(cursor, bounds);
     }
 
-    private void LaunchFloating()
+    internal void TogglePinned()
     {
-        var executable = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "Floating", "CodexPool.Floating.exe"));
-        if (!File.Exists(executable)) executable = Environment.ProcessPath!;
-        try { Process.Start(new ProcessStartInfo(executable) { UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(executable)! }); if (widget) Hide(); }
-        catch { SetNotice("悬浮窗启动失败，请检查安装文件。"); }
+        if (Pinned) SavePosition();
+        preferences = preferences with { Pinned = !Pinned };
+        Scene.SetPinned(Pinned);
+        if (Pinned) { flyoutScreen = null; SavePosition(); }
+        else { ShowFlyout(); SavePosition(); }
     }
-    private void ToggleVisibility(System.Drawing.Point? clicked = null) { if (IsVisible) { SavePosition(); Hide(); } else if (widget) ShowFlyout(clicked); else { Show(); ClampPosition(); Activate(); } }
+    internal void DismissOnDeactivation()
+    {
+        if (Pinned) return;
+        dismissedAt = Environment.TickCount64; dismissedPoint = Forms.Cursor.Position; SavePosition(); Hide();
+    }
+    private void ToggleVisibility(System.Drawing.Point? clicked = null) { if (IsVisible) { SavePosition(); Hide(); } else if (Pinned) { Show(); ClampPosition(); Activate(); } else ShowFlyout(clicked); }
     private void ShowFlyout(System.Drawing.Point? clicked = null)
     {
         if (tray?.TryGetBounds(out var iconBounds) == true && (clicked is null || iconBounds.Contains(clicked.Value))) flyoutAnchor = iconBounds;
@@ -345,7 +349,7 @@ public partial class FloatingWindow : Window
     }
     private void PositionFlyout()
     {
-        if (!widget || positioningFlyout || handle == 0) return;
+        if (Pinned || positioningFlyout || handle == 0) return;
         positioningFlyout = true;
         try
         {
@@ -376,7 +380,7 @@ public partial class FloatingWindow : Window
     }
     private void ClampPosition()
     {
-        if (widget) { PositionFlyout(); return; }
+        if (!Pinned) { PositionFlyout(); return; }
         if (handle == 0 || !GetWindowRect(handle, out var rect)) return;
         var dpi = VisualTreeHelper.GetDpi(this); var visible = Scene.SurfaceBounds;
         var visibleRect = new System.Drawing.Rectangle(rect.Left + (int)(visible.Left * dpi.DpiScaleX), rect.Top + (int)(visible.Top * dpi.DpiScaleY),
@@ -389,17 +393,17 @@ public partial class FloatingWindow : Window
     private void SavePosition()
     {
         if (!startServices || handle == 0 || !GetWindowRect(handle, out var rect)) return;
-        if (!widget)
+        if (Pinned)
         {
             var dpi = VisualTreeHelper.GetDpi(this); var bounds = Scene.SurfaceBounds;
             preferences = preferences with { X = rect.Left + (int)Math.Round((bounds.Left + bounds.Width / 2) * dpi.DpiScaleX),
                 Y = rect.Top + (int)Math.Round(bounds.Bottom * dpi.DpiScaleY), PositionVersion = 2 };
         }
-        try { Directory.CreateDirectory(directory); var path = Path.Combine(directory, preferencesFile); File.WriteAllText(path + ".tmp", JsonSerializer.Serialize(preferences)); File.Move(path + ".tmp", path, true); } catch { }
+        try { Directory.CreateDirectory(directory); var path = Path.Combine(directory, PreferencesFile); File.WriteAllText(path + ".tmp", JsonSerializer.Serialize(preferences)); File.Move(path + ".tmp", path, true); } catch { }
     }
     private void OnClosing(object? sender, CancelEventArgs e)
     {
-        SavePosition(); if (widget && !exiting) { e.Cancel = true; Hide(); return; }
+        SavePosition(); if (startServices && !exiting) { e.Cancel = true; Hide(); return; }
         Scene.Stop(); lifetime.Cancel(); timer.Stop(); SystemEvents.UserPreferenceChanged -= PreferenceChanged;
         _ = UnregisterHotKey(handle, 1);
         tray?.Dispose();

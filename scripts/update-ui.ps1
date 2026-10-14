@@ -8,7 +8,7 @@ if (-not $SkipBuild) {
 }
 $taskBuild = [IO.Path]::GetFullPath((Get-Content -LiteralPath (Join-Path $taskRoot '.local/current-build.json') -Raw | ConvertFrom-Json).path)
 if (-not $taskBuild.StartsWith((Join-Path $taskRoot '.local') + '\', [StringComparison]::OrdinalIgnoreCase)) { throw '构建目录越界。' }
-foreach ($taskKind in @('Widget','Floating')) {
+foreach ($taskKind in @('Widget')) {
     if (-not (Test-Path -LiteralPath (Join-Path $taskBuild "$taskKind/CodexPool.Floating.exe"))) { throw '新界面构建不完整，旧进程未停止。' }
 }
 $taskWorktrees = & git -C $taskRoot worktree list --porcelain
@@ -31,7 +31,6 @@ foreach ($taskUi in $taskOldUi) {
 }
 . (Join-Path $PSScriptRoot 'desktop-client.ps1')
 Start-PoolDesktopClient -BuildDirectory $taskBuild -Tray
-if (@($taskOldUi | Where-Object { -not $_.Tray }).Count) { Start-PoolDesktopClient -BuildDirectory $taskBuild }
 if ($Show) {
     $taskShown = $false
     for ($taskAttempt=0; $taskAttempt -lt 30; $taskAttempt++) {

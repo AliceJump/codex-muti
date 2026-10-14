@@ -17,6 +17,8 @@ using Color = System.Windows.Media.Color;
 using ColorConverter = System.Windows.Media.ColorConverter;
 using FontFamily = System.Windows.Media.FontFamily;
 using Pen = System.Windows.Media.Pen;
+using ButtonBase = System.Windows.Controls.Primitives.ButtonBase;
+using ToggleButton = System.Windows.Controls.Primitives.ToggleButton;
 
 namespace CodexPool.Floating;
 
@@ -31,7 +33,7 @@ public sealed class PoolScene : Canvas
     private readonly Dictionary<string, Card> cards = new();
     private readonly Dictionary<string, FormattedText> text = new();
     private readonly Dictionary<double, Geometry> rings = new();
-    private readonly List<(Button Button, string Action)> actions = [];
+    private readonly List<(ButtonBase Button, string Action)> actions = [];
     private readonly Stopwatch watch = new();
     private double last;
     private TimeSpan renderingTime;
@@ -41,6 +43,7 @@ public sealed class PoolScene : Canvas
     private bool light, highContrast;
     private int mode;
     private bool busy;
+    private bool settingPin;
     private string status = "连接中", notice = "";
     private bool automatic;
     private int runningRequests;
@@ -49,7 +52,6 @@ public sealed class PoolScene : Canvas
     internal bool Animating { get; private set; }
     internal bool AtTop { get; set; }
     internal double HorizontalAnchor { get; set; } = .5;
-    internal bool FilterDisabled { get; set; }
     internal Action<string>? ActivateAccount;
     internal Action<string>? InvokeAction;
     internal Action? DragRequested;
@@ -60,17 +62,25 @@ public sealed class PoolScene : Canvas
     internal Rect SurfaceBounds => new(Math.Clamp(ActualWidth * HorizontalAnchor - Shape.Value[0] / 2, 10,
         Math.Max(10, ActualWidth - Shape.Value[0] - 10)), AtTop ? 10 : ActualHeight - 10 - Shape.Value[1], Shape.Value[0], Shape.Value[1]);
     internal IReadOnlyDictionary<string, Button> AccountTargets => cards.ToDictionary(x => x.Key, x => x.Value.Hit);
+    internal ToggleButton PinTarget => (ToggleButton)actions.First(a => a.Action == "pin").Button;
     public PoolScene()
     {
         Focusable = false; ClipToBounds = false;
         drawing = new(this) { IsHitTestVisible = false }; Children.Add(drawing); Children.Add(hits);
-        foreach (var (label, action) in new[] { ("◫", "mode"), ("◐", "theme"), ("×", "close"), ("Web 面板 ↗", "web"), ("刷新额度", "refresh"), ("打开悬浮窗", "floating") })
+        foreach (var (label, action) in new[] { ("◫", "mode"), ("◐", "theme"), ("\uE718", "pin"), ("×", "close"), ("Web 面板 ↗", "web"), ("刷新额度", "refresh") })
         {
-            var b = new Button { Content = label, Height = 24, Width = action is "mode" or "theme" or "close" ? 26 : 84,
-                Padding = new(2), FontSize = 10, BorderThickness = new(0), Background = Brushes.Transparent, Cursor = Cursors.Hand };
+            ButtonBase b = action == "pin" ? new ToggleButton { FontFamily = new("Segoe Fluent Icons, Segoe MDL2 Assets") } : new Button();
+            b.Content = label; b.Height = 24; b.Width = action is "mode" or "theme" or "pin" or "close" ? 26 : 84;
+            b.Padding = new(2); b.FontSize = 10; b.BorderThickness = new(0); b.Background = Brushes.Transparent; b.Cursor = Cursors.Hand;
             b.ToolTip = action switch { "mode" => "完整 / 紧凑 / 胶囊（Ctrl+M）", "theme" => "自动 / 浅色 / 深色", "close" => "关闭或隐藏窗口", _ => label };
             AutomationProperties.SetName(b, b.ToolTip.ToString());
-            b.Click += (_, _) => InvokeAction?.Invoke(action); actions.Add((b, action)); Children.Add(b);
+            if (b is ToggleButton pin)
+            {
+                pin.Checked += (_, _) => { if (!settingPin) InvokeAction?.Invoke("pin"); };
+                pin.Unchecked += (_, _) => { if (!settingPin) InvokeAction?.Invoke("pin"); };
+            }
+            else b.Click += (_, _) => InvokeAction?.Invoke(action);
+            actions.Add((b, action)); Children.Add(b);
         }
         SizeChanged += (_, _) => { drawing.Width = ActualWidth; drawing.Height = ActualHeight; Present(); };
         MouseWheel += (_, e) => { scroll = Math.Clamp(scroll - e.Delta / 3d, 0, Math.Max(0, contentHeight - viewportHeight)); Present(); e.Handled = true; };
@@ -93,13 +103,22 @@ public sealed class PoolScene : Canvas
         foreach (var (b, _) in actions) b.Foreground = fg;
         Present();
     }
+    internal void SetPinned(bool value)
+    {
+        var pin = PinTarget;
+        settingPin = true;
+        try { pin.IsChecked = value; } finally { settingPin = false; }
+        pin.ToolTip = value ? "取消固定，恢复托盘弹窗" : "固定面板，保持显示并允许拖动";
+        AutomationProperties.SetName(pin, pin.ToolTip.ToString());
+        Present();
+    }
     internal void SetNotice(string value) { notice = value; UpdateTip(); Present(); }
     internal void SetBusy(bool value) { busy = value; foreach (var c in cards.Values) c.Hit.IsEnabled = !busy && c.Model.Selectable; Present(); }
     internal void SetState(PoolAccountView[] value, int newMode, bool online, bool autoSwitch, bool animate, int requests = 0)
     {
         accounts = value; mode = newMode; automatic = autoSwitch; runningRequests = requests; UpdateTip();
         status = online ? "● 服务在线 · Web 已启用" : "服务离线 · 正在重新连接";
-        var visible = value.Where(a => !((FilterDisabled || mode == 2) && !a.Enabled && !a.Active)).ToArray();
+        var visible = value.Where(a => a.Enabled || a.Active).ToArray();
         foreach (var removed in cards.Keys.Where(id => !visible.Any(a => a.Id == id)).ToArray()) { hits.Children.Remove(cards[removed].Hit); cards.Remove(removed); }
         var budgetWidth = ActualWidth > 0 ? ActualWidth - 20 : 580;
         var capsuleWidth = visible.Sum(model => ChipWidth(model) + 8) + 8;
@@ -145,7 +164,7 @@ public sealed class PoolScene : Canvas
         }
         if (visible.Length == 0) y = header + 64;
         contentHeight = y - header;
-        var footer = mode == 2 ? 0 : FilterDisabled ? 90 : 70;
+        var footer = mode == 2 ? 0 : 90;
         var available = ActualHeight > 0 ? ActualHeight - 20 : 700;
         var height = Math.Min(available, y + footer + (mode == 2 ? 0 : 8));
         Shape.Aim(width, Math.Max(64, height), mode == 2 ? 30 : 26, mode == 2 ? 0 : 1, mode == 0 ? 1 : 0);
@@ -181,7 +200,7 @@ public sealed class PoolScene : Canvas
     private void Present()
     {
         var root = SurfaceBounds; var v = Shape.Value;
-        viewport = new(root.X, root.Y + v[3] * 68, root.Width, Math.Max(1, root.Height - v[3] * (68 + (FilterDisabled ? 90 : 70))));
+        viewport = new(root.X, root.Y + v[3] * 68, root.Width, Math.Max(1, root.Height - v[3] * 158));
         hits.Clip = new RectangleGeometry(viewport);
         foreach (var c in cards.Values)
         {
@@ -192,11 +211,11 @@ public sealed class PoolScene : Canvas
         foreach (var (button, action) in actions)
         {
             button.Opacity = Math.Clamp(v[3], 0, 1); button.IsHitTestVisible = v[3] > .95; button.Focusable = v[3] > .95;
-            button.Visibility = v[3] < .005 || action == "floating" && !FilterDisabled ? Visibility.Collapsed : Visibility.Visible;
-            if (action is "mode" or "theme" or "close") { SetLeft(button, root.Right - 100 + headerIndex++ * 29); SetTop(button, root.Y + 13); }
+            button.Visibility = v[3] < .005 ? Visibility.Collapsed : Visibility.Visible;
+            if (action is "mode" or "theme" or "pin" or "close") { SetLeft(button, root.Right - 128 + headerIndex++ * 29); SetTop(button, root.Y + 13); }
             else
             {
-                var count = FilterDisabled ? 3 : 2;
+                const int count = 2;
                 button.Width = Math.Min(84, (root.Width - 36) / count);
                 SetLeft(button, root.Right - 14 - (count - bottomIndex++) * (button.Width + 3));
                 SetTop(button, root.Bottom - 49);
@@ -232,7 +251,7 @@ public sealed class PoolScene : Canvas
         dc.DrawRoundedRectangle(highContrast ? SystemColors.WindowBrush : new LinearGradientBrush((Color)ColorConverter.ConvertFromString(light ? "#F0F6FAFF" : "#EE1B2331"),
             (Color)ColorConverter.ConvertFromString(light ? "#E7E3ECF8" : "#E4101621"), 90), new Pen(highContrast ? SystemColors.WindowTextBrush : B(light ? "#BEB3C8E3" : "#5A8BAAD6"), 1), root, s[2], s[2]);
         dc.PushClip(new RectangleGeometry(root, s[2], s[2]));
-        Text(dc, "Codex Pool", new(root.X + 20, root.Y + 15), 18, fg, s[3], root.Width - 130, true);
+        Text(dc, "Codex Pool", new(root.X + 20, root.Y + 15), 18, fg, s[3], root.Width - 158, true);
         Text(dc, status, new(root.X + 20, root.Y + 42), 10, muted, s[3], root.Width - 40);
         dc.PushClip(new RectangleGeometry(viewport));
         foreach (var c in cards.Values)
@@ -297,7 +316,7 @@ public sealed class PoolScene : Canvas
             var top = viewport.Y + (viewport.Height - length) * scroll / Math.Max(1, contentHeight - viewportHeight);
             dc.DrawRoundedRectangle(muted, null, new(viewport.Right - 7, top, 2, length), 1, 1);
         }
-        if (FilterDisabled) Text(dc, "当前：" + (accounts.FirstOrDefault(a => a.Active)?.Name ?? "尚未选择") + " · " + runningRequests + " 个请求处理中",
+        Text(dc, "已启用 " + accounts.Count(a => a.Enabled) + " 个账户 · " + runningRequests + " 个请求处理中",
             new(root.X + 16, root.Bottom - 86), 10, muted, s[3], root.Width - 32);
         Text(dc, automatic ? "自动切换 · 开启" : "自动切换 · 关闭", new(root.X + 16, root.Bottom - 65), 10, muted, s[3], root.Width - 32);
         if (notice.Length > 0) Text(dc, notice, new(root.X + 16, root.Bottom - 21), 9, muted, s[3], root.Width - 32);

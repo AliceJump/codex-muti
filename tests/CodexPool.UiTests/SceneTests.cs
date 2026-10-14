@@ -49,7 +49,7 @@ internal static class SceneTests
         });
         run("Native host remains fixed while all six transitions retarget and account hit targets stay accessible", () =>
         {
-            var window = new FloatingWindow(false, false) { Width = 620, Height = 750, Opacity = 0, ShowActivated = false };
+            var window = new FloatingWindow(false) { Width = 620, Height = 750, Opacity = 0, ShowActivated = false };
             try
             {
                 window.Show(); var scene = (PoolScene)window.FindName("Scene");
@@ -86,7 +86,7 @@ internal static class SceneTests
         });
         run("Live state updates during morph replace stale accounts without resetting the current pose", () =>
         {
-            var window = new FloatingWindow(false, false) { Opacity = 0, ShowActivated = false };
+            var window = new FloatingWindow(false) { Opacity = 0, ShowActivated = false };
             try
             {
                 window.Show(); window.Preview(State(), 0); Pump(1100);
@@ -100,9 +100,33 @@ internal static class SceneTests
             }
             finally { window.Close(); }
         });
+        run("Pinning keeps the same panel and account targets visible after deactivation; unpin restores dismissal", () =>
+        {
+            var window = new FloatingWindow(false) { Opacity = 0, ShowActivated = false };
+            try
+            {
+                window.Show(); window.Preview(State(), 1); Pump(1100);
+                var scene = (PoolScene)window.FindName("Scene"); var account = scene.AccountTargets["a1"];
+                var hwnd = new WindowInteropHelper(window).Handle; Check(GetWindowRect(hwnd, out var before));
+                Check(!window.Pinned && scene.PinTarget.IsChecked == false);
+                var pinPeer = new ToggleButtonAutomationPeer(scene.PinTarget);
+                ((IToggleProvider)pinPeer.GetPattern(PatternInterface.Toggle)).Toggle(); Pump(20);
+                Check(window.Pinned && scene.PinTarget.IsChecked == true);
+                Check(GetWindowRect(hwnd, out var after) && before.Equals(after));
+                window.DismissOnDeactivation(); Check(window.IsVisible);
+                window.Preview(State(), 2); Pump(1100);
+                Check(window.Pinned && ReferenceEquals(account, scene.AccountTargets["a1"]));
+                Check(scene.PinTarget.Visibility == Visibility.Collapsed);
+                window.Preview(State(), 1); Pump(1100);
+                ((IToggleProvider)pinPeer.GetPattern(PatternInterface.Toggle)).Toggle(); Pump(20);
+                Check(!window.Pinned && scene.PinTarget.IsChecked == false);
+                window.DismissOnDeactivation(); Check(!window.IsVisible && !scene.Animating);
+            }
+            finally { window.Close(); }
+        });
         run("Scene displays empty pools, credits and many accounts with bounded viewport and redraw", () =>
         {
-            var window = new FloatingWindow(false, false) { Opacity = 0, ShowActivated = false };
+            var window = new FloatingWindow(false) { Opacity = 0, ShowActivated = false };
             try
             {
                 window.Show(); var scene = (PoolScene)window.FindName("Scene");

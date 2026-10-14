@@ -1,4 +1,4 @@
-param([switch]$Dashboard, [switch]$Floating, [string]$BuildDirectory)
+param([switch]$Dashboard, [string]$BuildDirectory)
 $ErrorActionPreference = 'Stop'
 $taskRoot = [IO.Path]::GetFullPath((Split-Path $PSScriptRoot -Parent))
 $taskPointer = Join-Path $taskRoot '.local\current-build.json'
@@ -25,7 +25,4 @@ if (-not $taskOnline) {
 . (Join-Path $PSScriptRoot 'desktop-client.ps1')
 Start-PoolDesktopClient -BuildDirectory $taskBuild -Tray
 Write-Host '托盘客户端已启动。若旧客户端仍在运行，请从其托盘菜单退出界面后重试；这不会停止代理。'
-if ($Floating) {
-    Start-PoolDesktopClient -BuildDirectory $taskBuild
-}
 if ($Dashboard) { & $taskDaemon dashboard }

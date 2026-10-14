@@ -1,5 +1,5 @@
 #requires -Version 7.0
-param([switch]$SelfContained, [switch]$Dashboard, [switch]$Floating,
+param([switch]$SelfContained, [switch]$Dashboard,
     [ValidateSet('All','Core','Components')][string]$Target = 'All')
 $ErrorActionPreference = 'Stop'
 $taskRoot = [IO.Path]::GetFullPath((Split-Path $PSScriptRoot -Parent))
@@ -91,8 +91,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw '构建失败，原代理未停止。' }
     $taskNewExe = Join-Path $taskBuild 'Daemon\CodexPool.Daemon.exe'
     $taskNewTray = Join-Path $taskBuild 'Widget\CodexPool.Floating.exe'
-    $taskNewFloating = Join-Path $taskBuild 'Floating\CodexPool.Floating.exe'
-    foreach ($taskFile in @($taskNewExe,$taskNewTray,$taskNewFloating)) { if (-not (Test-Path -LiteralPath $taskFile)) { throw '构建产物不完整。' } }
+    foreach ($taskFile in @($taskNewExe,$taskNewTray)) { if (-not (Test-Path -LiteralPath $taskFile)) { throw '构建产物不完整。' } }
     $taskListeners = if ($taskDeployCore) { @(Get-NetTCPConnection -LocalPort 3210 -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique) } else { @() }
     if ($taskListeners.Count -gt 1) { throw '3210 有多个监听进程，拒绝猜测。' }
     $taskBoundary = $true
@@ -138,11 +137,6 @@ try {
         $taskClient = Start-PoolDesktopClient -BuildDirectory $taskBuild -Tray -PassThru -NoDaemonStart:($Target -eq 'Components')
         $taskNewUi += [pscustomobject]@{Id=$taskClient.Id;Path=$taskClient.Path;StartTicks=$taskClient.StartTime.ToUniversalTime().Ticks}
         if ($taskClient.WaitForExit(500)) { throw '新托盘进程提前退出。' }
-        if ($Floating -or @($taskOldUi | Where-Object { -not $_.Tray }).Count) {
-            $taskClient = Start-PoolDesktopClient -BuildDirectory $taskBuild -PassThru -NoDaemonStart:($Target -eq 'Components')
-            $taskNewUi += [pscustomobject]@{Id=$taskClient.Id;Path=$taskClient.Path;StartTicks=$taskClient.StartTime.ToUniversalTime().Ticks}
-            if ($taskClient.WaitForExit(500)) { throw '新悬浮窗进程提前退出。' }
-        }
     }
     [IO.File]::WriteAllText($taskPointer + '.tmp', (@{path=$taskBuild;builtAt=[DateTimeOffset]::UtcNow.ToString('O')} | ConvertTo-Json -Compress))
     Move-Item -LiteralPath ($taskPointer + '.tmp') -Destination $taskPointer -Force
