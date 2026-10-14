@@ -84,11 +84,12 @@ public sealed class OAuth(HttpClient http, Vault vault)
             // discard the only copy of a new refresh generation.
             using var refreshLifetime = new CancellationTokenSource(TimeSpan.FromSeconds(60));
             var refreshToken = refreshLifetime.Token;
+            var requestStarted = false;
             // Crash between remote rotation and local replacement must not reuse the old token.
             vault.SetAuthStatus(id, "refresh_pending");
-            try { token = account.ProviderKind == "native" ? await RefreshNativeAsync(account, refreshToken)
+            try { token = account.ProviderKind == "native" ? await RefreshNativeAsync(account, refreshToken, () => requestStarted = true)
                 : await ExchangeAsync(new() { ["grant_type"] = "refresh_token", ["client_id"] = account.ClientId,
-                    ["refresh_token"] = account.RefreshToken, ["resource"] = Resource }, refreshToken); }
+                    ["refresh_token"] = account.RefreshToken, ["resource"] = Resource }, refreshToken, () => requestStarted = true); }
             catch (AuthFailure ex)
             {
                 health[id] = ex.Code == "auth_temporarily_unavailable" ? ex.Code : "reauth_required";
@@ -97,15 +98,15 @@ public sealed class OAuth(HttpClient http, Vault vault)
                 { vault.SetAuthStatus(id, "ready"); refreshBackoff[id] = DateTimeOffset.UtcNow.AddSeconds(30); }
                 throw;
             }
-            catch (OperationCanceledException)
+            catch (Exception ex) when (ex is OperationCanceledException or HttpRequestException)
             {
+                if (!requestStarted)
+                {
+                    health[id] = "auth_temporarily_unavailable"; vault.SetAuthStatus(id, "ready");
+                    refreshBackoff[id] = DateTimeOffset.UtcNow.AddSeconds(30);
+                    throw new AuthFailure("auth_temporarily_unavailable");
+                }
                 // Token endpoint may have rotated while the response was lost. Never reuse blindly.
-                health[id] = "reauth_required";
-                vault.RequireReauthorization(id);
-                throw new AuthFailure("refresh_outcome_unknown");
-            }
-            catch (HttpRequestException)
-            {
                 health[id] = "reauth_required";
                 vault.RequireReauthorization(id);
                 throw new AuthFailure("refresh_outcome_unknown");
@@ -114,6 +115,11 @@ public sealed class OAuth(HttpClient http, Vault vault)
             {
                 if (!string.IsNullOrEmpty(token.IdToken) && await ValidateIdTokenAsync(token.IdToken, account.ClientId, null, refreshToken) != account.Subject)
                     throw new AuthFailure("account_identity_mismatch");
+            }
+            catch (OperationCanceledException)
+            {
+                health[id] = "reauth_required"; vault.RequireReauthorization(id);
+                throw new AuthFailure("refresh_validation_timeout");
             }
             catch { health[id] = "reauth_required"; vault.RequireReauthorization(id); throw; }
             try { vault.ReplaceTokens(id, account.RefreshToken, token); }
@@ -146,9 +152,10 @@ public sealed class OAuth(HttpClient http, Vault vault)
         if (string.IsNullOrWhiteSpace(jwt.Subject)) throw new AuthFailure("missing_account_subject");
         return jwt.Subject;
     }
-    private async Task<TokenResponse> RefreshNativeAsync(AccountCredential account, CancellationToken cancellationToken)
+    private async Task<TokenResponse> RefreshNativeAsync(AccountCredential account, CancellationToken cancellationToken, Action requestStarted)
     {
         // Matches the pinned official codex-login native refresh wire shape; separate from SIWC.
+        cancellationToken.ThrowIfCancellationRequested(); requestStarted();
         using var response = await http.PostAsJsonAsync(Issuer + "/oauth/token", new
         { grant_type = "refresh_token", client_id = account.ClientId, refresh_token = account.RefreshToken }, cancellationToken);
         var text = await ReadLimitedAsync(response.Content, cancellationToken);
@@ -178,9 +185,10 @@ public sealed class OAuth(HttpClient http, Vault vault)
         { throw new AuthFailure("invalid_token_response"); }
     }
 
-    private async Task<TokenResponse> ExchangeAsync(Dictionary<string, string> fields, CancellationToken cancellationToken)
+    private async Task<TokenResponse> ExchangeAsync(Dictionary<string, string> fields, CancellationToken cancellationToken, Action? requestStarted = null)
     {
         var endpoints = await GetMetadataAsync(cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested(); requestStarted?.Invoke();
         using var response = await http.PostAsync(endpoints.Token, new FormUrlEncodedContent(fields), cancellationToken);
         var text = await ReadLimitedAsync(response.Content, cancellationToken);
         if (!response.IsSuccessStatusCode)

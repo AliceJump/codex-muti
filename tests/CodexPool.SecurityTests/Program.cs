@@ -45,6 +45,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Generic routing honors credits, explicit denial, budgets, model scope and stale snapshots", DynamicQuotaRouting),
     ("WHAM usage rewrite exposes pool allowed shape for Desktop chatgpt_base_url", WhamUsageRewrite),
     ("Caller cancellation cannot abandon an accepted refresh rotation", RefreshCancellation),
+    ("Refresh timeouts distinguish discovery, exchange and identity validation", RefreshTimeoutStages),
     ("Malformed native rotations fail closed without reusing credentials", NativeMalformedRefresh),
     ("Quota batches isolate account IO and auth faults, recover, and preserve cancellation", QuotaBatchFailures),
     ("Quota selection survives persistence faults without changing the owner", QuotaSelectionFailure),
@@ -345,6 +346,26 @@ async Task RefreshCancellation()
     Check(issuer.RefreshCalls == 1 && vault.Find("A")!.AuthStatus == "ready" && auth.Health("A") is null);
     Check(vault.Find("A")!.RefreshToken != "REFRESH-CANARY-A");
     await auth.ReadyAsync("A", default); Check(issuer.RefreshCalls == 1);
+}
+async Task RefreshTimeoutStages()
+{
+    foreach (var stage in new[] { "discovery", "exchange", "validation" })
+    {
+        var vault = Store("refresh-timeout-" + stage); vault.Add(Account("A"));
+        using var issuer = new FakeIssuer(); using var http = new HttpClient(issuer); var auth = new OAuth(http, vault);
+        var started = 0;
+        Task TimeoutAtStage(CancellationToken _) { started++; throw new OperationCanceledException(); }
+        if (stage == "discovery") issuer.DiscoveryBarrier = TimeoutAtStage;
+        if (stage == "exchange") issuer.Barrier = TimeoutAtStage;
+        if (stage == "validation") issuer.JwksBarrier = TimeoutAtStage;
+        var expected = stage == "discovery" ? "auth_temporarily_unavailable" : stage == "exchange" ? "refresh_outcome_unknown" : "refresh_validation_timeout";
+        try { await auth.ReadyAsync("A", default, forceRefresh: true); Check(false); }
+        catch (AuthFailure ex) { Check(ex.Code == expected); }
+        Check(started == 1 && vault.Find("A")!.RefreshToken == "REFRESH-CANARY-A");
+        Check(vault.Find("A")!.AuthStatus == (stage == "discovery" ? "ready" : "reauth_required"));
+        Check(issuer.RefreshCalls == (stage == "validation" ? 1 : 0));
+        await Rejected(() => auth.ReadyAsync("A", default)); Check(started == 1);
+    }
 }
 async Task NativeMalformedRefresh()
 {
@@ -960,6 +981,8 @@ sealed class FakeIssuer : HttpMessageHandler
     public bool OmitNativeRefresh { get; set; }
     public string? NativeResponseBody { get; set; }
     public Func<CancellationToken, Task>? Barrier { get; set; }
+    public Func<CancellationToken, Task>? DiscoveryBarrier { get; set; }
+    public Func<CancellationToken, Task>? JwksBarrier { get; set; }
     public int RefreshCalls { get; private set; }
     public int CodeCalls { get; private set; }
     public bool ValidPkce { get; private set; }
@@ -978,9 +1001,14 @@ sealed class FakeIssuer : HttpMessageHandler
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         var path = request.RequestUri!.AbsolutePath;
-        if (path == "/.well-known/openid-configuration") return Json(new { issuer = "https://auth.openai.com", authorization_endpoint = "https://auth.openai.com/api/accounts/authorize", token_endpoint = "https://auth.openai.com/api/accounts/oauth/token", jwks_uri = "https://auth.openai.com/.well-known/jwks.json" });
+        if (path == "/.well-known/openid-configuration")
+        {
+            if (DiscoveryBarrier is not null) await DiscoveryBarrier(cancellationToken);
+            return Json(new { issuer = "https://auth.openai.com", authorization_endpoint = "https://auth.openai.com/api/accounts/authorize", token_endpoint = "https://auth.openai.com/api/accounts/oauth/token", jwks_uri = "https://auth.openai.com/.well-known/jwks.json" });
+        }
         if (path == "/.well-known/jwks.json")
         {
+            if (JwksBarrier is not null) await JwksBarrier(cancellationToken);
             var key = signing.ExportParameters(false);
             return Json(new { keys = new[] { new { kty = "RSA", kid = "fixture-key", use = "sig", alg = "RS256", n = Base64UrlEncoder.Encode(key.Modulus!), e = Base64UrlEncoder.Encode(key.Exponent!) } } });
         }
