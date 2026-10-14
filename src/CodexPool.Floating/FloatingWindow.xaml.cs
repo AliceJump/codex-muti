@@ -368,6 +368,7 @@ public partial class FloatingWindow : Window
                 : Math.Max(area.Top, anchor.Top - gap - height + (int)(10 * dpi.DpiScaleY));
             Scene.HorizontalAnchor = Math.Clamp((center - x) / (double)Math.Max(1, width), 0, 1);
             _ = SetWindowPos(handle, 0, x, y, 0, 0, 0x0001 | 0x0004 | 0x0010);
+            Scene.ResetHostOffset();
         }
         finally { positioningFlyout = false; }
     }

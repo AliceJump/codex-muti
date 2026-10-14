@@ -210,6 +210,7 @@ public sealed class PoolScene : Canvas
         if (animate && !highContrast && SystemParameters.ClientAreaAnimation && IsVisible) Start(); else hostOffset.Snap();
         Present();
     }
+    internal void ResetHostOffset() { hostOffset.Snap(); Present(); }
     private void SnapMotion()
     { Shape.Snap(); scrollMotion.Snap(); hostOffset.Snap(); foreach (var c in cards.Values) c.Pose.Snap(); }
     private void Start() { if (Animating) return; Animating = true; watch.Restart(); last = 0; renderingTime = default; CompositionTarget.Rendering += Tick; }

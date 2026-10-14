@@ -171,6 +171,11 @@ internal static class SceneTests
                 Pump(1400); var after = ScreenBounds(window, scene);
                 Check(after.Left >= area.Left - 1 && after.Top >= area.Top - 1 && after.Right <= area.Right + 1 && after.Bottom <= area.Bottom + 1);
                 Check(!scene.Animating && sizes == 0);
+                window.Preview(State(), 1); Pump(1200); root = scene.SurfaceBounds;
+                Check(SetWindowPos(hwnd, 0, area.Left + 16 - (int)Math.Round(root.Left * dpi.DpiScaleX), area.Top + 16 - (int)Math.Round(root.Top * dpi.DpiScaleY), 0, 0, 0x15));
+                window.Preview(State(), 0); Check(scene.Animating);
+                window.TogglePinned();
+                Check(!window.Pinned && Math.Abs(scene.SurfaceBounds.Top - (scene.AtTop ? 10 : scene.ActualHeight - 10 - scene.Shape.Value[1])) < .001);
             }
             finally { window.Close(); }
         });
