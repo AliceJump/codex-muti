@@ -5,6 +5,7 @@
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>../../assets/codex-pool.ico</ApplicationIcon>
     <!-- Settings tray reads these. AssemblyName stays CodexPool.Floating so paths and shortcuts keep working. -->
     <Product>Codex Pool</Product>
     <AssemblyTitle>Codex Pool</AssemblyTitle>
@@ -14,4 +15,5 @@
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
   </PropertyGroup>
   <ItemGroup><ProjectReference Include="../CodexPool.Daemon/CodexPool.Daemon.csproj" /></ItemGroup>
+  <ItemGroup><Resource Include="../../assets/codex-pool.ico" Link="Assets/codex-pool.ico" /></ItemGroup>
 </Project>

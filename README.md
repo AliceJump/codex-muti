@@ -1,3 +1,5 @@
+<img src="assets/codex-pool.svg" alt="Codex Pool 图标" width="88" align="right" />
+
 # Codex Pool
 
 本地 Codex 多账户模型访问代理。**Codex owns the workflow. The proxy only owns model access.**

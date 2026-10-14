@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Codex Pool app icon">
+  <defs>
+    <linearGradient id="base" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#20334B"/>
+      <stop offset="0.48" stop-color="#14263D"/>
+      <stop offset="1" stop-color="#0A1628"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="80%" cy="13%" r="95%">
+      <stop offset="0" stop-color="#36D6CC" stop-opacity=".22"/>
+      <stop offset=".7" stop-color="#4267C7" stop-opacity=".065"/>
+      <stop offset="1" stop-color="#4267C7" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="prompt" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#CBEAFF"/>
+    </linearGradient>
+  </defs>
+  <rect x="12" y="12" width="488" height="488" rx="116" fill="url(#base)"/>
+  <rect x="12" y="12" width="488" height="488" rx="116" fill="url(#glow)"/>
+  <rect x="15" y="15" width="482" height="482" rx="113" fill="none" stroke="#B5D8F0" stroke-opacity=".19" stroke-width="5"/>
+  <!-- Three account nodes feeding one terminal prompt. -->
+  <g opacity=".12" fill="#8DEBD9">
+    <circle cx="146" cy="174" r="40"/>
+    <circle cx="146" cy="256" r="40"/>
+    <circle cx="146" cy="338" r="40"/>
+  </g>
+  <circle cx="146" cy="174" r="24" fill="#61E4C8"/>
+  <circle cx="146" cy="256" r="24" fill="#A6C5FF"/>
+  <circle cx="146" cy="338" r="24" fill="#AC98F7"/>
+  <path d="M228 174 L310 256 L228 338" fill="none" stroke="#B5E1FC" stroke-opacity=".10" stroke-width="72" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M228 174 L310 256 L228 338" fill="none" stroke="url(#prompt)" stroke-width="42" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M331 347 H388" fill="none" stroke="#62E5D1" stroke-width="28" stroke-linecap="round"/>
+</svg>
