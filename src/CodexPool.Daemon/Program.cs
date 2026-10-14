@@ -1,7 +1,6 @@
 
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -264,15 +263,8 @@ try
         var account = candidates[0];
         var headers = context.Request.Headers.ToDictionary(x => x.Key, x => x.Value.ToString(), StringComparer.OrdinalIgnoreCase);
         headers.Remove("ChatGPT-Account-Id"); // Backend account routing is supplied only by validated credentials.
-        if (headers.TryGetValue("session_id", out var session))
-        {
-            var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(session)));
-            if (!sessionOwners.TryGetValue(hash, out var prior) || prior != account.AccountId) headers.Remove("x-codex-turn-state");
-            // Bounded transport ownership hints, never conversation contents or Codex workflow state.
-            if (sessionOwners.Count >= 1024) sessionOwners.Clear();
-            sessionOwners[hash] = account.AccountId;
-        }
-        else headers.Remove("x-codex-turn-state");
+        // Global sticky selection is unchanged. This only decides whether account-bound turn state still belongs here.
+        ResponsesHeaders.BindTurnState(headers, sessionOwners, account.AccountId);
         var started = Stopwatch.GetTimestamp(); var requestId = Guid.NewGuid().ToString("N");
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted); lifetime.CancelAfter(TimeSpan.FromMinutes(10));
         RelayResult result;
@@ -301,7 +293,7 @@ try
             if (attemptCount > 0) statistics.Record(attemptedAccount, modelValue.GetString()!, tokenUsage);
         }
         pool.Complete(selection, result, failoverReason, requestedModel);
-        if (headers.TryGetValue("session_id", out var completedSession)) sessionOwners[Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(completedSession)))] = result.AccountId;
+        ResponsesHeaders.Remember(headers, sessionOwners, result.AccountId);
         recent.Enqueue(new { timestamp = DateTimeOffset.UtcNow, requestId, account = result.AccountId, model = modelValue.GetString(),
             durationMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds, status = result.StatusCode, result.Outcome, result.Attempts,
             failover = result.Attempts > 1, failoverReason, rejections, tokenUsage,

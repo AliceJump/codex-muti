@@ -5,6 +5,10 @@
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- Settings tray reads these. AssemblyName stays CodexPool.Floating so paths and shortcuts keep working. -->
+    <Product>Codex Pool</Product>
+    <AssemblyTitle>Codex Pool</AssemblyTitle>
+    <FileDescription>Codex Pool</FileDescription>
     <!-- WPF owns startup. The tray uses WinForms interop, not its generated DPI entry point. -->
     <NoWarn>$(NoWarn);WFO0003</NoWarn>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>

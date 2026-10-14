@@ -1,4 +1,5 @@
 
+using System.Collections.Concurrent;
 using System.Net;
 using System.Text;
 using CodexPool.Core;
@@ -16,7 +17,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Client cancellation never fails over", Cancel),
     ("Cancellation during output never fails over", CancelOutput),
     ("Empty stream never fails over", EmptyStream),
-    ("Body and safe headers preserved; local credentials excluded", Headers),
+    ("Body, cache key and hyphen headers preserved; local credentials excluded", Headers),
+    ("Session-id cache affinity is not conversation or thread ownership", HeaderIdentity),
     ("Candidate exhaustion has no retry cycle", Exhausted),
     ("Downstream write failure cannot reopen commit gate", SinkFailure),
     ("Oversized error body is never trusted or echoed", LargeError),
@@ -192,14 +194,17 @@ static async Task EmptyStream()
 }
 static async Task Headers()
 {
-    const string body = "{\"input\":[{\"type\":\"function_call_output\",\"call_id\":\"c1\",\"output\":\"kept\"}],\"opaque_field\":42}";
-    var headers = new Dictionary<string, string> { ["Authorization"] = "local-only", ["Cookie"] = "local-cookie", ["session_id"] = "session", ["x-codex-turn-state"] = "A-bound", ["x-openai-internal-codex-responses-lite"] = "true",
+    const string body = "{\"input\":[{\"type\":\"function_call_output\",\"call_id\":\"c1\",\"output\":\"kept\"}],\"prompt_cache_key\":\"client-cache-key\",\"opaque_field\":42}";
+    var headers = new Dictionary<string, string> { ["Authorization"] = "local-only", ["Cookie"] = "local-cookie", ["session-id"] = "cache-affinity", ["session_id"] = "session",
+        ["thread-id"] = "thread", ["thread_id"] = "thread-underscore", ["x-codex-turn-state"] = "A-bound", ["x-openai-internal-codex-responses-lite"] = "true",
         ["x-codex-beta-features"] = "compact", ["x-codex-turn-metadata"] = "{\"turn_id\":\"turn\"}", ["x-codex-window-id"] = "window" };
     var handler = new FixtureHandler(async (index, request) =>
     {
         Check(await request.Content!.ReadAsStringAsync() == body);
         Check(request.Headers.Authorization?.Parameter == (index == 1 ? "upstream-a" : "upstream-b"));
-        Check(!request.Headers.Contains("Cookie") && request.Headers.GetValues("session_id").Single() == "session");
+        Check(!request.Headers.Contains("Cookie"));
+        Check(request.Headers.GetValues("session-id").Single() == "cache-affinity" && request.Headers.GetValues("session_id").Single() == "session");
+        Check(request.Headers.GetValues("thread-id").Single() == "thread" && request.Headers.GetValues("thread_id").Single() == "thread-underscore");
         Check(request.Headers.GetValues("x-openai-internal-codex-responses-lite").Single() == "true");
         foreach (var name in new[] { "x-codex-beta-features", "x-codex-turn-metadata", "x-codex-window-id" })
             Check(request.Headers.GetValues(name).Single() == headers[name]);
@@ -210,6 +215,61 @@ static async Task Headers()
     using var client = new HttpClient(handler);
     await new ResponsesRelay(client).ForwardAsync(Encoding.UTF8.GetBytes(body), "application/json", Candidates(), headers, new MemorySink(), default);
     Check(handler.Count == 2);
+    var hyphenOnly = new Dictionary<string, string> { ["session-id"] = "cache-affinity", ["thread-id"] = "thread" };
+    var hyphenHandler = new FixtureHandler(async (_, request) =>
+    {
+        Check(await request.Content!.ReadAsStringAsync() == body);
+        Check(request.Headers.GetValues("session-id").Single() == "cache-affinity" && request.Headers.GetValues("thread-id").Single() == "thread");
+        Check(!request.Headers.Contains("session_id") && !request.Headers.Contains("thread_id"));
+        return Response(200, "data: {}\n\n", "text/event-stream");
+    });
+    using var hyphenClient = new HttpClient(hyphenHandler);
+    await new ResponsesRelay(hyphenClient).ForwardAsync(Encoding.UTF8.GetBytes(body), "application/json", Candidates()[..1], hyphenOnly, new MemorySink(), default);
+    Check(hyphenHandler.Count == 1);
+}
+static Task HeaderIdentity()
+{
+    var mixed = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    {
+        ["Session-Id"] = "cache-affinity", ["session_id"] = "legacy-session", ["Thread-Id"] = "thread-hyphen", ["thread_id"] = "thread-underscore",
+        ["x-codex-turn-metadata"] = "{\"session_id\":\"real-session\",\"thread_id\":\"meta-thread\",\"turn_id\":\"turn\"}"
+    };
+    var identity = ResponsesHeaders.Read(mixed);
+    Check(identity == new ResponsesIdentity("cache-affinity", "thread-hyphen", "real-session"));
+    var owners = new ConcurrentDictionary<string, string>();
+    mixed["x-codex-turn-state"] = "state";
+    ResponsesHeaders.BindTurnState(mixed, owners, "A");
+    Check(!mixed.ContainsKey("x-codex-turn-state"));
+    mixed["session-id"] = "other-cache-key";
+    mixed["x-codex-turn-state"] = "state";
+    ResponsesHeaders.BindTurnState(mixed, owners, "A");
+    Check(mixed["x-codex-turn-state"] == "state");
+    var fork = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    {
+        ["session-id"] = "cache-affinity", ["thread-id"] = "fork-thread",
+        ["x-codex-turn-metadata"] = "{\"session_id\":\"fork-session\",\"thread_id\":\"fork-thread\"}", ["x-codex-turn-state"] = "fork-state"
+    };
+    Check(ResponsesHeaders.Read(fork) == new ResponsesIdentity("cache-affinity", "fork-thread", "fork-session"));
+    ResponsesHeaders.BindTurnState(fork, owners, "A");
+    Check(!fork.ContainsKey("x-codex-turn-state"));
+    ResponsesHeaders.Remember(fork, owners, "B");
+    fork["x-codex-turn-state"] = "fork-state";
+    ResponsesHeaders.BindTurnState(fork, owners, "A");
+    Check(!fork.ContainsKey("x-codex-turn-state"));
+    fork["x-codex-turn-state"] = "fork-state";
+    ResponsesHeaders.BindTurnState(fork, owners, "B");
+    Check(fork["x-codex-turn-state"] == "fork-state");
+    var threadOnly = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["thread-id"] = "thread-hyphen", ["x-codex-turn-state"] = "state" };
+    Check(ResponsesHeaders.Read(threadOnly).ConversationId is null && ResponsesHeaders.Read(threadOnly).ThreadId == "thread-hyphen");
+    ResponsesHeaders.BindTurnState(threadOnly, owners, "A");
+    Check(!threadOnly.ContainsKey("x-codex-turn-state"));
+    var legacy = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["session_id"] = "legacy-session", ["x-codex-turn-metadata"] = "not-json" };
+    Check(ResponsesHeaders.Read(legacy) == new ResponsesIdentity("legacy-session", null, "legacy-session"));
+    var blankHyphen = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["session-id"] = "", ["session_id"] = "legacy-session", ["thread-id"] = "", ["thread_id"] = "thread-underscore" };
+    Check(ResponsesHeaders.Read(blankHyphen) == new ResponsesIdentity("legacy-session", "thread-underscore", "legacy-session"));
+    var metadataWithoutSession = new Dictionary<string, string> { ["thread-id"] = "thread-hyphen", ["x-codex-turn-metadata"] = "{\"thread_id\":\"meta-thread\"}" };
+    Check(ResponsesHeaders.Read(metadataWithoutSession).ConversationId is null);
+    return Task.CompletedTask;
 }
 static async Task Exhausted()
 {
