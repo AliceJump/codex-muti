@@ -117,21 +117,7 @@ try
     foreach (var asset in new[] { (Path: "/", File: "index.html", Type: "text/html"), (Path: "/dashboard.js", File: "dashboard.js", Type: "text/javascript"), (Path: "/dashboard.css", File: "dashboard.css", Type: "text/css") })
         app.MapGet(asset.Path, () => Results.Stream(typeof(Vault).Assembly.GetManifestResourceStream("CodexPool.Daemon.Dashboard." + asset.File)!, asset.Type));
     app.MapGet("/settings", () => pool.Settings);
-    app.MapGet("/compaction/advice", (string model) => Regex.IsMatch(model, "^[a-zA-Z0-9._:/-]{1,128}$")
-        ? Results.Ok(new { enabled = pool.CompactionEnabled, advice = pool.CompactionAdvice(model) }) : Results.BadRequest());
-    app.MapPost("/compaction/reserve", async (HttpContext context) =>
-    {
-        var expected = await context.Request.ReadFromJsonAsync<CompactionAdvice>(context.RequestAborted);
-        if (expected is null || !Guid.TryParseExact(expected.AccountId, "N", out _) || expected.Epoch < 0
-            || expected.Model is null || !Regex.IsMatch(expected.Model, "^[a-zA-Z0-9._:/-]{1,128}$")) return Results.BadRequest();
-        return Results.Ok(pool.BeginCompaction(expected));
-    });
-    app.MapPost("/compaction/{id}/finish", async (string id, HttpContext context) =>
-    {
-        var outcome = await context.Request.ReadFromJsonAsync<CompactionOutcome>(context.RequestAborted);
-        if (!Guid.TryParseExact(id, "N", out _) || outcome?.Outcome is not ("completed" or "failed" or "unknown")) return Results.BadRequest();
-        return Results.Ok(new { switched = pool.FinishCompaction(id, outcome.Outcome == "completed") });
-    });
+    CompactionEndpoints.Map(app, pool, vault.LocalKey);
     app.MapPost("/settings", async (HttpContext context) =>
     {
         var settings = await context.Request.ReadFromJsonAsync<PoolSettings>(context.RequestAborted) ?? throw new AuthFailure("invalid_settings");

@@ -1,6 +1,7 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/CodexPool.Core/CodexPool.Core.csproj" />
+    <Project Path="src/CodexPool.Bridge/CodexPool.Bridge.csproj" />
     <Project Path="src/CodexPool.Daemon/CodexPool.Daemon.csproj" />
     <Project Path="src/CodexPool.Floating/CodexPool.Floating.csproj" />
   </Folder>
@@ -8,6 +9,7 @@
     <Project Path="tests/CodexPool.Probe/CodexPool.Probe.csproj" />
     <Project Path="tests/CodexPool.SecurityTests/CodexPool.SecurityTests.csproj" />
     <Project Path="tests/CodexPool.Tests/CodexPool.Tests.csproj" />
+    <Project Path="tests/CodexPool.BridgeTests/CodexPool.BridgeTests.csproj" />
     <Project Path="tests/CodexPool.UiTests/CodexPool.UiTests.csproj" />
   </Folder>
 </Solution>

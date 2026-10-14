@@ -9,11 +9,18 @@ using CodexPool.Daemon;
 using Microsoft.IdentityModel.JsonWebTokens;
 using Microsoft.IdentityModel.Tokens;
 using CodexPool.Core;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Hosting.Server;
+using Microsoft.AspNetCore.Hosting.Server.Features;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 var root = Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, ".research", "security-" + Guid.NewGuid().ToString("N")));
 var tests = new (string Name, Func<Task> Run)[]
 {
     ("Experimental compaction holds one serving account without failover and respects explicit rejection", CompactionRouting),
+    ("Compaction control API rejects guests, model bearer and browser cookies; conditional switch is idempotent", CompactionApi),
     ("DPAPI storage never contains plaintext canaries; public views redact", Storage),
     ("OIDC rejects wrong signature, issuer, audience, nonce and expiry", IdToken),
     ("OAuth PKCE and state isolation; callback is one-use", Login),
@@ -513,6 +520,39 @@ Task CompactionRouting()
     pool.Rejected(new("A", new("https://fixture.invalid/responses"), "canary"), "quota_rejected");
     Check(pool.Select().AccountId == "B" && !pool.FinishCompaction(hold.Id, true));
     return Task.CompletedTask;
+}
+async Task CompactionApi()
+{
+    var vault = Store("compaction-api"); var a = Guid.NewGuid().ToString("N"); var b = Guid.NewGuid().ToString("N");
+    vault.Add(Account(a)); vault.Add(Account(b)); vault.SaveSettings(new(true)); var now = DateTimeOffset.UtcNow;
+    vault.SaveQuota(new(a, "fixture", "plus", now, [new("5h", 18000, 92, 8, now.AddHours(1))]));
+    using var issuer = new FakeIssuer(); using var upstream = new HttpClient(issuer); var auth = new OAuth(upstream, vault);
+    var pool = new PoolRuntime(vault, auth, new Quota(upstream, auth, vault), true, true);
+    var builder = WebApplication.CreateBuilder([]); builder.Logging.ClearProviders();
+    builder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, 0));
+    await using var app = builder.Build(); CompactionEndpoints.Map(app, pool, vault.LocalKey); await app.StartAsync();
+    using var http = new HttpClient(new SocketsHttpHandler { UseProxy = false })
+        { BaseAddress = new(app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single()) };
+    using (var guest = await http.GetAsync("/compaction/advice?model=model")) Check(guest.StatusCode == HttpStatusCode.Unauthorized);
+    http.DefaultRequestHeaders.Authorization = new("Bearer", "model-only-canary");
+    using (var model = await http.PostAsJsonAsync("/compaction/reserve", new { })) Check(model.StatusCode == HttpStatusCode.Unauthorized);
+    http.DefaultRequestHeaders.Authorization = null; http.DefaultRequestHeaders.Add("Cookie", "pool_session=browser-canary");
+    using (var browser = await http.GetAsync("/compaction/advice?model=model")) Check(browser.StatusCode == HttpStatusCode.Unauthorized);
+    http.DefaultRequestHeaders.Authorization = new("Bearer", vault.LocalKey);
+    using var adviceResponse = await http.GetAsync("/compaction/advice?model=model"); adviceResponse.EnsureSuccessStatusCode();
+    var body = await adviceResponse.Content.ReadAsStringAsync(); Check(!body.Contains(vault.LocalKey));
+    using var document = JsonDocument.Parse(body);
+    var advice = document.RootElement.GetProperty("advice").Deserialize<CompactionAdvice>(new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+    using (var invalid = await http.PostAsJsonAsync("/compaction/reserve", advice with { Model = "bad model" })) Check(invalid.StatusCode == HttpStatusCode.BadRequest);
+    using var reserved = await http.PostAsJsonAsync("/compaction/reserve", advice); reserved.EnsureSuccessStatusCode();
+    var hold = (await reserved.Content.ReadFromJsonAsync<CompactionHold>())!;
+    using (var duplicate = await http.PostAsJsonAsync("/compaction/reserve", advice)) Check(duplicate.StatusCode == HttpStatusCode.Conflict);
+    using (var invalid = await http.PostAsJsonAsync("/compaction/" + hold.Id + "/finish", new { outcome = "invented" })) Check(invalid.StatusCode == HttpStatusCode.BadRequest);
+    using (var finished = await http.PostAsJsonAsync("/compaction/" + hold.Id + "/finish", new { outcome = "completed" })) finished.EnsureSuccessStatusCode();
+    Check(pool.Active == b);
+    using var late = await http.PostAsJsonAsync("/compaction/" + hold.Id + "/finish", new { outcome = "completed" });
+    using var lateBody = JsonDocument.Parse(await late.Content.ReadAsStringAsync()); Check(!lateBody.RootElement.GetProperty("switched").GetBoolean());
+    await app.StopAsync();
 }
 Task DynamicQuotaParser()
 {

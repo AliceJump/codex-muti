@@ -108,6 +108,10 @@ chatgpt_base_url = "http://127.0.0.1:3210/backend-api"
 
 ## 本地组合部署
 
+### 实验：额度预警触发真实压缩
+
+已实现可选 App Server stdio 桥接、提前额度预警和条件账户预留。默认关闭，仅支持已核对的 CLI `0.162.1`；真实 Desktop/A/B 压缩验收仍待完成。构建、启动检查与回滚见 [docs/compaction-bridge.md](docs/compaction-bridge.md)。桥接不会重启当前 Desktop，需从独立入口启动新实例。
+
 双击 `deploy.cmd` 可选择全部、仅核心或仅桌面组件。核心包含代理和 Dashboard；桌面组件为支持固定的托盘面板。
 
 ```powershell
