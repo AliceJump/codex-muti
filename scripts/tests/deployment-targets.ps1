@@ -93,13 +93,13 @@ function global:Start-Process {
     return $global:taskCore
 }
 function global:Invoke-RestMethod { param($Uri,[switch]$NoProxy,$TimeoutSec) [pscustomobject]@{status='running'} }
-foreach ($taskCase in @('All','Core','Components','FailCore','FailComponents')) {
+foreach ($taskCase in @('All','Core','Components','FailCore','FailComponents','FailComponentsOffline')) {
     $global:taskSandbox = New-TestRoot "deploy-$taskCase"
     $global:taskTrace = [Collections.Generic.List[string]]::new()
     $global:taskProcesses = @{}
-    $global:taskFailure = if ($taskCase -eq 'FailCore') {'Core'} elseif ($taskCase -eq 'FailComponents') {'Components'} else {''}
-    $taskTarget = $taskCase.Replace('Fail','')
-    $global:taskCore = New-TestProcess 101 (Join-Path $taskSandbox '.local/base/Daemon/CodexPool.Daemon.exe')
+    $global:taskFailure = if ($taskCase -eq 'FailCore') {'Core'} elseif ($taskCase.StartsWith('FailComponents')) {'Components'} else {''}
+    $taskTarget = if ($taskCase -eq 'FailComponentsOffline') {'Components'} else {$taskCase.Replace('Fail','')}
+    $global:taskCore = New-TestProcess 101 (Join-Path $taskSandbox '.local/base/Daemon/CodexPool.Daemon.exe') ($taskCase -eq 'FailComponentsOffline')
     foreach ($taskId in @(201,202)) {
         $taskKind = if ($taskId -eq 201) {'Widget'} else {'Floating'}
         $null = New-TestProcess $taskId (Join-Path $taskSandbox ".local/desktop/$taskKind/CodexPool.Floating.exe")
@@ -118,7 +118,8 @@ function Get-PoolStatus([string]$Path) {
     [IO.File]::WriteAllText($taskSourcePath,$taskSource)
     New-TestFile (Join-Path $taskSandbox 'scripts/desktop-client.ps1') @'
 function Start-PoolDesktopClient {
-    param($BuildDirectory,[switch]$Tray,[switch]$PassThru,[switch]$NoDaemonStart)
+    param($BuildDirectory,[switch]$Tray,[switch]$PassThru,[switch]$NoDaemonStart,[switch]$InstallOnly)
+    if ($InstallOnly) { $global:taskTrace.Add('restore:files'); return }
     $global:taskTrace.Add("start:ui:$NoDaemonStart")
     if ($BuildDirectory -match '[\\/]base$') { $global:taskTrace.Add('restore:ui') }
     $taskStarted = New-TestProcess $(if ($Tray) {401} else {402}) (Join-Path $BuildDirectory 'Widget/CodexPool.Floating.exe') ($global:taskFailure -eq 'Components' -and $BuildDirectory -notmatch '[\\/]base$')
@@ -139,8 +140,25 @@ function Start-PoolDesktopClient {
     if ($taskFailed) {
         Assert-Test ($taskPointer.path -eq (Join-Path $taskSandbox '.local/base')) 'Failure published the new pointer.'
         if ($taskTarget -eq 'Core') { Assert-Test ($global:taskTrace.Count -eq 3 -and $global:taskCore.Path -match '[\\/]base[\\/]') 'Old core was not restored.' }
+        elseif ($taskCase -eq 'FailComponentsOffline') { Assert-Test ($global:taskTrace -contains 'restore:files' -and $global:taskTrace -notcontains 'restore:ui') 'Offline core was restarted by old UI rollback.' }
         else { Assert-Test ($global:taskTrace -contains 'restore:ui') 'Old UI was not restored.' }
     } else { Assert-Test ($taskPointer.path -ne (Join-Path $taskSandbox '.local/base')) 'Success did not publish a new pointer.' }
     Write-Output "PASS deployment isolation and recovery: $taskCase"
 }
-Write-Output '9/9 deployment target checks passed; simulated publishing/processes only'
+$taskMenuRoot = New-TestRoot 'cmd-entry'
+Copy-Item -LiteralPath (Join-Path $taskRepository 'deploy.cmd') -Destination $taskMenuRoot
+Copy-Item -LiteralPath (Join-Path $taskRepository 'scripts/deploy-menu.ps1') -Destination (Join-Path $taskMenuRoot 'scripts')
+New-TestFile (Join-Path $taskMenuRoot 'scripts/deploy-local.ps1') 'param([string]$Target,[switch]$Dashboard); Write-Output ("ACTUAL_TARGET=" + $Target)'
+foreach ($taskTarget in @('All','Core','Components')) {
+    $taskCommand = 'call "{0}" {1} <nul' -f (Join-Path $taskMenuRoot 'deploy.cmd'),$taskTarget
+    $taskOutput = & $env:ComSpec /d /c $taskCommand 2>&1
+    Assert-Test ($LASTEXITCODE -eq 0 -and ($taskOutput -join "`n") -match ('ACTUAL_TARGET=' + $taskTarget)) "CMD forwarded the wrong scope: $taskTarget"
+    Write-Output "PASS actual CMD entry: $taskTarget"
+}
+$taskOutput = & $env:ComSpec /d /c ('call "{0}" InvalidTarget <nul' -f (Join-Path $taskMenuRoot 'deploy.cmd')) 2>&1
+Assert-Test ($LASTEXITCODE -ne 0 -and ($taskOutput -join "`n") -notmatch 'ACTUAL_TARGET=') 'Invalid CMD target fell back to All.'
+Write-Output 'PASS invalid CMD target cannot deploy All'
+$taskBatchBytes = [IO.File]::ReadAllBytes((Join-Path $taskRepository 'deploy.cmd'))
+Assert-Test (@($taskBatchBytes | Where-Object { $_ -gt 127 }).Count -eq 0) 'Batch wrapper must remain ASCII.'
+Assert-Test ([IO.File]::ReadAllText((Join-Path $taskRepository 'deploy.cmd')) -notmatch '(?<!\r)\n') 'Batch wrapper must use CRLF.'
+Write-Output '14/14 deployment target checks passed; simulated publishing/processes only'

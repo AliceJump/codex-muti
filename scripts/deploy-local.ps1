@@ -165,8 +165,12 @@ try {
     }
     foreach ($taskUi in $taskUiStopped) {
         try {
-            if ($taskUi.Source) { Start-PoolDesktopClient -BuildDirectory $taskUi.Source -Tray:$taskUi.Tray -NoDaemonStart:($Target -eq 'Components') }
-            else { Start-PoolUi $taskUi.Path $taskUi.Tray }
+            # Old UI versions may not honor NoDaemonStart. Restore their files
+            # without launching if doing so could start an unselected core.
+            $taskCanRestoreUi = $Target -ne 'Components' -or [bool](Get-NetTCPConnection -LocalPort 3210 -State Listen -ErrorAction SilentlyContinue)
+            if ($taskUi.Source) { Start-PoolDesktopClient -BuildDirectory $taskUi.Source -Tray:$taskUi.Tray -NoDaemonStart:($Target -eq 'Components') -InstallOnly:(-not $taskCanRestoreUi) }
+            elseif ($taskCanRestoreUi) { Start-PoolUi $taskUi.Path $taskUi.Tray }
+            if (-not $taskCanRestoreUi) { Write-Warning '已保留或恢复旧组件文件；核心未运行，未重启可能自动拉起核心的旧界面。' }
         } catch { Write-Warning '旧界面恢复失败，请从上一版本目录手动启动。' }
     }
     throw $taskFailure

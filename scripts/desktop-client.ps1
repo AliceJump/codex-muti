@@ -1,7 +1,7 @@
 # Shared launcher: preserve Windows notification-area identity across versioned builds.
 # This file is dot-sourced. It never stops a UI or daemon process.
 function Start-PoolDesktopClient {
-    param([Parameter(Mandatory)][string]$BuildDirectory, [switch]$Tray, [switch]$PassThru, [switch]$NoDaemonStart)
+    param([Parameter(Mandatory)][string]$BuildDirectory, [switch]$Tray, [switch]$PassThru, [switch]$NoDaemonStart, [switch]$InstallOnly)
     $taskClientRoot = [IO.Path]::GetFullPath((Split-Path $PSScriptRoot -Parent))
     $taskSourceBuild = [IO.Path]::GetFullPath($BuildDirectory)
     $taskLocalRoot = Join-Path $taskClientRoot '.local'
@@ -48,6 +48,7 @@ function Start-PoolDesktopClient {
                 }
             }
         }
+        if ($InstallOnly) { return }
         $taskPreviousDaemon = [Environment]::GetEnvironmentVariable('CODEX_POOL_DAEMON')
         $taskPreviousAutoStart = [Environment]::GetEnvironmentVariable('CODEX_POOL_DAEMON_AUTOSTART')
         try {
