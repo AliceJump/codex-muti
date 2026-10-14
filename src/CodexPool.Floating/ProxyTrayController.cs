@@ -77,31 +77,35 @@ internal sealed class ProxyTrayController : IDisposable
     {
         if (disposed) return;
         menu?.Close();
-        var items = new List<(string Label, Action Invoke)>();
-        if (busy) items.Add(("正在操作代理…", () => { }));
+        var items = new List<GlassMenuItem>();
+        if (busy) items.Add(new("正在操作代理…", Enabled: false));
         else if (state is { } snapshot)
         {
-            items.Add(("打开账户管理 · " + ActiveName(snapshot), () => Run(DashboardAsync)));
-            var active = snapshot.GetProperty("activeAccountId").GetString();
-            var accounts = snapshot.GetProperty("accounts").EnumerateArray().Where(x => x.GetProperty("enabled").GetBoolean()
-                && !x.GetProperty("paused").GetBoolean() && !x.GetProperty("drain").GetBoolean()).ToArray();
-            foreach (var account in accounts.Take(8))
-            {
-                var id = account.GetProperty("id").GetString();
-                if (id is null || id == active || !Guid.TryParseExact(id, "N", out _)) continue;
-                var name = account.GetProperty("name").GetString();
-                items.Add(("切换到 " + name, () => Run(() => PostAsync("/accounts/" + id + "/activate"))));
-            }
-            if (accounts.Length > 8) items.Add(("更多账户…", () => Run(DashboardAsync)));
-            items.Add((snapshot.GetProperty("automaticSwitching").GetBoolean() ? "关闭自动切换" : "开启自动切换", () => Run(ToggleSwitchAsync)));
-            items.Add(("更新额度", () => Run(async () => { Authorize(); using var response = await http.GetAsync(Endpoint + "/usage", lifetime.Token); response.EnsureSuccessStatusCode(); })));
-            items.Add(("关闭代理", () => Run(StopAsync)));
+            items.Add(AccountMenu(snapshot, id => Run(() => PostAsync("/accounts/" + id + "/activate"))));
+            items.Add(new("打开账户管理", () => Run(DashboardAsync)));
+            items.Add(new(snapshot.GetProperty("automaticSwitching").GetBoolean() ? "关闭自动切换" : "开启自动切换", () => Run(ToggleSwitchAsync)));
+            items.Add(new("更新额度", () => Run(async () => { Authorize(); using var response = await http.GetAsync(Endpoint + "/usage", lifetime.Token); response.EnsureSuccessStatusCode(); })));
+            items.Add(new("关闭代理", () => Run(StopAsync)));
         }
-        else items.Add(("启动代理", () => Run(StartAsync)));
-        items.Add(("退出代理托盘（代理继续运行）", () => Application.Current.Shutdown()));
+        else items.Add(new("启动代理", () => Run(StartAsync)));
+        items.Add(new("退出代理托盘（代理继续运行）", () => Application.Current.Shutdown()));
         menu = new GlassTrayMenu(items, () => menu = null) { Title = "Codex Pool · 代理控制" };
         var cursor = System.Windows.Forms.Cursor.Position;
         menu.ShowNear(cursor, tray.TryGetBounds(out var bounds) ? bounds : null);
+    }
+
+    internal static GlassMenuItem AccountMenu(JsonElement snapshot, Action<string> activate)
+    {
+        var active = snapshot.GetProperty("activeAccountId").GetString();
+        var accounts = snapshot.GetProperty("accounts").EnumerateArray().Select(account =>
+        {
+            var id = account.GetProperty("id").GetString();
+            var current = id == active;
+            var enabled = !current && id is not null && Guid.TryParseExact(id, "N", out _) && account.GetProperty("enabled").GetBoolean()
+                && !account.GetProperty("paused").GetBoolean() && !account.GetProperty("drain").GetBoolean();
+            return new GlassMenuItem(account.GetProperty("name").GetString() ?? "未命名账户", enabled ? () => activate(id!) : null, Enabled: enabled, IsChecked: current);
+        }).ToArray();
+        return new("当前账户：" + ActiveName(snapshot), Children: accounts, Enabled: accounts.Length > 0);
     }
 
     private async void Run(Func<Task> action)

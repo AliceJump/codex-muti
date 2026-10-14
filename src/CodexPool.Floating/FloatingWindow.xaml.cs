@@ -315,7 +315,10 @@ public partial class FloatingWindow : Window
             }),
             ("退出托盘面板", () => { exiting = true; Close(); }),
         };
-        glassMenu = new GlassTrayMenu(items, () => glassMenu = null, preferences.Theme);
+        var menuItems = items.Select(x => new GlassMenuItem(x.Item1, x.Item2)).ToList();
+        if (connected && snapshot is { } state)
+            menuItems.Insert(0, ProxyTrayController.AccountMenu(state, id => { if (startServices && !busy) _ = ActivateAsync(id); }));
+        glassMenu = new GlassTrayMenu(menuItems, () => glassMenu = null, preferences.Theme);
         glassMenu.ShowNear(cursor, bounds);
     }
 

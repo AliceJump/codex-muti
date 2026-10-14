@@ -2,6 +2,7 @@ using CodexPool.Floating;
 using System.Windows.Media;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Runtime.InteropServices;
 using System.Reflection;
 using System.Windows.Threading;
@@ -29,6 +30,7 @@ internal static class Program
             Console.WriteLine($"PASS read-only proxy identity: PID={identity.Pid}, executable={System.IO.Path.GetFileName(identity.Path)}");
             return 0;
         }
+        var application = new App(false); application.InitializeComponent(); application.ShutdownMode = ShutdownMode.OnExplicitShutdown;
         var failed = 0; var total = 0;
         void Run(string name, Action test)
         {
@@ -147,6 +149,58 @@ internal static class Program
             var overflow = FlyoutPlacement.Above(work, new(1600, 850, 24, 24), 206, 53, 12);
             Check(overflow.Y + 53 + 12 == 850);
         });
+        Run("Account menu groups choices, marks current and excludes unavailable actions", () =>
+        {
+            var a = Guid.NewGuid().ToString("N"); var b = Guid.NewGuid().ToString("N"); var c = Guid.NewGuid().ToString("N");
+            var state = JsonSerializer.SerializeToElement(new { activeAccountId = a, accounts = new[] {
+                new { id=a, name="当前账户", enabled=true, paused=false, drain=false },
+                new { id=b, name="备用账户", enabled=true, paused=false, drain=false },
+                new { id=c, name="暂停账户", enabled=true, paused=true, drain=false } } });
+            string? activated = null;
+            var item = ProxyTrayController.AccountMenu(state, id => activated = id);
+            Check(item.Label == "当前账户：当前账户" && item.Invoke is null && item.Children?.Count == 3);
+            Check(item.Children![0].IsChecked && !item.Children[0].Enabled && item.Children[0].Invoke is null);
+            Check(!item.Children[2].Enabled && item.Children[2].Invoke is null);
+            item.Children[1].Invoke!(); Check(activated == b);
+        });
+        Run("Submenu prefers right, flips at the edge and clamps in negative-coordinate work areas", () =>
+        {
+            var work = new System.Drawing.Rectangle(0, 0, 1920, 1040);
+            Check(FlyoutPlacement.Beside(work, new(900, 600, 190, 26), 172, 100, 0) == new System.Drawing.Point(1090, 600));
+            Check(FlyoutPlacement.Beside(work, new(1700, 980, 190, 26), 172, 100, 0) == new System.Drawing.Point(1528, 940));
+            Check(FlyoutPlacement.Beside(new(-1920, 0, 1920, 1040), new(-500, 500, 172, 26), 172, 100, 0) == new System.Drawing.Point(-328, 500));
+        });
+        Run("Compact hover submenu keeps its parent alive and closes the group before an account action", () =>
+        {
+            var closed = false; var invoked = false;
+            GlassTrayMenu? child = null;
+            var root = new GlassTrayMenu(new GlassMenuItem[] {
+                new("当前账户：主账户", Children: new GlassMenuItem[] {
+                    new("主账户", Enabled:false, IsChecked:true),
+                    new("备用账户", () => { Check(closed && child is not null && !child.IsVisible); invoked=true; }) }),
+                new("打开账户管理", () => { }), new("关闭自动切换", () => { }), new("更新额度", () => { }), new("关闭代理", () => { }), new("退出代理托盘", () => { }) }, () => closed=true);
+            try
+            {
+                var work = System.Windows.Forms.Screen.PrimaryScreen!.WorkingArea;
+                root.ShowNear(new(work.Left + 400, work.Top + 500), null);
+                Check(root.ActualHeight < 190 && root.ActualWidth <= 260);
+                var button = (Button)((StackPanel)((Border)root.Content).Child).Children[0];
+                button.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0) { RoutedEvent=UIElement.MouseEnterEvent });
+                child = root.Submenu;
+                Check(child is not null && child.IsVisible && root.IsVisible && !closed);
+                button.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0) { RoutedEvent=UIElement.MouseEnterEvent });
+                Check(ReferenceEquals(root.Submenu, child));
+                Check(GetWindowRect(new System.Windows.Interop.WindowInteropHelper(root).Handle, out var parentRect));
+                Check(GetWindowRect(new System.Windows.Interop.WindowInteropHelper(child!).Handle, out var childRect));
+                Check(childRect.Left == parentRect.Right);
+                child!.Activate(); Pump(30);
+                Check(root.IsVisible && child.IsVisible && !closed);
+                var choice = (Button)((StackPanel)((Border)child.Content).Child).Children[1];
+                choice.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                Check(closed && invoked && !root.IsVisible && !child.IsVisible);
+            }
+            finally { root.Close(); }
+        });
         Run("Glass menu is created hidden and every visible native position is anchored on the target monitor", () =>
         {
             foreach (var screen in System.Windows.Forms.Screen.AllScreens)
@@ -209,6 +263,7 @@ internal static class Program
         });
         SceneTests.Run(Run);
         Console.WriteLine($"{total - failed}/{total} UI tests passed; isolated native windows, no credentials or proxy processes");
+        application.Shutdown();
         return failed == 0 ? 0 : 1;
     }
     private static void Check(bool value) { if (!value) throw new InvalidOperationException(); }

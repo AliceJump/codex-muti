@@ -8,9 +8,13 @@ public partial class App : System.Windows.Application
     private EventWaitHandle? showSignal;
     private RegisteredWaitHandle? showListener;
     private ProxyTrayController? proxyTray;
+    private readonly bool startClients;
+    public App() : this(true) { }
+    internal App(bool startClients) => this.startClients = startClients;
     protected override void OnStartup(System.Windows.StartupEventArgs e)
     {
         base.OnStartup(e);
+        if (!startClients) return; // Isolated UI tests load the actual styles without starting clients.
         var proxyMode = e.Args.Contains("--proxy-tray", StringComparer.Ordinal);
         var instance = proxyMode ? "CodexPoolProxyTray" : "CodexPoolWidget";
         var signalName = "Local\\" + instance + "Show-" + Environment.UserName;
