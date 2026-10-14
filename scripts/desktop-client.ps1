@@ -1,7 +1,7 @@
 # Shared launcher: preserve Windows notification-area identity across versioned builds.
 # This file is dot-sourced. It never stops a UI or daemon process.
 function Start-PoolDesktopClient {
-    param([Parameter(Mandatory)][string]$BuildDirectory, [switch]$Tray)
+    param([Parameter(Mandatory)][string]$BuildDirectory, [switch]$Tray, [switch]$PassThru, [switch]$NoDaemonStart)
     $taskClientRoot = [IO.Path]::GetFullPath((Split-Path $PSScriptRoot -Parent))
     $taskSourceBuild = [IO.Path]::GetFullPath($BuildDirectory)
     $taskLocalRoot = Join-Path $taskClientRoot '.local'
@@ -49,12 +49,18 @@ function Start-PoolDesktopClient {
             }
         }
         $taskPreviousDaemon = [Environment]::GetEnvironmentVariable('CODEX_POOL_DAEMON')
+        $taskPreviousAutoStart = [Environment]::GetEnvironmentVariable('CODEX_POOL_DAEMON_AUTOSTART')
         try {
             # The proxy remains versioned and independent; only the tray UI needs a fixed path.
             [Environment]::SetEnvironmentVariable('CODEX_POOL_DAEMON', (Join-Path $taskSourceBuild 'Daemon\CodexPool.Daemon.exe'))
-            if ($Tray) { Start-Process -FilePath $taskExecutable -ArgumentList '--tray' -WorkingDirectory $taskStable -WindowStyle Hidden }
-            else { Start-Process -FilePath $taskExecutable -WorkingDirectory $taskStable -WindowStyle Normal }
-        } finally { [Environment]::SetEnvironmentVariable('CODEX_POOL_DAEMON', $taskPreviousDaemon) }
+            if ($NoDaemonStart) { [Environment]::SetEnvironmentVariable('CODEX_POOL_DAEMON_AUTOSTART', '0') }
+            if ($Tray) { $taskStartedClient = Start-Process -FilePath $taskExecutable -ArgumentList '--tray' -WorkingDirectory $taskStable -WindowStyle Hidden -PassThru }
+            else { $taskStartedClient = Start-Process -FilePath $taskExecutable -WorkingDirectory $taskStable -WindowStyle Normal -PassThru }
+            if ($PassThru) { return $taskStartedClient }
+        } finally {
+            [Environment]::SetEnvironmentVariable('CODEX_POOL_DAEMON', $taskPreviousDaemon)
+            [Environment]::SetEnvironmentVariable('CODEX_POOL_DAEMON_AUTOSTART', $taskPreviousAutoStart)
+        }
     } finally {
         if ($taskClientOwned) { $taskClientMutex.ReleaseMutex() }
         $taskClientMutex.Dispose()

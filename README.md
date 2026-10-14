@@ -108,11 +108,16 @@ chatgpt_base_url = "http://127.0.0.1:3210/backend-api"
 
 ## 本地组合部署
 
-一键停旧起新（会中断当前模型请求，不是热更新）：
+双击 `deploy.cmd` 可选择全部、仅核心或仅桌面组件。核心包含代理和 Dashboard；桌面组件包含托盘与悬浮窗。
 
 ```powershell
 pwsh -NoProfile -File .\scripts\deploy-local.ps1 -Dashboard
-# 或双击仓库根目录 deploy.cmd
+# 只更新界面，保留核心进程和进行中的模型请求：
+pwsh -NoProfile -File .\scripts\deploy-local.ps1 -Target Components
+# 只更新核心，保留现有界面：
+pwsh -NoProfile -File .\scripts\deploy-local.ps1 -Target Core -Dashboard
+# 命令行一键入口也可指定：
+.\deploy.cmd Components
 ```
 
 只构建并启动、保留已有 Daemon：
@@ -125,6 +130,8 @@ pwsh -NoProfile -File .\scripts\deploy-local.ps1 -Dashboard
 说明：
 
 - 部署脚本只动本仓库（及 worktree）`.local` 下的代理与 UI；不改账户凭据/阈值，不停止 Codex 本身。
+- 全部或核心部署会中断经过代理的当前请求；仅组件部署不停止、启动或替换核心。首次安装需选择全部。
+- 部分部署只发布所选项目，未选组件从现有完整版本保留；成功后记录完整组合版本。所选新进程启动失败时尝试恢复旧版，并保留原版本指针。
 - 本机运行版本以实际部署构建为准；更新源码不会自动替换已经运行的 Daemon。
 - #6 / #7 / #8 已分别合入 `master`，无需组合草稿分支。
 
