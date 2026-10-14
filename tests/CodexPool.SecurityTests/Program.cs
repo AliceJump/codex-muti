@@ -13,6 +13,7 @@ using CodexPool.Core;
 var root = Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, ".research", "security-" + Guid.NewGuid().ToString("N")));
 var tests = new (string Name, Func<Task> Run)[]
 {
+    ("Experimental compaction holds one serving account without failover and respects explicit rejection", CompactionRouting),
     ("DPAPI storage never contains plaintext canaries; public views redact", Storage),
     ("OIDC rejects wrong signature, issuer, audience, nonce and expiry", IdToken),
     ("OAuth PKCE and state isolation; callback is one-use", Login),
@@ -493,6 +494,26 @@ Task PoolRouting()
     try { production.UpdateSettings(new(true)); Check(false); } catch (AuthFailure) { }
     return Task.CompletedTask;
 }
+Task CompactionRouting()
+{
+    var vault = Store("compaction-routing"); vault.Add(Account("A")); vault.Add(Account("B"));
+    vault.SaveSettings(new(true)); var now = DateTimeOffset.UtcNow;
+    vault.SaveQuota(new("A", "fixture", "plus", now, [new("5h", 18000, 92, 8, now.AddHours(1))]));
+    using var issuer = new FakeIssuer(); using var http = new HttpClient(issuer); var auth = new OAuth(http, vault);
+    var quota = new Quota(http, auth, vault);
+    Check(!new PoolRuntime(vault, auth, quota, true).CompactionEnabled);
+    Check(new PoolRuntime(vault, auth, quota, false, true).CompactionAdvice("model") is null);
+    var pool = new PoolRuntime(vault, auth, quota, true, true);
+    var advice = pool.CompactionAdvice("model")!; var hold = pool.BeginCompaction(advice);
+    using (var request = pool.ReserveModelRequest("model"))
+        Check(request.CandidateIds.SequenceEqual(["A"]) && !request.AutoSwitch && request.Selection.AccountId == "A");
+    Check(pool.FinishCompaction(hold.Id, true) && pool.Active == "B");
+    Check(!pool.FinishCompaction(hold.Id, true));
+    pool.Activate("A"); hold = pool.BeginCompaction(pool.CompactionAdvice("model")!);
+    pool.Rejected(new("A", new("https://fixture.invalid/responses"), "canary"), "quota_rejected");
+    Check(pool.Select().AccountId == "B" && !pool.FinishCompaction(hold.Id, true));
+    return Task.CompletedTask;
+}
 Task DynamicQuotaParser()
 {
     var payload = JsonSerializer.SerializeToUtf8Bytes(new { plan_type = "pro", rate_limit = new { allowed = true, limit_reached = false,
@@ -616,6 +637,7 @@ async Task LocalApi()
         Check(codexUsage.IsSuccessStatusCode && codexDoc.RootElement.GetProperty("rate_limit").GetProperty("allowed").ValueKind is JsonValueKind.True or JsonValueKind.False);
         using var unauthorized = await http.GetAsync("http://127.0.0.1:3210/status"); Check(unauthorized.StatusCode == HttpStatusCode.Unauthorized);
         using var unauthorizedStatistics = await http.GetAsync("http://127.0.0.1:3210/statistics"); Check(unauthorizedStatistics.StatusCode == HttpStatusCode.Unauthorized);
+        using var unauthorizedCompaction = await http.GetAsync("http://127.0.0.1:3210/compaction/advice?model=model"); Check(unauthorizedCompaction.StatusCode == HttpStatusCode.Unauthorized);
         using var official = new HttpClient(new SocketsHttpHandler { UseProxy = false });
         official.DefaultRequestHeaders.Authorization = new("Bearer", "OFFICIAL-HTTP-CANARY");
         using var officialModel = await official.PostAsJsonAsync("http://127.0.0.1:3210/v1/responses", new { });
@@ -624,6 +646,8 @@ async Task LocalApi()
         Check(officialWs.StatusCode == HttpStatusCode.UpgradeRequired);
         using var officialControl = await official.PostAsJsonAsync("http://127.0.0.1:3210/settings", new { });
         Check(officialControl.StatusCode == HttpStatusCode.Unauthorized);
+        using var officialCompaction = await official.PostAsJsonAsync("http://127.0.0.1:3210/compaction/reserve", new { });
+        Check(officialCompaction.StatusCode == HttpStatusCode.Unauthorized);
         using var officialStatus = await official.GetAsync("http://127.0.0.1:3210/status");
         Check(officialStatus.StatusCode == HttpStatusCode.Unauthorized);
         using var officialStatistics = await official.GetAsync("http://127.0.0.1:3210/statistics"); Check(officialStatistics.StatusCode == HttpStatusCode.Unauthorized);
@@ -640,6 +664,7 @@ async Task LocalApi()
         using var redeemed = await browser.GetAsync(ticketUrl); Check(redeemed.StatusCode == HttpStatusCode.Redirect);
         using var replay = await browser.GetAsync(ticketUrl); Check(replay.StatusCode == HttpStatusCode.Unauthorized);
         using var browserStatus = await browser.GetAsync("http://127.0.0.1:3210/status"); Check(browserStatus.IsSuccessStatusCode);
+        using var browserCompaction = await browser.GetAsync("http://127.0.0.1:3210/compaction/advice?model=model"); Check(browserCompaction.StatusCode == HttpStatusCode.Unauthorized);
         using var browserStatistics = await browser.GetAsync("http://127.0.0.1:3210/statistics"); Check(browserStatistics.IsSuccessStatusCode);
         using var noCsrf = await browser.PostAsJsonAsync("http://127.0.0.1:3210/settings", new { autoSwitch = false, fiveHourThreshold = 90, weeklyThreshold = 90 });
         Check(noCsrf.StatusCode == HttpStatusCode.Forbidden);

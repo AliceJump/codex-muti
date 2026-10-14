@@ -3,7 +3,7 @@ using CodexPool.Core;
 namespace CodexPool.Daemon;
 
 // Coordinates durable active selection with the in-memory epoch. It never owns Codex state.
-public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool boundaryProbe)
+public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool boundaryProbe, bool experimentalCompaction = false)
 {
     private readonly object gate = new();
     private long requestsStarted;
@@ -15,6 +15,32 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
     public PoolSettings Settings => boundaryProbe ? vault.Settings : vault.Settings with { AutoSwitch = false };
     public AccountSwitch[] History => scheduler.History;
     public string? Active => scheduler.Active;
+    public bool CompactionEnabled => boundaryProbe && experimentalCompaction;
+    public object CompactionState => new { enabled = CompactionEnabled, selection = scheduler.Current,
+        reservation = scheduler.Hold is { } hold ? new { hold.AccountId, hold.Epoch, hold.Model, hold.ExpiresAt } : null };
+    public CompactionAdvice? CompactionAdvice(string model)
+    {
+        lock (gate) return CompactionEnabled ? scheduler.AdviseCompaction(model, RoutingAccounts(model), Settings, DateTimeOffset.UtcNow) : null;
+    }
+    public CompactionHold BeginCompaction(CompactionAdvice expected)
+    {
+        lock (gate)
+        {
+            if (!CompactionEnabled) throw new CompactionRejectedException("compaction_bridge_disabled");
+            return scheduler.ReserveCompaction(expected, RoutingAccounts(expected.Model), Settings, DateTimeOffset.UtcNow);
+        }
+    }
+    public bool FinishCompaction(string id, bool completed)
+    {
+        lock (gate)
+        {
+            var model = scheduler.Hold?.Model;
+            return scheduler.FinishCompaction(id, completed, RoutingAccounts(model), Settings, DateTimeOffset.UtcNow);
+        }
+    }
+    private PoolSettings AdmissionSettings(string id, DateTimeOffset now) => scheduler.Hold is { } hold
+        && hold.AccountId == id && hold.Epoch == scheduler.Current.Epoch && hold.ExpiresAt > now
+        ? Settings with { AutoSwitch = false } : Settings;
     public AccountAvailability[] Availability(string? model = null)
     {
         lock (gate)
@@ -46,7 +72,7 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
                 {
                     var candidate = new PoolAccount(x.Id, x.Enabled, x.Paused, x.Draining, true, x.CooldownUntil,
                         QuotaUpdatedAt: usage?.UpdatedAt, Windows: fresh ? RoutingWindows(usage!, model, now) : []);
-                    reason = StickyScheduler.ExclusionReason(candidate, Settings, now);
+                    reason = StickyScheduler.ExclusionReason(candidate, AdmissionSettings(x.Id, now), now);
                 }
                 return new AccountAvailability(x.Id, reason, code, reset, usage?.Plan, minutes);
             }).ToArray();
@@ -156,7 +182,7 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
             {
                 foreach (var id in ids) uses.Add(vault.AcquireUse(id, model: true));
                 requestsStarted++;
-                return new(selection, ids, uses, Settings.AutoSwitch);
+                return new(selection, ids, uses, Settings.AutoSwitch && scheduler.Hold is null);
             }
             catch { foreach (var use in uses) use.Dispose(); throw; }
         }
@@ -232,7 +258,8 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
     {
         lock (gate)
         {
-            if (!Settings.AutoSwitch) return [selection.AccountId];
+            if (!Settings.AutoSwitch || scheduler.Hold is { } hold && hold.AccountId == selection.AccountId && hold.Epoch == selection.Epoch)
+                return [selection.AccountId];
             var provider = vault.Find(selection.AccountId)?.ProviderKind;
             return new[] { selection.AccountId }.Concat(Accounts(model).Where(x => x.Id != selection.AccountId
                 && vault.Find(x.Id)?.ProviderKind == provider

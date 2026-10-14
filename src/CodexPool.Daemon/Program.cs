@@ -46,7 +46,9 @@ try
     var recent = new ConcurrentQueue<object>();
     var inFlight = new ConcurrentDictionary<string, int>();
     var boundaryProbe = args.Contains("--live-boundary-probe", StringComparer.Ordinal);
-    var pool = new PoolRuntime(vault, auth, quota, boundaryProbe);
+    var experimentalCompaction = args.Contains("--experimental-compact-bridge", StringComparer.Ordinal);
+    if (experimentalCompaction && !boundaryProbe) throw new AuthFailure("live_migration_gate_pending");
+    var pool = new PoolRuntime(vault, auth, quota, boundaryProbe, experimentalCompaction);
     var browsers = new BrowserSessions(); var events = new StateEvents();
     var officialModelAuth = new OfficialModelAuth(Environment.GetEnvironmentVariable("CODEX_HOME")
         ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex"), vault);
@@ -70,7 +72,8 @@ try
             context.Request.Headers.Authorization.ToString(), context.RequestAborted);
         var session = browsers.Find(context);
         var mutating = context.Request.Method is not ("GET" or "HEAD");
-        var bearerOnly = path.StartsWith("/v1/", StringComparison.Ordinal) || path is "/accounts/login" or "/dashboard/session";
+        var bearerOnly = path.StartsWith("/v1/", StringComparison.Ordinal) || path.StartsWith("/compaction/", StringComparison.Ordinal)
+            || path is "/accounts/login" or "/dashboard/session";
         if (!publicPath && !bearer && !modelBearer && (bearerOnly || session is null))
         { context.Response.StatusCode = 401; return; }
         if (!publicPath && !bearer && !modelBearer && mutating && !LocalCommands.EqualSecret(context.Request.Headers["X-Codex-Pool-CSRF"].ToString(), session!.Csrf))
@@ -92,6 +95,8 @@ try
         { if (!context.Response.HasStarted) { var error = pool.Unavailable(model: context.Items["quotaModel"] as string); context.Response.StatusCode = error.Status; context.Response.ContentType = "application/json"; if (error.RetryAfter is not null) context.Response.Headers["Retry-After"] = error.RetryAfter; await context.Response.Body.WriteAsync(error.Body(), context.RequestAborted); } else context.Abort(); }
         catch (JsonException)
         { if (!context.Response.HasStarted) { context.Response.StatusCode = 400; await context.Response.WriteAsJsonAsync(new { error = new { code = "invalid_json" } }); } else context.Abort(); }
+        catch (CompactionRejectedException ex)
+        { if (!context.Response.HasStarted) { context.Response.StatusCode = 409; await context.Response.WriteAsJsonAsync(new { error = new { code = ex.Code } }); } else context.Abort(); }
         catch (RequestBodyFailure ex)
         { if (!context.Response.HasStarted) { context.Response.StatusCode = ex.Status; await context.Response.WriteAsJsonAsync(new { error = new { code = ex.Code } }); } else context.Abort(); }
         catch
@@ -101,7 +106,7 @@ try
     object Status() => new { activeAccountId = vault.ActiveId, stage = "acceptance", automaticSwitching = pool.Settings.AutoSwitch, settings = pool.Settings,
         boundaryProbe, distinctUsers = vault.DistinctUsers, nativeDistinctUsers = vault.NativeDistinctUsers, liveMigrationValidated = false, quotaSource = "per_registration", accounts = vault.Views(auth.Health), accountAvailability = pool.Availability(),
         nativeLoginAttempts = nativeLogin.PublicAttempts, usage = quota.Views, quotaRefreshErrors = quota.RefreshErrors, quotaSelectionError = pool.QuotaSelectionError,
-        tokenStatistics = statistics.View(), inFlightRequests = inFlight.ToArray(), recentRequests = recent.ToArray(), recentSwitches = pool.History };
+        compaction = pool.CompactionState, tokenStatistics = statistics.View(), inFlightRequests = inFlight.ToArray(), recentRequests = recent.ToArray(), recentSwitches = pool.History };
     app.MapGet("/status", () => Status());
     app.MapGet("/statistics", () => statistics.View());
     app.MapGet("/events", (HttpContext context) => events.StreamAsync(context, Status));
@@ -112,6 +117,21 @@ try
     foreach (var asset in new[] { (Path: "/", File: "index.html", Type: "text/html"), (Path: "/dashboard.js", File: "dashboard.js", Type: "text/javascript"), (Path: "/dashboard.css", File: "dashboard.css", Type: "text/css") })
         app.MapGet(asset.Path, () => Results.Stream(typeof(Vault).Assembly.GetManifestResourceStream("CodexPool.Daemon.Dashboard." + asset.File)!, asset.Type));
     app.MapGet("/settings", () => pool.Settings);
+    app.MapGet("/compaction/advice", (string model) => Regex.IsMatch(model, "^[a-zA-Z0-9._:/-]{1,128}$")
+        ? Results.Ok(new { enabled = pool.CompactionEnabled, advice = pool.CompactionAdvice(model) }) : Results.BadRequest());
+    app.MapPost("/compaction/reserve", async (HttpContext context) =>
+    {
+        var expected = await context.Request.ReadFromJsonAsync<CompactionAdvice>(context.RequestAborted);
+        if (expected is null || !Guid.TryParseExact(expected.AccountId, "N", out _) || expected.Epoch < 0
+            || expected.Model is null || !Regex.IsMatch(expected.Model, "^[a-zA-Z0-9._:/-]{1,128}$")) return Results.BadRequest();
+        return Results.Ok(pool.BeginCompaction(expected));
+    });
+    app.MapPost("/compaction/{id}/finish", async (string id, HttpContext context) =>
+    {
+        var outcome = await context.Request.ReadFromJsonAsync<CompactionOutcome>(context.RequestAborted);
+        if (!Guid.TryParseExact(id, "N", out _) || outcome?.Outcome is not ("completed" or "failed" or "unknown")) return Results.BadRequest();
+        return Results.Ok(new { switched = pool.FinishCompaction(id, outcome.Outcome == "completed") });
+    });
     app.MapPost("/settings", async (HttpContext context) =>
     {
         var settings = await context.Request.ReadFromJsonAsync<PoolSettings>(context.RequestAborted) ?? throw new AuthFailure("invalid_settings");
