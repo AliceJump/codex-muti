@@ -69,10 +69,15 @@ internal static class Program
             bool Record(uint operation, ref StableTrayIcon.NotifyData data) { calls.Add((operation, data)); return true; }
             using var tray = new StableTrayIcon(QuotaTrayIcon.Create(50), "预览", Record);
             var clicks = new List<(int X, int Y)>(); tray.MouseClick += (_, e) => clicks.Add((e.X, e.Y));
+            var presses = 0; tray.LeftPress += (_, _) => presses++;
+            var keyboardSelections = 0; tray.MouseClick += (_, e) => { if (e.Clicks == 0) keyboardSelections++; };
             var packed = ((900 & 0xffff) << 16) | (-1200 & 0xffff);
+            _ = SendMessage(tray.Handle, 0x8001, packed, (1 << 16) | 0x201);
+            _ = SendMessage(tray.Handle, 0x8001, packed, (1 << 16) | 0x203);
             _ = SendMessage(tray.Handle, 0x8001, packed, (1 << 16) | 0x400);
             _ = SendMessage(tray.Handle, 0x8001, packed, (1 << 16) | 0x401);
             Check(clicks.Count == 2 && clicks.All(x => x == (-1200, 900)));
+            Check(presses == 2 && keyboardSelections == 1);
             tray.Text = "额度更新";
             tray.ShowBalloon("账户切换", "已切换");
             _ = SendMessage(tray.Handle, RegisterWindowMessage("TaskbarCreated"), 0, 0);

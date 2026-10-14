@@ -25,6 +25,7 @@ public partial class FloatingWindow : Window
     private readonly StableTrayIcon? tray;
     private GlassTrayMenu? glassMenu;
     private readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromSeconds(20) };
+    private readonly DispatcherTimer trayDismissTimer = new() { Interval = TimeSpan.FromMilliseconds(16) };
     private WindowPreferences preferences = new();
     private JsonElement? snapshot;
     private bool exiting, busy, connected;
@@ -36,8 +37,7 @@ public partial class FloatingWindow : Window
     private string? trayStateKey;
     private string? lastActiveAccountId;
     private bool switchNotifyReady;
-    private long dismissedAt;
-    private System.Drawing.Point dismissedPoint;
+    private bool trayClickCloses;
     private nint handle;
     internal bool Pinned => preferences.Pinned;
     public FloatingWindow() : this(true) { }
@@ -65,21 +65,17 @@ public partial class FloatingWindow : Window
                 case "pin": TogglePinned(); break;
             }
         };
-        Scene.DragRequested = () => { if (Pinned) { DragMove(); SavePosition(); } };
+        Scene.DragRequested = () => { if (Pinned) { DragMove(); ConstrainPinnedScene(IsVisible); SavePosition(); } };
         if (startServices)
         {
             tray = new StableTrayIcon(CreateIcon(), "Codex Pool · 账户状态 · Ctrl+Alt+W");
             UpdateTrayQuota(null);
             tray.ContextMenuRequested += (_, e) => Dispatcher.Invoke(() => ShowGlassTrayMenu(e));
+            tray.LeftPress += (_, _) => Dispatcher.Invoke(HandleTrayPress);
             tray.MouseClick += (_, e) =>
             {
                 if (e.Button != Forms.MouseButtons.Left) return;
-                Dispatcher.Invoke(() =>
-                {
-                    var cursor = Forms.Cursor.Position;
-                    if (Environment.TickCount64 - dismissedAt < 500 && Math.Abs(cursor.X - dismissedPoint.X) <= 2 && Math.Abs(cursor.Y - dismissedPoint.Y) <= 2) return;
-                    glassMenu?.Close(); ToggleVisibility(new System.Drawing.Point(e.X, e.Y));
-                });
+                Dispatcher.Invoke(() => HandleTrayClick(new System.Drawing.Point(e.X, e.Y), keyboard: e.Clicks == 0));
             };
         }
         PreviewKeyDown += (_, e) =>
@@ -98,7 +94,13 @@ public partial class FloatingWindow : Window
             if (!registered) SetNotice("快捷键已被其他应用使用，可从托盘或启动入口显示窗口。");
             if (Pinned) RestorePosition(); _ = WatchAsync(); timer.Start();
         };
-        Deactivated += (_, _) => DismissOnDeactivation();
+        Deactivated += (_, _) => DismissOnDeactivation(IsTrayPress());
+        trayDismissTimer.Tick += (_, _) =>
+        {
+            if ((GetAsyncKeyState(1) & 0x8000) != 0) return;
+            trayDismissTimer.Stop();
+            if (!Pinned && !IsActive) { SavePosition(); Hide(); }
+        };
         timer.Tick += (_, _) => { SavePosition(); if (snapshot is { } state) Render(state); };
         Closing += OnClosing;
         SystemEvents.UserPreferenceChanged += PreferenceChanged;
@@ -150,7 +152,7 @@ public partial class FloatingWindow : Window
     }
     internal async void ShowFromLauncher()
     {
-        if (Pinned) { Show(); ClampPosition(); Activate(); } else ShowFlyout();
+        if (Pinned) ShowPinned(); else ShowFlyout();
         if (!startServices) return;
         try { await ProxyStartup.EnsureRunningAsync(lifetime.Token); }
         catch (Exception ex) when (ex is HttpRequestException or IOException or System.ComponentModel.Win32Exception or OperationCanceledException)
@@ -165,6 +167,7 @@ public partial class FloatingWindow : Window
             state.GetProperty("automaticSwitching").GetBoolean(), IsVisible,
             state.GetProperty("inFlightRequests").EnumerateArray().Sum(x => x.GetProperty("value").GetInt32()));
         Scene.SetBusy(busy);
+        ConstrainPinnedScene(IsVisible);
     }
     internal void Preview(JsonElement state, int mode, bool online = true)
     { connected = online; preferences = preferences with { Mode = mode }; Render(state); }
@@ -321,21 +324,39 @@ public partial class FloatingWindow : Window
         if (Pinned) SavePosition();
         preferences = preferences with { Pinned = !Pinned };
         Scene.SetPinned(Pinned);
-        if (Pinned) { flyoutScreen = null; SavePosition(); }
+        if (Pinned) { flyoutScreen = null; ConstrainPinnedScene(IsVisible); SavePosition(); }
         else { ShowFlyout(); SavePosition(); }
     }
-    internal void DismissOnDeactivation()
+    private bool IsTrayPress() => (GetAsyncKeyState(1) & 0x8000) != 0
+        && tray?.TryGetBounds(out var bounds) == true && bounds.Contains(Forms.Cursor.Position);
+    internal void DismissOnDeactivation(bool trayPress = false)
     {
         if (Pinned) return;
-        dismissedAt = Environment.TickCount64; dismissedPoint = Forms.Cursor.Position; SavePosition(); Hide();
+        // The same tray press deactivates the popup before NIN_SELECT arrives.
+        // Let that selection close it once, instead of hiding and reopening it.
+        if (trayPress) { trayClickCloses = true; trayDismissTimer.Start(); return; }
+        trayDismissTimer.Stop(); SavePosition(); Hide();
     }
-    private void ToggleVisibility(System.Drawing.Point? clicked = null) { if (IsVisible) { SavePosition(); Hide(); } else if (Pinned) { Show(); ClampPosition(); Activate(); } else ShowFlyout(clicked); }
+    internal void HandleTrayPress() => trayClickCloses = IsVisible;
+    internal void HandleTrayClick(System.Drawing.Point point, bool keyboard = false)
+    {
+        trayDismissTimer.Stop(); glassMenu?.Close();
+        var close = !keyboard && trayClickCloses; trayClickCloses = false;
+        if (close) { SavePosition(); Hide(); } else ToggleVisibility(point);
+    }
+    private void ToggleVisibility(System.Drawing.Point? clicked = null) { if (IsVisible) { SavePosition(); Hide(); } else if (Pinned) ShowPinned(); else ShowFlyout(clicked); }
+    private void ShowPinned()
+    {
+        _ = new WindowInteropHelper(this).EnsureHandle();
+        Scene.PrepareEntrance(); Show(); ClampPosition(); Scene.BeginEntrance(); Activate();
+    }
     private void ShowFlyout(System.Drawing.Point? clicked = null)
     {
+        _ = new WindowInteropHelper(this).EnsureHandle();
         if (tray?.TryGetBounds(out var iconBounds) == true && (clicked is null || iconBounds.Contains(clicked.Value))) flyoutAnchor = iconBounds;
         else flyoutAnchor = new System.Drawing.Rectangle(clicked ?? Forms.Cursor.Position, System.Drawing.Size.Empty);
         flyoutScreen = Forms.Screen.FromPoint(new System.Drawing.Point(flyoutAnchor.Value.Left + flyoutAnchor.Value.Width / 2, flyoutAnchor.Value.Top + flyoutAnchor.Value.Height / 2));
-        ConfigureHost(); PositionFlyout(); Show(); Activate();
+        ConfigureHost(); PositionFlyout(); Scene.PrepareEntrance(); Show(); Scene.BeginEntrance(); Activate();
         if (snapshot is { } state) Render(state);
     }
     private void ConfigureHost()
@@ -345,7 +366,9 @@ public partial class FloatingWindow : Window
         var screen = flyoutScreen ?? (handle != 0 ? Forms.Screen.FromHandle(handle) : Forms.Screen.PrimaryScreen!);
         var dpi = VisualTreeHelper.GetDpi(this); var area = screen.WorkingArea;
         Width = Math.Min(620, area.Width / dpi.DpiScaleX); Height = Math.Min(760, Math.Max(100, area.Height / dpi.DpiScaleY - 24));
+        UpdateLayout();
         if (snapshot is { } state) Render(state);
+        else Scene.SetState([], preferences.Mode, connected, false, IsVisible);
     }
     private void PositionFlyout()
     {
@@ -366,6 +389,7 @@ public partial class FloatingWindow : Window
                 : Math.Max(area.Top, anchor.Top - gap - height + (int)(10 * dpi.DpiScaleY));
             Scene.HorizontalAnchor = Math.Clamp((center - x) / (double)Math.Max(1, width), 0, 1);
             _ = SetWindowPos(handle, 0, x, y, 0, 0, 0x0001 | 0x0004 | 0x0010);
+            Scene.ResetHostOffset();
         }
         finally { positioningFlyout = false; }
     }
@@ -381,21 +405,30 @@ public partial class FloatingWindow : Window
     private void ClampPosition()
     {
         if (!Pinned) { PositionFlyout(); return; }
+        ConstrainPinnedScene(false);
+    }
+    private void ConstrainPinnedScene(bool animate)
+    {
+        if (!Pinned || Scene.ActualWidth <= 0 || Scene.ActualHeight <= 0) return;
         if (handle == 0 || !GetWindowRect(handle, out var rect)) return;
         var dpi = VisualTreeHelper.GetDpi(this); var visible = Scene.SurfaceBounds;
         var visibleRect = new System.Drawing.Rectangle(rect.Left + (int)(visible.Left * dpi.DpiScaleX), rect.Top + (int)(visible.Top * dpi.DpiScaleY),
             (int)(visible.Width * dpi.DpiScaleX), (int)(visible.Height * dpi.DpiScaleY));
         var area = Forms.Screen.FromRectangle(visibleRect).WorkingArea;
-        var x = rect.Left + Math.Clamp(visibleRect.Left, area.Left, Math.Max(area.Left, area.Right - visibleRect.Width)) - visibleRect.Left;
-        var y = rect.Top + Math.Clamp(visibleRect.Top, area.Top, Math.Max(area.Top, area.Bottom - visibleRect.Height)) - visibleRect.Top;
-        _ = SetWindowPos(handle, 0, x, y, 0, 0, 0x0001 | 0x0004 | 0x0010);
+        var target = Scene.TargetSurfaceBounds;
+        var left = rect.Left + target.Left * dpi.DpiScaleX; var top = rect.Top + target.Top * dpi.DpiScaleY;
+        var x = rect.Left + (int)Math.Round(Math.Clamp(left, area.Left, Math.Max(area.Left, area.Right - target.Width * dpi.DpiScaleX)) - left);
+        var y = rect.Top + (int)Math.Round(Math.Clamp(top, area.Top, Math.Max(area.Top, area.Bottom - target.Height * dpi.DpiScaleY)) - top);
+        if (x == rect.Left && y == rect.Top) return;
+        if (SetWindowPos(handle, 0, x, y, 0, 0, 0x0001 | 0x0004 | 0x0010) && GetWindowRect(handle, out var moved))
+            Scene.RebaseHost((moved.Left - rect.Left) / dpi.DpiScaleX, (moved.Top - rect.Top) / dpi.DpiScaleY, animate);
     }
     private void SavePosition()
     {
         if (!startServices || handle == 0 || !GetWindowRect(handle, out var rect)) return;
         if (Pinned)
         {
-            var dpi = VisualTreeHelper.GetDpi(this); var bounds = Scene.SurfaceBounds;
+            var dpi = VisualTreeHelper.GetDpi(this); var bounds = Scene.TargetSurfaceBounds;
             preferences = preferences with { X = rect.Left + (int)Math.Round((bounds.Left + bounds.Width / 2) * dpi.DpiScaleX),
                 Y = rect.Top + (int)Math.Round(bounds.Bottom * dpi.DpiScaleY), PositionVersion = 2 };
         }
@@ -404,7 +437,7 @@ public partial class FloatingWindow : Window
     private void OnClosing(object? sender, CancelEventArgs e)
     {
         SavePosition(); if (startServices && !exiting) { e.Cancel = true; Hide(); return; }
-        Scene.Stop(); lifetime.Cancel(); timer.Stop(); SystemEvents.UserPreferenceChanged -= PreferenceChanged;
+        Scene.Stop(); lifetime.Cancel(); timer.Stop(); trayDismissTimer.Stop(); SystemEvents.UserPreferenceChanged -= PreferenceChanged;
         _ = UnregisterHotKey(handle, 1);
         tray?.Dispose();
         http.Dispose();
@@ -427,6 +460,7 @@ public partial class FloatingWindow : Window
     [StructLayout(LayoutKind.Sequential)] private struct Rect { public int Left, Top, Right, Bottom; }
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool RegisterHotKey(nint hwnd, int id, uint modifiers, uint key);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool UnregisterHotKey(nint hwnd, int id);
+    [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int key);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetWindowRect(nint hwnd, out Rect rect);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool DestroyIcon(nint icon);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool SetWindowPos(nint hwnd, nint after, int x, int y, int cx, int cy, uint flags);

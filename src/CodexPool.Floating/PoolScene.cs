@@ -42,7 +42,12 @@ public sealed class PoolScene : Canvas
     private readonly Stopwatch watch = new();
     private double last;
     private TimeSpan renderingTime;
-    private double scroll;
+    private readonly MorphSpring scrollMotion = new(0);
+    private readonly MorphSpring hostOffset = new(0, 0);
+    private readonly MorphSpring entrance = new(1);
+    private readonly TranslateTransform entranceTranslation = new();
+    private double scroll => scrollMotion.Value[0];
+    private double requestedScroll;
     private double contentHeight, viewportHeight;
     private Rect viewport;
     private bool light, highContrast;
@@ -64,13 +69,19 @@ public sealed class PoolScene : Canvas
     internal IReadOnlyList<PoolAccountView> Accounts => accounts;
     internal int Mode => mode;
     internal double ScrollOffset => scroll;
-    internal Rect SurfaceBounds => new(Math.Clamp(ActualWidth * HorizontalAnchor - Shape.Value[0] / 2, 10,
-        Math.Max(10, ActualWidth - Shape.Value[0] - 10)), AtTop ? 10 : ActualHeight - 10 - Shape.Value[1], Shape.Value[0], Shape.Value[1]);
+    internal double EntranceProgress => entrance.Value[0];
+    internal Rect SurfaceBounds
+    {
+        get { var bounds = BoundsFor(Shape.Value); bounds.Offset(hostOffset.Value[0], hostOffset.Value[1]); return bounds; }
+    }
+    internal Rect TargetSurfaceBounds => BoundsFor(Shape.Target);
+    private Rect BoundsFor(double[] shape) => new(Math.Clamp(ActualWidth * HorizontalAnchor - shape[0] / 2, 10,
+        Math.Max(10, ActualWidth - shape[0] - 10)), AtTop ? 10 : ActualHeight - 10 - shape[1], shape[0], shape[1]);
     internal IReadOnlyDictionary<string, Button> AccountTargets => cards.ToDictionary(x => x.Key, x => x.Value.Hit);
     internal ToggleButton PinTarget => (ToggleButton)actions.First(a => a.Action == "pin").Button;
     public PoolScene()
     {
-        Focusable = false; ClipToBounds = false;
+        Focusable = false; ClipToBounds = false; RenderTransform = entranceTranslation;
         drawing = new(this) { IsHitTestVisible = false }; Children.Add(drawing); Children.Add(hits);
         foreach (var (label, action) in new[] { ("◫", "mode"), ("◐", "theme"), ("\uE718", "pin"), ("×", "close"), ("Web 面板 ↗", "web"), ("刷新额度", "refresh") })
         {
@@ -88,22 +99,23 @@ public sealed class PoolScene : Canvas
             actions.Add((b, action)); Children.Add(b);
         }
         SizeChanged += (_, _) => { drawing.Width = ActualWidth; drawing.Height = ActualHeight; Present(); };
-        MouseWheel += (_, e) => { scroll = Math.Clamp(scroll - e.Delta / 3d, 0, Math.Max(0, contentHeight - viewportHeight)); Present(); e.Handled = true; };
+        MouseWheel += (_, e) => { SetScroll(scroll - e.Delta / 3d); Present(); e.Handled = true; };
         PreviewKeyDown += (_, e) =>
         {
             var next = e.Key switch { Key.PageDown => scroll + viewportHeight * .8, Key.PageUp => scroll - viewportHeight * .8,
                 Key.Home => 0, Key.End => contentHeight, _ => scroll };
             if (next == scroll) return;
-            scroll = Math.Clamp(next, 0, Math.Max(0, contentHeight - viewportHeight)); Present(); e.Handled = true;
+            SetScroll(next); Present(); e.Handled = true;
         };
         MouseLeftButtonDown += (_, e) => { if (SurfaceBounds.Contains(e.GetPosition(this)) && e.OriginalSource == this) DragRequested?.Invoke(); };
         Unloaded += (_, _) => Stop();
-        IsVisibleChanged += (_, _) => { if (!IsVisible) { Stop(); Shape.Snap(); foreach (var c in cards.Values) c.Pose.Snap(); Present(); } };
+        IsVisibleChanged += (_, _) => { if (!IsVisible) { Stop(); SnapMotion(); Present(); } };
     }
     protected override HitTestResult? HitTestCore(PointHitTestParameters p) => SurfaceBounds.Contains(p.HitPoint) ? new PointHitTestResult(this, p.HitPoint) : null;
     internal void SetTheme(bool useLight, bool contrast)
     {
         light = useLight; highContrast = contrast; text.Clear();
+        if (highContrast || !SystemParameters.ClientAreaAnimation) { Stop(); SnapMotion(); }
         var fg = Foreground;
         foreach (var (b, _) in actions) b.Foreground = fg;
         Present();
@@ -174,8 +186,8 @@ public sealed class PoolScene : Canvas
         var height = Math.Min(available, y + footer + (mode == 2 ? 0 : 8));
         Shape.Aim(width, Math.Max(64, height), mode == 2 ? 30 : 26, mode == 2 ? 0 : 1, mode == 0 ? 1 : 0);
         viewportHeight = Math.Max(32, height - header - footer);
-        scroll = Math.Clamp(scroll, 0, Math.Max(0, contentHeight - viewportHeight));
-        if (!animate || highContrast || !SystemParameters.ClientAreaAnimation || !IsVisible) { Stop(); Shape.Snap(); foreach (var c in cards.Values) c.Pose.Snap(); }
+        scrollMotion.Aim(Math.Clamp(requestedScroll, 0, Math.Max(0, contentHeight - viewportHeight)));
+        if (!animate || highContrast || !SystemParameters.ClientAreaAnimation || !IsVisible) { Stop(); SnapMotion(); }
         else Start();
         Present();
     }
@@ -188,22 +200,49 @@ public sealed class PoolScene : Canvas
     private void EnsureVisible(string id)
     {
         var c = cards[id]; var y = c.Pose.Value[1] - (mode == 2 ? 0 : 68);
-        if (y < scroll) scroll = y;
-        if (y + c.Pose.Value[3] > scroll + viewportHeight) scroll = y + c.Pose.Value[3] - viewportHeight;
-        scroll = Math.Clamp(scroll, 0, Math.Max(0, contentHeight - viewportHeight));
+        var next = scroll;
+        if (y < next) next = y;
+        if (y + c.Pose.Value[3] > next + viewportHeight) next = y + c.Pose.Value[3] - viewportHeight;
+        SetScroll(next);
     }
-    private void Start() { if (Animating) return; Animating = true; watch.Restart(); last = 0; renderingTime = default; CompositionTarget.Rendering += Tick; }
+    private void SetScroll(double value)
+    { requestedScroll = Math.Clamp(value, 0, Math.Max(0, contentHeight - viewportHeight)); scrollMotion.Aim(requestedScroll); scrollMotion.Snap(); }
+    internal void RebaseHost(double x, double y, bool animate)
+    {
+        // Cancel a one-time native move in scene coordinates, then smoothly reach
+        // the safe target. The visible frame keeps its current screen position.
+        hostOffset.Value[0] -= x; hostOffset.Value[1] -= y;
+        if (animate && !highContrast && SystemParameters.ClientAreaAnimation && IsVisible) Start(); else hostOffset.Snap();
+        Present();
+    }
+    internal void ResetHostOffset() { hostOffset.Snap(); Present(); }
+    internal void PrepareEntrance()
+    {
+        if (IsVisible || highContrast || !SystemParameters.ClientAreaAnimation) return;
+        entrance.Aim(0); entrance.Snap(); entrance.Aim(1); Present();
+    }
+    internal void BeginEntrance()
+    {
+        if (IsVisible && !entrance.Settled) Start();
+    }
+    private void SnapMotion()
+    { Shape.Snap(); scrollMotion.Snap(); hostOffset.Snap(); entrance.Snap(); foreach (var c in cards.Values) c.Pose.Snap(); }
+    private void Start() { if (Animating) return; Animating = true; watch.Restart(); last = -1; renderingTime = default; CompositionTarget.Rendering += Tick; }
     internal void Stop() { Animating = false; CompositionTarget.Rendering -= Tick; }
     private void Tick(object? sender, EventArgs e)
     {
         var time = ((RenderingEventArgs)e).RenderingTime; if (time == renderingTime) return; renderingTime = time;
-        var now = watch.Elapsed.TotalSeconds; var dt = now - last; last = now; if (dt <= 0) return;
-        Shape.Step(dt); foreach (var c in cards.Values) c.Pose.Step(dt);
-        if (Shape.Settled && cards.Values.All(c => c.Pose.Settled)) { Shape.Snap(); foreach (var c in cards.Values) c.Pose.Snap(); Stop(); }
+        var now = watch.Elapsed.TotalSeconds;
+        if (last < 0) { last = now; return; } // Initial layout/show cost must not consume the visible animation.
+        var dt = now - last; last = now; if (dt <= 0) return;
+        Shape.Step(dt); scrollMotion.Step(dt); hostOffset.Step(dt); entrance.Step(dt); foreach (var c in cards.Values) c.Pose.Step(dt);
+        if (Shape.Settled && scrollMotion.Settled && hostOffset.Settled && entrance.Settled && cards.Values.All(c => c.Pose.Settled)) { SnapMotion(); Stop(); }
         Present();
     }
     private void Present()
     {
+        Opacity = Math.Clamp(entrance.Value[0], 0, 1);
+        entranceTranslation.Y = (AtTop ? -1 : 1) * 8 * (1 - Opacity);
         var root = SurfaceBounds; var v = Shape.Value;
         viewport = new(root.X, root.Y + v[3] * 68, root.Width, Math.Max(1, root.Height - v[3] * 158));
         hits.Clip = new RectangleGeometry(viewport);
@@ -326,7 +365,7 @@ public sealed class PoolScene : Canvas
         if (contentHeight > viewportHeight)
         {
             var length = Math.Max(16, viewport.Height * viewportHeight / contentHeight);
-            var top = viewport.Y + (viewport.Height - length) * scroll / Math.Max(1, contentHeight - viewportHeight);
+            var top = viewport.Y + (viewport.Height - length) * Math.Clamp(scroll / Math.Max(1, contentHeight - viewportHeight), 0, 1);
             dc.DrawRoundedRectangle(muted, null, new(viewport.Right - 7, top, 2, length), 1, 1);
         }
         Text(dc, "已启用 " + accounts.Count(a => a.Enabled) + " 个账户 · " + runningRequests + " 个请求处理中",
