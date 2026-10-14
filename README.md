@@ -110,7 +110,15 @@ chatgpt_base_url = "http://127.0.0.1:3210/backend-api"
 
 ### 实验：额度预警触发真实压缩
 
-已实现可选 App Server stdio 桥接、提前额度预警和条件账户预留。默认关闭，仅支持已核对的 CLI `0.162.1`；真实 Desktop/A/B 压缩验收仍待完成。构建、启动检查与回滚见 [docs/compaction-bridge.md](docs/compaction-bridge.md)。桥接不会重启当前 Desktop，需从独立入口启动新实例。
+已实现可选 App Server stdio 桥接、提前额度预警和条件账户预留。默认关闭，仅支持已核对的 CLI `0.162.1`。2026-10-14 已在用户真实环境观察到压缩完成、切换账户及新账户成功继续请求；完整故障矩阵与长会话验收仍待完成。
+
+已有本地构建时，双击仓库根目录 **`start-codex.cmd`**，即可按需启动实验代理、账户托盘和带桥接的 Codex Desktop。也可以安装桌面快捷方式：
+
+```powershell
+pwsh -NoProfile -File scripts/install-codex-shortcut.ps1
+```
+
+以后双击桌面的 **Codex Pool**。保留已有账户、自动切换设置与阈值，重复点击复用已有桥接实例。普通 Desktop 正在运行或旧代理没有开启压缩能力时，入口会提示退出对应旧实例，不会自动中断工作。构建、检查与回滚见 [docs/compaction-bridge.md](docs/compaction-bridge.md)。
 
 双击 `deploy.cmd` 可选择全部、仅核心或仅桌面组件。核心包含代理和 Dashboard；桌面组件为支持固定的托盘面板。
 

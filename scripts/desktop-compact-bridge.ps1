@@ -1,5 +1,5 @@
 #requires -Version 7.0
-param([string]$CodexPath, [string]$DesktopPath, [string]$BridgePath, [switch]$CheckOnly)
+param([string]$CodexPath, [string]$DesktopPath, [string]$BridgePath, [switch]$CheckOnly, [switch]$PassThru, [switch]$ReuseRunning)
 $ErrorActionPreference = 'Stop'
 $taskRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $taskCodex = if ($CodexPath) { [IO.Path]::GetFullPath($CodexPath) } else { (Get-Command codex.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source }
@@ -24,8 +24,22 @@ $taskDesktop = if ($DesktopPath) { [IO.Path]::GetFullPath($DesktopPath) } else {
     }
 }
 if (-not (Test-Path -LiteralPath $taskDesktop)) { throw 'Desktop 可执行文件不存在。' }
-if ($CheckOnly) { Write-Host '启动入口检查通过；没有重启 Desktop、改写配置或触发模型调用。'; return }
-if (Get-Process -Name Codex -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.Equals($taskDesktop,[StringComparison]::OrdinalIgnoreCase) }) {
+$taskDesktopFolder = Split-Path $taskDesktop -Parent
+$taskDesktopCandidates = @($taskDesktop, (Join-Path $taskDesktopFolder 'Codex.exe'), (Join-Path $taskDesktopFolder 'ChatGPT.exe'))
+$taskDesktopProcesses = @(Get-CimInstance Win32_Process -Filter "Name='Codex.exe' OR Name='ChatGPT.exe'" | Where-Object {
+    $_.ExecutablePath -and $taskDesktopCandidates -contains $_.ExecutablePath
+})
+$taskBridgeProcesses = @(Get-CimInstance Win32_Process -Filter "Name='CodexPool.Bridge.exe'" | Where-Object {
+    $_.ExecutablePath -and $_.ExecutablePath.Equals($taskBridge,[StringComparison]::OrdinalIgnoreCase) -and
+    $taskDesktopProcesses.ProcessId -contains $_.ParentProcessId
+})
+$taskAlreadyBridged = $taskDesktopProcesses.Count -gt 0 -and $taskBridgeProcesses.Count -gt 0
+if ($CheckOnly) {
+    if ($PassThru) { return [pscustomobject]@{ DesktopPath=$taskDesktop; CodexPath=$taskCodex; BridgePath=$taskBridge; DesktopRunning=($taskDesktopProcesses.Count -gt 0); RunningThroughBridge=$taskAlreadyBridged } }
+    Write-Host '启动入口检查通过；没有重启 Desktop、改写配置或触发模型调用。'; return
+}
+if ($taskAlreadyBridged -and $ReuseRunning) { Write-Host 'Codex Desktop 已通过当前桥接运行，保留现有实例。'; return }
+if ($taskDesktopProcesses.Count -gt 0) {
     throw '请先结束工作并退出 Codex Desktop。启动覆盖仅对新进程生效；脚本不会停止现有实例。'
 }
 $taskNames = @('CODEX_CLI_PATH','CODEX_POOL_UPSTREAM_CLI','CODEX_POOL_COMPACT_BRIDGE','CODEX_APP_SERVER_FORCE_CLI')
@@ -39,5 +53,8 @@ try {
     Start-Process -FilePath $taskDesktop -WindowStyle Normal
     Write-Host 'Desktop 已通过实验桥接启动。Daemon 须显式开启实验能力；原有模型 provider 配置继续生效。'
 } finally {
-    foreach ($taskName in $taskNames) { [Environment]::SetEnvironmentVariable($taskName,$taskPrevious[$taskName],'Process') }
+    foreach ($taskName in $taskNames) {
+        $taskRestore = if ($null -eq $taskPrevious[$taskName]) { [NullString]::Value } else { $taskPrevious[$taskName] }
+        [Environment]::SetEnvironmentVariable($taskName,$taskRestore,'Process')
+    }
 }

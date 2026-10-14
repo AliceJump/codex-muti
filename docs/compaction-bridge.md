@@ -24,6 +24,26 @@ Daemon 必须同时以 `--live-boundary-probe --experimental-compact-bridge` 启
 
 没有额外旁路 App Server，也不复制线程历史。桥接强制 stdio，禁止显式 remote control，并设置 `CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED=1` 来关闭持久远程控制。当前仅支持核对过源码的官方 CLI `0.162.1`；其他版本拒绝实验桥接。模型 provider 配置、CODEX_HOME 和 OAuth 刷新仍沿用原配置，没有修改或轮换官方 `auth.json`。
 
+## 日常启动
+
+已构建本地代理和桥接后，双击仓库根目录 `start-codex.cmd`，或安装桌面快捷方式：
+
+```powershell
+pwsh -NoProfile -File scripts/install-codex-shortcut.ps1
+```
+
+以后双击桌面 **Codex Pool**：代理未运行时以两个实验开关启动，代理已运行时检查压缩能力并保留原进程；随后启动账户托盘和桥接 Desktop。已有桥接 Desktop 会复用。入口不会修改账户、自动切换开关、阈值或用户环境变量。自动切换关闭时会提示在面板中开启；普通 Desktop 或没有实验能力的旧代理需要先由用户退出，入口不会自动终止进程。
+
+入口使用 `.local/current-build.json` 和 `.local/compact-bridge/current-build.json`，因此升级构建后快捷方式无须重建。它只确认启动依赖及桥接子进程，没有创建线程或发起模型探针。新代理的启动输出放在 `.local/logs/`，不记录模型请求正文或凭据。
+
+只检查，不启动或改设置：
+
+```powershell
+pwsh -NoProfile -File scripts/start-codex.ps1 -CheckOnly
+```
+
+## 构建及手动启动
+
 构建并检查启动入口：
 
 ```powershell
@@ -62,6 +82,10 @@ node scripts/compact-bridge-probe.mjs $taskCli src/CodexPool.Bridge/bin/Debug/ne
 
 Core、桥接及账户安全测试使用合成数据。新增控制 API 测试在动态 loopback 端口启动真实路由，验证鉴权、输入校验、重复申请和条件切换；不占用用户的 3210。旧版整套 `Local API` 测试需要独占 3210，只有用户守护进程已退出时才能单独运行，测试不会停止用户进程。
 
-官方协议探针使用隔离配置，只发送 initialize 与 loaded-thread 列表查询，不创建线程、不压缩、不调用模型；原始协议与 stderr 不落盘，仅把通过状态存到主仓库忽略的 `.research/`。这不能替代真实 Desktop/A/B 验收。真实 UI 文案、长会话、远端加密压缩迁移和完整故障矩阵仍是未通过门禁；本功能保持实验状态。
+官方协议探针使用隔离配置，只发送 initialize 与 loaded-thread 列表查询，不创建线程、不压缩、不调用模型；原始协议与 stderr 不落盘，仅把通过状态存到主仓库忽略的 `.research/`。这不能替代真实 Desktop/A/B 验收。真实 UI 文案、长会话和完整故障矩阵仍是未通过门禁；本功能保持实验状态。
 
 2026-10-14 验证记录：solution 构建无错误/警告；Core 37 项、Bridge 12 项、Security 38 项通过（包含动态端口的新控制 API 测试，跳过需独占 3210 的旧 `Local API` 测试）；官方 `0.162.1` 隔离协议握手及 Desktop 启动入口检查通过。没有启动桥接 Desktop、改变运行中服务或进行真实压缩模型调用。
+
+同日用户自行启用后的只读核对：18:17:18（北京时间）官方 rollout 中出现 `compacted`，代理 `/status` 记录 `compaction_completed` 并切换账户；随后新账户多条请求返回 200，包含加密上下文的请求也成功继续。这证明该次真实压缩及切换后继续请求，尚不覆盖所有线程、故障和长会话情形。对应 rollout 保持原线程 ID，双 UUID 文件名是官方支持的记录形式。
+
+便捷入口验证：本机 `start-codex.ps1 -CheckOnly` 通过；已运行桥接复用、普通 Desktop 冲突拒绝、启动环境传递和失败时环境恢复的隔离检查通过。检查及快捷方式安装没有重启当前 Desktop 或代理，也没有更改 98% 阈值。
