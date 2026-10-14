@@ -89,6 +89,29 @@ internal static class Program
             var overflow = FlyoutPlacement.Above(work, new(1600, 850, 24, 24), 206, 53, 12);
             Check(overflow.Y + 53 + 12 == 850);
         });
+        Run("Glass menu uses native pixels on each monitor and closes before invoking an action", () =>
+        {
+            foreach (var screen in System.Windows.Forms.Screen.AllScreens)
+            {
+                var work = screen.WorkingArea;
+                var closed = false;
+                var invoked = false;
+                var menu = new GlassTrayMenu([("测试菜单", () => { Check(closed); invoked = true; })], () => closed = true, theme: 1);
+                try
+                {
+                    var cursor = new System.Drawing.Point(work.Right - 20, work.Bottom - 20);
+                    menu.ShowNear(cursor, new System.Drawing.Rectangle(cursor.X - 12, cursor.Y - 12, 24, 24));
+                    Check(GetWindowRect(new System.Windows.Interop.WindowInteropHelper(menu).Handle, out var rect));
+                    Check(rect.Left >= work.Left && rect.Top >= work.Top && rect.Right <= work.Right && rect.Bottom <= work.Bottom);
+                    if (!SystemParameters.HighContrast)
+                        Check(((SolidColorBrush)menu.Foreground).Color == Color.FromRgb(26, 38, 53));
+                    var button = (Button)((StackPanel)((Border)menu.Content).Child).Children[0];
+                    button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                    Check(closed && invoked);
+                }
+                finally { menu.Close(); }
+            }
+        });
         Run("Shape transition keeps the native host fixed and animates only its surface", () =>
         {
             var previous = Environment.GetEnvironmentVariable("CODEX_POOL_DATA_DIR");
@@ -259,7 +282,7 @@ internal static class Program
             }
             finally { Environment.SetEnvironmentVariable("CODEX_POOL_DATA_DIR", previous); }
         });
-        Console.WriteLine($"{10 - failed}/10 passed; no shown windows, credentials, real tray registration or proxy processes");
+        Console.WriteLine($"{11 - failed}/11 passed; popup placement shown briefly, no credentials, real tray registration or proxy processes");
         return failed == 0 ? 0 : 1;
     }
     private static void Check(bool value) { if (!value) throw new InvalidOperationException(); }
@@ -272,4 +295,6 @@ internal static class Program
     }
     [DllImport("user32.dll")] private static extern nint SendMessage(nint window, uint message, nint wParam, nint lParam);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern uint RegisterWindowMessage(string name);
+    [StructLayout(LayoutKind.Sequential)] private struct WindowRect { public int Left, Top, Right, Bottom; }
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetWindowRect(nint window, out WindowRect rect);
 }
