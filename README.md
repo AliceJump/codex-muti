@@ -7,7 +7,7 @@
 | 范围 | 状态 |
 |------|------|
 | Daemon（`127.0.0.1:3210`）+ localhost Dashboard | 已实现，可本地运行 |
-| Windows Floating 悬浮窗 / Widget 托盘面板 | 已实现；完整桌面验收仍待完成 |
+| Windows Widget 托盘面板（可固定） | 已实现；完整桌面验收仍待完成 |
 | 原生多账户（登录、独立 refresh、真实 5h/weekly 额度、小会话续接与阈值自动切换） | **核心已通过**，**不等于完整发布验收** |
 | ChatGPT Desktop 接入 | **仍待验收** |
 | macOS 客户端 | **源码原型**，未通过 Mac 编译/真机验收 |
@@ -32,8 +32,7 @@
 |------|------|-----------------|
 | **Daemon** | 模型代理、账户、额度、本地 API、Dashboard 静态页 | `http://127.0.0.1:3210`（仅 loopback） |
 | **Dashboard** | 浏览器账户/额度/阈值控制台 | 同端口；`pool.ps1 dashboard` 建立短期安全会话 |
-| **Floating** | 可拖动 Acrylic 悬浮窗 | `pool.ps1 window` / `Ctrl+Alt+C` |
-| **Widget** | 托盘状态面板（独立进程） | `pool.ps1 widget` / `Ctrl+Alt+W` |
+| **Widget** | 可固定和拖动的托盘账户面板 | `pool.ps1 widget` / `Ctrl+Alt+W` |
 
 Daemon 本身不依赖 Node。协议基准为官方 Codex CLI `0.157.1`（Node 22 仅用于验证脚本/MCP 夹具）。
 
@@ -51,7 +50,6 @@ dotnet run --project src/CodexPool.Daemon --no-launch-profile -- serve
 ```powershell
 .\scripts\pool.ps1 start
 .\scripts\pool.ps1 dashboard
-.\scripts\pool.ps1 window
 .\scripts\pool.ps1 widget
 ```
 
@@ -108,11 +106,16 @@ chatgpt_base_url = "http://127.0.0.1:3210/backend-api"
 
 ## 本地组合部署
 
-一键停旧起新（会中断当前模型请求，不是热更新）：
+双击 `deploy.cmd` 可选择全部、仅核心或仅桌面组件。核心包含代理和 Dashboard；桌面组件为支持固定的托盘面板。
 
 ```powershell
 pwsh -NoProfile -File .\scripts\deploy-local.ps1 -Dashboard
-# 或双击仓库根目录 deploy.cmd
+# 只更新界面，保留核心进程和进行中的模型请求：
+pwsh -NoProfile -File .\scripts\deploy-local.ps1 -Target Components
+# 只更新核心，保留现有界面：
+pwsh -NoProfile -File .\scripts\deploy-local.ps1 -Target Core -Dashboard
+# 命令行一键入口也可指定：
+.\deploy.cmd Components
 ```
 
 只构建并启动、保留已有 Daemon：
@@ -125,19 +128,21 @@ pwsh -NoProfile -File .\scripts\deploy-local.ps1 -Dashboard
 说明：
 
 - 部署脚本只动本仓库（及 worktree）`.local` 下的代理与 UI；不改账户凭据/阈值，不停止 Codex 本身。
+- 全部或核心部署会中断经过代理的当前请求；仅组件部署不停止、启动或替换核心。首次安装需选择全部。
+- 部分部署只发布所选项目，未选组件从现有完整版本保留；成功后记录完整组合版本。所选新进程启动失败时尝试恢复旧版，并保留原版本指针。
 - 本机运行版本以实际部署构建为准；更新源码不会自动替换已经运行的 Daemon。
 - #6 / #7 / #8 已分别合入 `master`，无需组合草稿分支。
 
 账户改名：`pool.ps1 rename <account-id> "新名称"` 或 Dashboard 卡片操作，见 [docs/account-rename.md](docs/account-rename.md)。
 
-## 桌面端：Floating、Widget、Mac
+## 桌面端：Widget、Mac
 
-### Windows Floating / Widget
+### Windows Widget
 
-- Floating：Acrylic、完整/紧凑/胶囊、主题、置顶、拖动、位置保存；`×` / Alt+F4 只关该窗，Daemon 继续跑。
-- Widget：托盘面板，展示账户与额度，可打开悬浮窗/Web；与 Floating 可同时运行，经 `/events` 同步。
-- 快捷方式/`open-floating.ps1` 在代理未运行时可自动拉起 Daemon（可带 `--live-boundary-probe`）；完整真实验收仍以报告为准。
-- 托盘右键玻璃菜单（与悬浮窗同主题）已在 [PR #8](https://github.com/AliceJump/codex-muti/pull/8) 合入。
+- Widget：固定透明宿主，完整/紧凑/胶囊连续形变；点击标题栏图钉保持置顶并允许拖动，取消固定后恢复失焦收起。固定状态和位置随布局、主题保存。当前使用透明着色材质，真实 Acrylic 模糊留待独立验收。
+- 只有一个托盘面板实例；不再提供独立悬浮窗入口。× / Alt+F4 只隐藏面板，托盘菜单“退出托盘面板”退出 UI，Daemon 继续运行。胶囊态可通过托盘菜单固定/取消固定。
+- 使用小组件快捷方式或 `open-widget.ps1` 启动；没有代理时可自动拉起 Daemon，完整真实验收仍以报告为准。
+- 托盘右键玻璃菜单（与面板同主题）已在 [PR #8](https://github.com/AliceJump/codex-muti/pull/8) 合入。
 
 详见 [docs/desktop-widget.md](docs/desktop-widget.md)。
 
@@ -189,6 +194,6 @@ node scripts/phase0-live.mjs
 - [docs/native-acceptance-results.md](docs/native-acceptance-results.md) — 原生多账户验收范围
 - [docs/native-auth-adapter.md](docs/native-auth-adapter.md) — 原生登录与额度适配
 - [docs/wham-usage-rewrite.md](docs/wham-usage-rewrite.md) — Desktop WHAM 改写（PR #7 已合入）
-- [docs/desktop-widget.md](docs/desktop-widget.md) — Floating / Widget / Mac
+- [docs/desktop-widget.md](docs/desktop-widget.md) — Widget / Mac
 - [docs/model-errors.md](docs/model-errors.md) — 错误与账户池汇总
 - [docs/local-provider-acceptance.md](docs/local-provider-acceptance.md) — 本地 provider 验收

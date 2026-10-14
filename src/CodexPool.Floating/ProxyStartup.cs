@@ -20,6 +20,7 @@ internal static class ProxyStartup
             && socket.SocketErrorCode == System.Net.Sockets.SocketError.ConnectionRefused) { }
         catch (OperationCanceledException) when (!token.IsCancellationRequested) { return; }
         token.ThrowIfCancellationRequested();
+        if (Environment.GetEnvironmentVariable("CODEX_POOL_DAEMON_AUTOSTART") == "0") return;
         var candidates = new[]
         {
             Environment.GetEnvironmentVariable("CODEX_POOL_DAEMON") ?? "",
