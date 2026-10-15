@@ -52,7 +52,10 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Concurrent token accounting is exact and failed writes retry without losing history", UsageConcurrency),
     ("Quota preserves arbitrary, absent, optional and scoped windows plus credit metadata", DynamicQuotaParser),
     ("Generic routing honors credits, explicit denial, budgets, model scope and stale snapshots", DynamicQuotaRouting),
-    ("WHAM usage rewrite exposes pool allowed shape for Desktop chatgpt_base_url", WhamUsageRewrite),
+    ("WHAM rewrite preserves official identity and usage details while permission follows pool routing", WhamUsageRewrite),
+    ("WHAM forwarding uses the caller identity once and preserves upstream failures without inventing usage", WhamUsageForwardTests.RunAsync),
+    ("ChatGPT backend preserves Desktop account bootstrap and caller identity without leaking local credentials or retrying", ChatGptBackendTests.RunAsync),
+    ("Backend HTTPS validates certificate identity, isolates controls and completes trusted TLS without changing OS trust", BackendHttpsTests.RunAsync),
     ("Caller cancellation cannot abandon an accepted refresh rotation", RefreshCancellation),
     ("Refresh timeouts distinguish discovery, exchange and identity validation", RefreshTimeoutStages),
     ("Malformed native rotations fail closed without reusing credentials", NativeMalformedRefresh),
@@ -773,28 +776,7 @@ Task DynamicQuotaRouting()
 }
 Task WhamUsageRewrite()
 {
-    var empty = WhamUsage.Response(false);
-    using (var emptyJson = JsonDocument.Parse(JsonSerializer.Serialize(empty)))
-    {
-        var rate = emptyJson.RootElement.GetProperty("rate_limit");
-        Check(emptyJson.RootElement.GetProperty("plan_type").GetString() == "unknown");
-        Check(rate.GetProperty("allowed").GetBoolean() == false);
-        Check(rate.GetProperty("limit_reached").GetBoolean() == true);
-    }
-    var usable = WhamUsage.Response(true, "acct-1", "plus");
-    using (var usableJson = JsonDocument.Parse(JsonSerializer.Serialize(usable)))
-    {
-        var root = usableJson.RootElement;
-        Check(root.GetProperty("account_id").GetString() == "acct-1");
-        Check(root.GetProperty("plan_type").GetString() == "plus");
-        Check(root.GetProperty("rate_limit").GetProperty("allowed").GetBoolean());
-        Check(root.GetProperty("rate_limit").GetProperty("limit_reached").GetBoolean() == false);
-    }
-    var exhausted = WhamUsage.Response(false);
-    using (var exhaustedJson = JsonDocument.Parse(JsonSerializer.Serialize(exhausted)))
-        Check(exhaustedJson.RootElement.GetProperty("rate_limit").GetProperty("allowed").GetBoolean() == false);
-    using (var invalidPlan = JsonDocument.Parse(JsonSerializer.Serialize(WhamUsage.Response(false, planType: "invalid plan"))))
-        Check(invalidPlan.RootElement.GetProperty("plan_type").GetString() == "unknown");
+    WhamUsageForwardTests.Rewrite();
     var vault = Store("wham-routing");
     using var issuer = new FakeIssuer(); using var http = new HttpClient(issuer);
     var auth = new OAuth(http, vault);
@@ -842,11 +824,9 @@ async Task LocalApi()
         for (var i = 0; i < 50; i++) { try { using var health = await http.GetAsync("http://127.0.0.1:3210/health"); if (health.IsSuccessStatusCode) { ready = true; break; } } catch (HttpRequestException) { } await Task.Delay(100); }
         Check(ready && !server.HasExited);
         using var whamAnon = await http.GetAsync("http://127.0.0.1:3210/backend-api/wham/usage");
-        using var whamDoc = JsonDocument.Parse(await whamAnon.Content.ReadAsStringAsync());
-        Check(whamAnon.IsSuccessStatusCode && whamDoc.RootElement.GetProperty("rate_limit").TryGetProperty("allowed", out _));
+        Check(whamAnon.StatusCode == HttpStatusCode.Unauthorized);
         using var codexUsage = await http.GetAsync("http://127.0.0.1:3210/api/codex/usage");
-        using var codexDoc = JsonDocument.Parse(await codexUsage.Content.ReadAsStringAsync());
-        Check(codexUsage.IsSuccessStatusCode && codexDoc.RootElement.GetProperty("rate_limit").GetProperty("allowed").ValueKind is JsonValueKind.True or JsonValueKind.False);
+        Check(codexUsage.StatusCode == HttpStatusCode.Unauthorized);
         using var unauthorized = await http.GetAsync("http://127.0.0.1:3210/status"); Check(unauthorized.StatusCode == HttpStatusCode.Unauthorized);
         using var unauthorizedStatistics = await http.GetAsync("http://127.0.0.1:3210/statistics"); Check(unauthorizedStatistics.StatusCode == HttpStatusCode.Unauthorized);
         using var unauthorizedCompaction = await http.GetAsync("http://127.0.0.1:3210/compaction/advice?model=model"); Check(unauthorizedCompaction.StatusCode == HttpStatusCode.Unauthorized);
@@ -864,6 +844,15 @@ async Task LocalApi()
         Check(officialStatus.StatusCode == HttpStatusCode.Unauthorized);
         using var officialStatistics = await official.GetAsync("http://127.0.0.1:3210/statistics"); Check(officialStatistics.StatusCode == HttpStatusCode.Unauthorized);
         http.DefaultRequestHeaders.Authorization = new("Bearer", vault.LocalKey);
+        // Exercise the production backend dispatch without sending any credential upstream.
+        using var backendControl = await http.GetAsync("http://127.0.0.1:3210/backend-api/wham/accounts/check");
+        Check(backendControl.StatusCode == HttpStatusCode.Forbidden);
+        using var backendOriginRequest = new HttpRequestMessage(HttpMethod.Get, "http://127.0.0.1:3210/backend-api/wham/accounts/check");
+        backendOriginRequest.Headers.Add("Origin", "https://untrusted.invalid");
+        using var backendOrigin = await http.SendAsync(backendOriginRequest); Check(backendOrigin.StatusCode == HttpStatusCode.Forbidden);
+        using var backendHostRequest = new HttpRequestMessage(HttpMethod.Get, "http://127.0.0.1:3210/backend-api/wham/accounts/check");
+        backendHostRequest.Headers.Host = "untrusted.invalid:3210";
+        using var backendHost = await http.SendAsync(backendHostRequest); Check(backendHost.StatusCode == HttpStatusCode.Forbidden);
         using var status = await http.GetAsync("http://127.0.0.1:3210/status"); var text = await status.Content.ReadAsStringAsync();
         Check(status.IsSuccessStatusCode && !text.Contains(vault.LocalKey) && !text.Contains("accessToken"));
         using var statistics = await http.GetAsync("http://127.0.0.1:3210/statistics");

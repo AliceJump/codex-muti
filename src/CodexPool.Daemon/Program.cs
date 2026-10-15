@@ -27,9 +27,12 @@ try
     var builder = WebApplication.CreateBuilder([]);
     builder.Logging.ClearProviders();
     builder.Services.Configure<HostOptions>(options => options.ShutdownTimeout = TimeSpan.FromSeconds(30));
+    using var backendCertificate = BackendHttps.LoadCertificate(directory);
     builder.WebHost.ConfigureKestrel(options =>
     {
         options.Listen(System.Net.IPAddress.Loopback, 3210);
+        if (backendCertificate is not null)
+            options.Listen(System.Net.IPAddress.Loopback, BackendHttps.Port, listener => listener.UseHttps(backendCertificate));
         options.Limits.MaxRequestBodySize = 32 * 1024 * 1024;
         options.Limits.RequestHeadersTimeout = TimeSpan.FromSeconds(15);
     });
@@ -41,6 +44,8 @@ try
         AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate })
         { Timeout = TimeSpan.FromMinutes(10) };
     var auth = new OAuth(http, vault); var relay = new ResponsesRelay(modelHttp);
+    using var chatGptHttp = ChatGptBackend.CreateClient();
+    var chatGptBackend = new ChatGptBackend(chatGptHttp, vault.LocalKey);
     var nativeLogin = new NativeLogin(vault, auth, directory);
     var quota = new Quota(http, auth, vault);
     var statistics = new UsageStatistics(directory);
@@ -57,14 +62,17 @@ try
     app.Use(async (context, next) =>
     {
         // No CORS. Only the exact local origin may use an authenticated browser session.
-        if (context.Request.Host.Host != "127.0.0.1" || context.Request.Host.Port != 3210
-            || context.Request.Headers.TryGetValue("Origin", out var origin) && origin != "http://127.0.0.1:3210")
+        if (!BackendHttps.Allows(context.Request))
         { context.Response.StatusCode = 403; return; }
         context.Response.Headers.CacheControl = "no-store";
         context.Response.Headers.XContentTypeOptions = "nosniff";
         context.Response.Headers.ContentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
         context.Response.Headers["Referrer-Policy"] = "no-referrer";
         var path = context.Request.Path.Value ?? "";
+        // Official backend validates the caller's bearer, including keyring-only Desktop logins.
+        // Run after Host/Origin checks, before the unrelated local control authentication.
+        if (ChatGptBackend.IsPassthroughPath(path))
+        { await chatGptBackend.ForwardAsync(context); return; }
         var publicPath = path is "/" or "/health" or "/auth/callback" or "/dashboard.js" or "/dashboard.css"
             || path is "/backend-api/wham/usage" or "/api/codex/usage"
             || path.StartsWith("/dashboard/open/", StringComparison.Ordinal);
@@ -135,12 +143,12 @@ try
         return quota.Views;
     });
     // ChatGPT Desktop / Codex 在 chatgpt_base_url 或 CODEX_API_BASE_URL 指向本机时读取用量；按池可用性改写 allowed。
-    IResult WhamUsageEndpoint(HttpContext context)
+    async Task WhamUsageEndpoint(HttpContext context)
     {
-        var availability = pool.Availability();
-        var plan = availability.Select(x => x.Plan).FirstOrDefault(p => !string.IsNullOrWhiteSpace(p))
-            ?? vault.Accounts.Select(x => quota.Snapshot(x.Id)?.Plan).FirstOrDefault(p => !string.IsNullOrWhiteSpace(p));
-        return Results.Json(WhamUsage.Response(pool.CanRouteModelRequest(), WhamUsage.HeaderAccountId(context.Request), plan));
+        var allowed = pool.CanRouteModelRequest();
+        await chatGptBackend.ForwardUsageAsync(context, allowed, model => pool.CanRouteModelRequest(model));
+        recent.Enqueue(new { at = DateTimeOffset.UtcNow, type = "wham_usage", status = context.Response.StatusCode, poolAllowed = allowed });
+        while (recent.Count > 100) recent.TryDequeue(out _);
     }
     app.MapGet("/backend-api/wham/usage", WhamUsageEndpoint);
     app.MapGet("/api/codex/usage", WhamUsageEndpoint);
@@ -326,6 +334,7 @@ try
     });
     app.MapFallback(() => Results.NotFound(new { error = new { code = "endpoint_not_supported_in_phase0" } }));
     Console.WriteLine("Codex Pool listening at http://127.0.0.1:3210 (live migration acceptance gate applies).");
+    if (backendCertificate is not null) Console.WriteLine("ChatGPT backend listening at " + BackendHttps.Origin + ".");
     var eventTask = events.RunAsync(Status, app.Lifetime.ApplicationStopping);
     var statisticsTask = Task.Run(async () =>
     {
