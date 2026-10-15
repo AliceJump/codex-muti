@@ -99,9 +99,11 @@ chatgpt_base_url = "http://127.0.0.1:3210/backend-api"
 | 键 | 作用 |
 |----|------|
 | `openai_base_url` | 模型请求转到本机池（`master` 已支持相关入口说明） |
-| `chatgpt_base_url` | 让 ChatGPT Desktop 的用量查询打到 Daemon；完整 WHAM 改写已在 [PR #7](https://github.com/AliceJump/codex-muti/pull/7) 合入，说明见 [docs/wham-usage-rewrite.md](docs/wham-usage-rewrite.md) |
+| `chatgpt_base_url` | ChatGPT 后端入口：用量按池可用性改写；账号检查、登录后的初始化和其他后端请求使用客户端原有身份转发官方服务，说明见 [docs/wham-usage-rewrite.md](docs/wham-usage-rewrite.md) |
 
 可选：`CODEX_API_BASE_URL=http://127.0.0.1:3210`（对应 `GET /api/codex/usage`，语义与 WHAM 改写相同，已随 #7 合入）。
+
+`chatgpt_base_url` 同时影响登录后的账号检查，并非用量专用配置。旧版只实现用量接口，其余后端请求会返回本地 401，导致 Desktop 显示未登录或登录失败。升级 Daemon 后再使用这项配置；尚未升级时可暂时移除 `chatgpt_base_url` 并重启客户端，保留 `openai_base_url` 的模型代理。若客户端登录已失效，需要重新完成官方登录。
 
 模型入口可接受池内原生 access token，或只读核对 Daemon `CODEX_HOME/auth.json` 中的当前 ChatGPT 登录；代理不导入、复制、刷新或写入该文件。实际上游账户仍由 sticky 调度决定。
 

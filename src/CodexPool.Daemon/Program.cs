@@ -41,6 +41,8 @@ try
         AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate })
         { Timeout = TimeSpan.FromMinutes(10) };
     var auth = new OAuth(http, vault); var relay = new ResponsesRelay(modelHttp);
+    using var chatGptHttp = ChatGptBackend.CreateClient();
+    var chatGptBackend = new ChatGptBackend(chatGptHttp, vault.LocalKey);
     var nativeLogin = new NativeLogin(vault, auth, directory);
     var quota = new Quota(http, auth, vault);
     var statistics = new UsageStatistics(directory);
@@ -65,6 +67,10 @@ try
         context.Response.Headers.ContentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
         context.Response.Headers["Referrer-Policy"] = "no-referrer";
         var path = context.Request.Path.Value ?? "";
+        // Official backend validates the caller's bearer, including keyring-only Desktop logins.
+        // Run after Host/Origin checks, before the unrelated local control authentication.
+        if (ChatGptBackend.IsPassthroughPath(path))
+        { await chatGptBackend.ForwardAsync(context); return; }
         var publicPath = path is "/" or "/health" or "/auth/callback" or "/dashboard.js" or "/dashboard.css"
             || path is "/backend-api/wham/usage" or "/api/codex/usage"
             || path.StartsWith("/dashboard/open/", StringComparison.Ordinal);

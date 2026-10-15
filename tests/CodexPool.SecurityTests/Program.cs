@@ -53,6 +53,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Quota preserves arbitrary, absent, optional and scoped windows plus credit metadata", DynamicQuotaParser),
     ("Generic routing honors credits, explicit denial, budgets, model scope and stale snapshots", DynamicQuotaRouting),
     ("WHAM usage rewrite exposes pool allowed shape for Desktop chatgpt_base_url", WhamUsageRewrite),
+    ("ChatGPT backend preserves Desktop account bootstrap and caller identity without leaking local credentials or retrying", ChatGptBackendTests.RunAsync),
     ("Caller cancellation cannot abandon an accepted refresh rotation", RefreshCancellation),
     ("Refresh timeouts distinguish discovery, exchange and identity validation", RefreshTimeoutStages),
     ("Malformed native rotations fail closed without reusing credentials", NativeMalformedRefresh),
@@ -864,6 +865,15 @@ async Task LocalApi()
         Check(officialStatus.StatusCode == HttpStatusCode.Unauthorized);
         using var officialStatistics = await official.GetAsync("http://127.0.0.1:3210/statistics"); Check(officialStatistics.StatusCode == HttpStatusCode.Unauthorized);
         http.DefaultRequestHeaders.Authorization = new("Bearer", vault.LocalKey);
+        // Exercise the production backend dispatch without sending any credential upstream.
+        using var backendControl = await http.GetAsync("http://127.0.0.1:3210/backend-api/wham/accounts/check");
+        Check(backendControl.StatusCode == HttpStatusCode.Forbidden);
+        using var backendOriginRequest = new HttpRequestMessage(HttpMethod.Get, "http://127.0.0.1:3210/backend-api/wham/accounts/check");
+        backendOriginRequest.Headers.Add("Origin", "https://untrusted.invalid");
+        using var backendOrigin = await http.SendAsync(backendOriginRequest); Check(backendOrigin.StatusCode == HttpStatusCode.Forbidden);
+        using var backendHostRequest = new HttpRequestMessage(HttpMethod.Get, "http://127.0.0.1:3210/backend-api/wham/accounts/check");
+        backendHostRequest.Headers.Host = "untrusted.invalid:3210";
+        using var backendHost = await http.SendAsync(backendHostRequest); Check(backendHost.StatusCode == HttpStatusCode.Forbidden);
         using var status = await http.GetAsync("http://127.0.0.1:3210/status"); var text = await status.Content.ReadAsStringAsync();
         Check(status.IsSuccessStatusCode && !text.Contains(vault.LocalKey) && !text.Contains("accessToken"));
         using var statistics = await http.GetAsync("http://127.0.0.1:3210/statistics");
