@@ -10,6 +10,13 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
     private string? quotaSelectionError;
     public string? QuotaSelectionError { get { lock (gate) return quotaSelectionError; } }
     private readonly Dictionary<string, (ModelError Error, DateTimeOffset Until, DateTimeOffset ObservedAt)> failures = new(StringComparer.Ordinal);
+    // Pre-metadata versions persisted quota/auth cooldowns without their cause. Retain the
+    // old 30-second auth backoff, then require a successful query begun after this boundary.
+    private readonly DateTimeOffset legacyRecoveryAfter = DateTimeOffset.UtcNow.AddSeconds(30);
+    private readonly Dictionary<string, DateTimeOffset> legacyCooldowns = vault.Accounts
+        .Where(x => x.ProviderKind == "native" && x.CooldownUntil > DateTimeOffset.UtcNow
+            && x.CooldownErrorCode is null && x.CooldownObservedAt is null)
+        .ToDictionary(x => x.Id, x => x.CooldownUntil!.Value, StringComparer.Ordinal);
     private readonly StickyScheduler scheduler = new(vault.ActiveId, id =>
     { if (!vault.ActivateForProbe(id)) throw new NoEligibleAccountException(); });
     public PoolSettings Settings => boundaryProbe ? vault.Settings : vault.Settings with { AutoSwitch = false };
@@ -106,6 +113,7 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
         lock (gate)
         {
             var now = DateTimeOffset.UtcNow;
+            legacyCooldowns.Remove(id);
             var until = error.ResetsAt is { } reset ? DateTimeOffset.FromUnixTimeSeconds(reset) : now.AddMinutes(1);
             var usage = quota.Snapshot(id);
             var cooldown = error.FailoverReason == "quota_rejected"
@@ -169,6 +177,14 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
                 foreach (var account in vault.Accounts)
                 {
                     if (failedRefreshes.Contains(account.Id) || quota.Snapshot(account.Id) is not { } snapshot) continue;
+                    if (legacyCooldowns.TryGetValue(account.Id, out var legacyUntil) && account.CooldownUntil == legacyUntil
+                        && account.CooldownErrorCode is null && account.CooldownObservedAt is null
+                        && account.AuthStatus == "ready" && auth.Health(account.Id) != "reauth_required"
+                        && !failures.ContainsKey(account.Id) && snapshot.ConfirmsRecovery(legacyRecoveryAfter, now))
+                    {
+                        vault.ClearLegacyCooldown(account.Id, legacyUntil);
+                        legacyCooldowns.Remove(account.Id);
+                    }
                     if (ModelErrors.IsUsageCode(account.CooldownErrorCode) && account.CooldownObservedAt is { } observedAt
                         && snapshot.ConfirmsRecovery(observedAt, now))
                         vault.ClearQuotaCooldown(account.Id, observedAt);
@@ -268,6 +284,7 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
             scheduler.AccountDeleted(id, newActiveId, DateTimeOffset.UtcNow);
             quota.Forget(id);
             failures.Remove(id);
+            legacyCooldowns.Remove(id);
             return true;
         }
     }

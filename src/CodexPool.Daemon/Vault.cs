@@ -150,6 +150,17 @@ public sealed class Vault
             Persist(next); document = next;
         }
     }
+    public void ClearLegacyCooldown(string id, DateTimeOffset expectedUntil)
+    {
+        lock (gate)
+        {
+            var current = document.Accounts.Single(x => x.Id == id);
+            if (current.CooldownUntil != expectedUntil || current.CooldownErrorCode is not null || current.CooldownObservedAt is not null) return;
+            var next = CloneDocument(document);
+            next.Accounts.Single(x => x.Id == id).CooldownUntil = null;
+            Persist(next); document = next;
+        }
+    }
     public int DistinctUsers { get { lock (gate) return document.Accounts.Select(x => x.Subject).Distinct(StringComparer.Ordinal).Count(); } }
     public int NativeDistinctUsers { get { lock (gate) return document.Accounts.Where(x => x.ProviderKind == "native").Select(x => x.Subject).Distinct(StringComparer.Ordinal).Count(); } }
     public object[] PublicAccounts => Views(_ => null);

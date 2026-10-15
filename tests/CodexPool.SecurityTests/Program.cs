@@ -60,6 +60,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Quota selection survives persistence faults without changing the owner", QuotaSelectionFailure),
     ("Quota recovery requires a new successful query and preserves independent restrictions", QuotaRecovery),
     ("Quota queries started before rejection cannot clear a newer cooldown", QuotaRecoveryRace),
+    ("Legacy cooldown recovery waits for fresh authorization and preserves actual quota denials", LegacyQuotaRecovery),
     ("Settings restoration preserves unified and legacy thresholds exactly", SettingsRestoration)
 };
 if (args.Length != 0)
@@ -526,6 +527,47 @@ async Task QuotaRecovery()
         healthy with { Windows = [new("5h", 18000, 0, 100, now.AddSeconds(-1))] },
         healthy with { Windows = [new("5h", 18000, 100, 0, reset, "additional_0", "gpt-6-luna")] }
     }) Check(!invalid.ConfirmsRecovery(since, now));
+}
+async Task LegacyQuotaRecovery()
+{
+    var vault = Store("legacy-quota-recovery"); var reset = DateTimeOffset.UtcNow.AddDays(5);
+    foreach (var id in new[] { "recovered", "exhausted", "auth", "new-failure", "paused", "cached" })
+    {
+        var account = Account(id); account.ProviderKind = "native"; account.BackendAccountId = id;
+        account.ExpiresAt = DateTimeOffset.UtcNow.AddHours(1); vault.Add(account); vault.Cooldown(id, reset);
+    }
+    vault.Control("paused", "pause");
+    using var issuer = new FakeIssuer(); using var authHttp = new HttpClient(issuer); var auth = new OAuth(authHttp, vault);
+    using var quotaHttp = new HttpClient(new AsyncHandler((request, _) =>
+    {
+        var denied = request.Headers.GetValues("ChatGPT-Account-Id").Single() == "exhausted";
+        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new {
+            rate_limit = new { allowed = !denied, limit_reached = denied,
+                primary_window = new { used_percent = denied ? 100 : 0, limit_window_seconds = 18000, reset_at = reset.ToUnixTimeSeconds() } } })) });
+    }));
+    var quota = new Quota(quotaHttp, auth, vault); var pool = new PoolRuntime(vault, auth, quota, true);
+    await quota.RefreshAllAsync(vault.Accounts.Select(x => x.Id), default, force: true);
+    pool.SelectAfterQuotaRefresh();
+    Check(vault.Accounts.All(x => x.CooldownUntil == reset));
+    // A later model rejection and reauthorization state take precedence over legacy recovery.
+    pool.RecordFailure("new-failure", new(429, "insufficient_quota", "credit_balance_exhausted", "fixture", "quota_rejected"));
+    var failureUntil = vault.Find("new-failure")!.CooldownUntil;
+    vault.RequireReauthorization("auth");
+    await Task.Delay(TimeSpan.FromSeconds(31));
+    pool.SelectAfterQuotaRefresh();
+    Check(vault.Find("cached")!.CooldownUntil == reset); // A pre-boundary query still cannot recover it.
+    await quota.RefreshAllAsync(["recovered", "exhausted", "new-failure", "paused"], default, force: true);
+    pool.SelectAfterQuotaRefresh();
+    Check(pool.Availability().Single(x => x.AccountId == "recovered").Available && vault.Find("recovered")!.CooldownUntil is null);
+    Check(pool.Availability().Single(x => x.AccountId == "exhausted").Reason == "quota_exhausted" && vault.Find("exhausted")!.CooldownUntil == reset);
+    Check(vault.Find("new-failure")!.CooldownUntil == failureUntil && pool.Availability().Single(x => x.AccountId == "new-failure").ErrorCode == "credit_balance_exhausted");
+    Check(vault.Find("auth")!.CooldownUntil == reset && pool.Availability().Single(x => x.AccountId == "auth").Reason == "auth_unavailable");
+    Check(vault.Find("paused")!.CooldownUntil is null && pool.Availability().Single(x => x.AccountId == "paused").Reason == "paused");
+    Check(Store("legacy-quota-recovery").Find("recovered")!.CooldownUntil is null);
+    // Compare-and-clear cannot erase a typed failure that replaced the legacy deadline.
+    vault.Cooldown("cached", reset, "invalid_token", DateTimeOffset.UtcNow);
+    vault.ClearLegacyCooldown("cached", reset);
+    Check(vault.Find("cached")!.CooldownUntil == reset);
 }
 async Task QuotaRecoveryRace()
 {
