@@ -58,6 +58,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Malformed native rotations fail closed without reusing credentials", NativeMalformedRefresh),
     ("Quota batches isolate account IO and auth faults, recover, and preserve cancellation", QuotaBatchFailures),
     ("Quota selection survives persistence faults without changing the owner", QuotaSelectionFailure),
+    ("Quota recovery requires a new successful query and preserves independent restrictions", QuotaRecovery),
+    ("Quota queries started before rejection cannot clear a newer cooldown", QuotaRecoveryRace),
     ("Settings restoration preserves unified and legacy thresholds exactly", SettingsRestoration)
 };
 if (args.Length != 0)
@@ -444,6 +446,108 @@ async Task QuotaBatchFailures()
     try { await polling; Check(false); } catch (OperationCanceledException) { }
     Check(blocking.RefreshErrors.Length == 0);
 }
+async Task QuotaRecovery()
+{
+    var vault = Store("quota-recovery"); var account = Account("A"); account.ProviderKind = "native";
+    account.BackendAccountId = "backend-A"; account.ExpiresAt = DateTimeOffset.UtcNow.AddHours(1); vault.Add(account);
+    using var issuer = new FakeIssuer(); using var authHttp = new HttpClient(issuer); var auth = new OAuth(authHttp, vault);
+    var reset = DateTimeOffset.UtcNow.AddHours(3); var calls = 0; var unavailable = false;
+    var payload = JsonSerializer.Serialize(new { rate_limit = new { allowed = true, limit_reached = false,
+        primary_window = new { used_percent = 0, limit_window_seconds = 18000, reset_at = reset.ToUnixTimeSeconds() } } });
+    using var quotaHttp = new HttpClient(new AsyncHandler((_, _) =>
+    {
+        calls++;
+        return Task.FromResult(new HttpResponseMessage(unavailable ? HttpStatusCode.ServiceUnavailable : HttpStatusCode.OK)
+            { Content = new StringContent(payload) });
+    }));
+    var quota = new Quota(quotaHttp, auth, vault); var pool = new PoolRuntime(vault, auth, quota, true);
+    var rejection = ModelError.Quota("plus", reset.ToUnixTimeSeconds()) with { FailoverReason = "quota_rejected" };
+    await quota.RefreshAllAsync(["A"], default);
+    pool.RecordFailure("A", rejection);
+    Check(pool.Availability()[0].Reason == "quota_exhausted" && vault.Find("A")!.CooldownUntil > DateTimeOffset.UtcNow);
+    await quota.RefreshAllAsync(["A"], default); pool.SelectAfterQuotaRefresh();
+    Check(calls == 1 && pool.Availability()[0].Reason == "quota_exhausted"); // Cached 100% is not recovery.
+    unavailable = true;
+    await quota.RefreshAllAsync(["A"], default, force: true); pool.SelectAfterQuotaRefresh();
+    Check(calls == 2 && pool.Availability()[0].Reason == "quota_exhausted");
+    unavailable = false;
+    await quota.RefreshAllAsync(["A"], default, force: true); pool.SelectAfterQuotaRefresh();
+    Check(calls == 3 && pool.Availability()[0].Available && vault.Find("A")!.CooldownUntil is null);
+    Check(!pool.Settings.AutoSwitch && pool.Active == "A"); // Recovery also works with automatic switching disabled.
+    var restored = Store("quota-recovery");
+    Check(restored.Find("A")!.CooldownUntil is null && restored.Quotas.Single().RequestedAt is not null);
+
+    pool.RecordFailure("A", rejection);
+    await quota.RefreshAllAsync(["A"], default, force: true);
+    using (var locked = new FileStream(Path.Combine(root, "quota-recovery", "vault.dpapi"), FileMode.Open, FileAccess.Read, FileShare.Read))
+    {
+        pool.SelectAfterQuotaRefresh();
+        Check(pool.QuotaSelectionError == "quota_selection_persistence_failed" && pool.Availability()[0].Reason == "quota_exhausted");
+    }
+    pool.SelectAfterQuotaRefresh();
+    Check(pool.QuotaSelectionError is null && pool.Availability()[0].Available && vault.Find("A")!.CooldownUntil is null);
+
+    // Rejection metadata survives restart; reconciliation never changes the manual pause.
+    pool.RecordFailure("A", rejection); vault.Control("A", "pause");
+    restored = Store("quota-recovery"); var restoredAuth = new OAuth(authHttp, restored);
+    var restoredQuota = new Quota(quotaHttp, restoredAuth, restored); var restoredPool = new PoolRuntime(restored, restoredAuth, restoredQuota, true);
+    await restoredQuota.RefreshAllAsync(["A"], default, force: true); restoredPool.SelectAfterQuotaRefresh();
+    Check(restored.Find("A")!.CooldownUntil is null && restoredPool.Availability()[0].Reason == "paused");
+    vault.Control("A", "resume");
+
+    foreach (var error in new[]
+    {
+        ModelError.Terminal("account_auth_required", "fixture") with { FailoverReason = "auth_rejected" },
+        new ModelError(429, "insufficient_quota", "credit_balance_exhausted", "fixture", "quota_rejected"),
+        new ModelError(429, "usage_not_included", "usage_not_included", "fixture", "access_rejected")
+    })
+    {
+        pool.RecordFailure("A", error);
+        var before = vault.Find("A")!.CooldownUntil;
+        await quota.RefreshAllAsync(["A"], default, force: true); pool.SelectAfterQuotaRefresh();
+        Check(!pool.Availability()[0].Available && vault.Find("A")!.CooldownUntil == before);
+    }
+    // Unknown/legacy cooldowns are not treated as a quota rejection without evidence.
+    pool.RecordSuccess("A"); vault.Cooldown("A", reset);
+    await quota.RefreshAllAsync(["A"], default, force: true); pool.SelectAfterQuotaRefresh();
+    Check(pool.Availability()[0].Reason == "cooldown" && vault.Find("A")!.CooldownUntil == reset);
+
+    var now = DateTimeOffset.UtcNow; var since = now.AddSeconds(-2);
+    var healthy = new QuotaSnapshot("A", "fixture", "plus", now,
+        [new("5h", 18000, 0, 100, reset)], Allowed: true, WindowState: "reported", RequestedAt: since.AddSeconds(1));
+    Check(healthy.ConfirmsRecovery(since, now));
+    foreach (var invalid in new[]
+    {
+        healthy with { RequestedAt = null }, healthy with { RequestedAt = since },
+        healthy with { UpdatedAt = now.AddMinutes(-3) }, healthy with { Allowed = null },
+        healthy with { Allowed = false }, healthy with { LimitReached = true },
+        healthy with { SpendControlReached = true }, healthy with { WindowState = "unknown" },
+        healthy with { Windows = [new("weekly", 604800, 100, 0, reset)] },
+        healthy with { Windows = [new("5h", 18000, 0, 100, now.AddSeconds(-1))] },
+        healthy with { Windows = [new("5h", 18000, 100, 0, reset, "additional_0", "gpt-6-luna")] }
+    }) Check(!invalid.ConfirmsRecovery(since, now));
+}
+async Task QuotaRecoveryRace()
+{
+    var vault = Store("quota-recovery-race"); var account = Account("A"); account.ProviderKind = "native";
+    account.BackendAccountId = "backend-A"; account.ExpiresAt = DateTimeOffset.UtcNow.AddHours(1); vault.Add(account);
+    using var issuer = new FakeIssuer(); using var authHttp = new HttpClient(issuer); var auth = new OAuth(authHttp, vault);
+    var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    using var quotaHttp = new HttpClient(new AsyncHandler(async (_, token) =>
+    {
+        started.TrySetResult(); await release.Task.WaitAsync(token);
+        return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"rate_limit\":{\"allowed\":true}}") };
+    }));
+    var quota = new Quota(quotaHttp, auth, vault); var pool = new PoolRuntime(vault, auth, quota, true);
+    var polling = quota.RefreshAllAsync(["A"], default, force: true);
+    await started.Task.WaitAsync(TimeSpan.FromSeconds(3));
+    pool.RecordFailure("A", ModelError.Quota() with { FailoverReason = "quota_rejected" });
+    release.TrySetResult(); await polling; pool.SelectAfterQuotaRefresh();
+    Check(pool.Availability()[0].Reason == "quota_exhausted" && vault.Find("A")!.CooldownUntil > DateTimeOffset.UtcNow);
+    await quota.RefreshAllAsync(["A"], default, force: true); pool.SelectAfterQuotaRefresh();
+    Check(pool.Availability()[0].Available && vault.Find("A")!.CooldownUntil is null);
+}
 Task QuotaSelectionFailure()
 {
     var vault = Store("quota-selection-io"); vault.Add(Account("A")); vault.Add(Account("B")); vault.SaveSettings(new(true)); vault.Control("A", "pause");
@@ -488,10 +592,10 @@ Task PoolRouting()
     using var issuer = new FakeIssuer(); using var http = new HttpClient(issuer); var auth = new OAuth(http, vault);
     var quota = new Quota(http, auth, vault); var pool = new PoolRuntime(vault, auth, quota, true);
     pool.UpdateSettings(new(true)); var a = pool.Select(); Check(a.AccountId == "A");
-    pool.Rejected(new("A", new("https://api.openai.com/v1/responses"), "canary"), "quota_rejected");
+    pool.RecordFailure("A", ModelError.Quota() with { FailoverReason = "quota_rejected" });
     pool.Complete(a, new("B", 200, 2, true, "stream_forwarded")); Check(vault.ActiveId == "B");
     var b = pool.Select(); Check(b.AccountId == "B");
-    vault.Cooldown("A", DateTimeOffset.UtcNow.AddSeconds(-1)); pool.Activate("A");
+    pool.RecordSuccess("A"); vault.Cooldown("A", DateTimeOffset.UtcNow.AddSeconds(-1)); pool.Activate("A");
     pool.Complete(b, new("B", 200, 1, true, "stream_forwarded")); Check(vault.ActiveId == "A");
     vault.SaveQuota(new("A", "native_codex_usage", "plus", DateTimeOffset.UtcNow,
         [new("5h", 18000, 96, 4, DateTimeOffset.UtcNow.AddHours(1))]));
@@ -518,7 +622,7 @@ Task CompactionRouting()
     Check(pool.FinishCompaction(hold.Id, true) && pool.Active == "B");
     Check(!pool.FinishCompaction(hold.Id, true));
     pool.Activate("A"); hold = pool.BeginCompaction(pool.CompactionAdvice("model")!);
-    pool.Rejected(new("A", new("https://fixture.invalid/responses"), "canary"), "quota_rejected");
+    pool.RecordFailure("A", ModelError.Quota() with { FailoverReason = "quota_rejected" });
     Check(pool.Select().AccountId == "B" && !pool.FinishCompaction(hold.Id, true));
     return Task.CompletedTask;
 }
@@ -816,7 +920,7 @@ async Task PreparedPoolErrors()
         }));
         var sink = new ProbeSink();
         var result = await new ResponsesRelay(modelHttp).ForwardAsync("{}"u8.ToArray(), "application/json", leases, new Dictionary<string,string>(), sink, default,
-            mixturePool.Rejected, classified: (lease, error) => mixturePool.RecordFailure(lease.AccountId, error), exhausted: error => mixturePool.Unavailable(error, reserved.CandidateIds.ToArray()));
+            classified: (lease, error) => mixturePool.RecordFailure(lease.AccountId, error), exhausted: error => mixturePool.Unavailable(error, reserved.CandidateIds.ToArray()));
         mixturePool.Complete(reserved.Selection, result);
         if (trial == 0)
         {
@@ -862,7 +966,7 @@ async Task PreparedPoolErrors()
     })));
     var threeSink=new ProbeSink();
     var threeResult=await new ResponsesRelay(threeHttp).ForwardAsync("{}"u8.ToArray(),"application/json",threeLeases,new Dictionary<string,string>(),threeSink,default,
-        threePool.Rejected,classified:(lease,error)=>threePool.RecordFailure(lease.AccountId,error),exhausted:error=>threePool.Unavailable(error,threeRequest.CandidateIds.ToArray(),threeRequest.AutoSwitch));
+        classified:(lease,error)=>threePool.RecordFailure(lease.AccountId,error),exhausted:error=>threePool.Unavailable(error,threeRequest.CandidateIds.ToArray(),threeRequest.AutoSwitch));
     threePool.Complete(threeRequest.Selection,threeResult);
     Check(threeCount==3 && threeResult.StatusCode==200 && threePool.Active=="C" && threeSink.Text.Contains("response.completed") && !threeSink.Text.Contains("usage_limit_reached"));
 }
@@ -944,7 +1048,7 @@ Task DeleteModelReservations()
     Check(reservation.CandidateIds.SequenceEqual(new[] { "A", "B" }));
     foreach (var id in reservation.CandidateIds) DeleteRejected(() => pool.Delete(id, out _), "account_in_flight");
     // A standby that has not sent a byte is still part of this request's protected lease set.
-    pool.Rejected(new("A", new("https://fixture.invalid"), "synthetic"), "quota_rejected");
+    pool.RecordFailure("A", ModelError.Quota() with { FailoverReason = "quota_rejected" });
     pool.Complete(reservation.Selection, new("B", 200, 2, true, "stream_forwarded"));
     Check(pool.Active == "B");
     reservation.Dispose(); reservation.Dispose();

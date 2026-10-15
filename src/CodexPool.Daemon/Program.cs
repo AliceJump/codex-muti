@@ -129,7 +129,7 @@ try
     app.MapGet("/accounts", () => vault.Views(auth.Health));
     app.MapGet("/usage", async (HttpContext context) =>
     {
-        await quota.RefreshAllAsync(vault.Accounts.Where(x => x.ProviderKind == "native").Select(x => x.Id), context.RequestAborted);
+        await quota.RefreshAllAsync(vault.Accounts.Where(x => x.ProviderKind == "native").Select(x => x.Id), context.RequestAborted, force: true);
         // Reuse sticky auto-switch after explicit refresh so exhausted weekly/5h can fail over without waiting for a model request.
         pool.SelectAfterQuotaRefresh();
         return quota.Views;
@@ -294,7 +294,7 @@ try
         try
         {
             result = await relay.ForwardAsync(body, "application/json", candidates, headers, sink, lifetime.Token,
-                (lease, reason) => { pool.Rejected(lease, reason); failoverReason = reason; rejections.Add(new { account = lease.AccountId, reason }); },
+                (lease, reason) => { failoverReason = reason; rejections.Add(new { account = lease.AccountId, reason }); },
                 (lease, entering) =>
                 {
                     if (entering) { attemptedAccount = lease.AccountId; attemptCount++; }

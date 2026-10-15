@@ -9,7 +9,7 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
     private long requestsStarted;
     private string? quotaSelectionError;
     public string? QuotaSelectionError { get { lock (gate) return quotaSelectionError; } }
-    private readonly Dictionary<string, (ModelError Error, DateTimeOffset Until)> failures = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (ModelError Error, DateTimeOffset Until, DateTimeOffset ObservedAt)> failures = new(StringComparer.Ordinal);
     private readonly StickyScheduler scheduler = new(vault.ActiveId, id =>
     { if (!vault.ActivateForProbe(id)) throw new NoEligibleAccountException(); });
     public PoolSettings Settings => boundaryProbe ? vault.Settings : vault.Settings with { AutoSwitch = false };
@@ -105,8 +105,16 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
         if (error.FailoverReason is null) return;
         lock (gate)
         {
-            var until = error.ResetsAt is { } reset ? DateTimeOffset.FromUnixTimeSeconds(reset) : DateTimeOffset.UtcNow.AddMinutes(1);
-            failures[id] = (error, until);
+            var now = DateTimeOffset.UtcNow;
+            var until = error.ResetsAt is { } reset ? DateTimeOffset.FromUnixTimeSeconds(reset) : now.AddMinutes(1);
+            var usage = quota.Snapshot(id);
+            var cooldown = error.FailoverReason == "quota_rejected"
+                ? error.ResetsAt is not null ? until : usage?.Windows.Where(x => x.UsedPercent >= 100 && x.ResetAt > now)
+                    .Select(x => x.ResetAt).Max() ?? until
+                : now.AddSeconds(30);
+            // Keep the classification and durable cooldown atomic relative to quota reconciliation.
+            failures[id] = (error, until, now);
+            vault.Cooldown(id, cooldown, error.Code, now);
         }
     }
     public void RecordSuccess(string id) { lock (gate) failures.Remove(id); }
@@ -154,8 +162,22 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
     {
         lock (gate)
         {
-            if (!Settings.AutoSwitch) return;
-            try { Select(); quotaSelectionError = null; }
+            try
+            {
+                var now = DateTimeOffset.UtcNow;
+                var failedRefreshes = quota.RefreshErrors.Select(x => x.AccountId).ToHashSet(StringComparer.Ordinal);
+                foreach (var account in vault.Accounts)
+                {
+                    if (failedRefreshes.Contains(account.Id) || quota.Snapshot(account.Id) is not { } snapshot) continue;
+                    if (ModelErrors.IsUsageCode(account.CooldownErrorCode) && account.CooldownObservedAt is { } observedAt
+                        && snapshot.ConfirmsRecovery(observedAt, now))
+                        vault.ClearQuotaCooldown(account.Id, observedAt);
+                    if (failures.TryGetValue(account.Id, out var failure) && ModelErrors.IsUsageCode(failure.Error.Code)
+                        && snapshot.ConfirmsRecovery(failure.ObservedAt, now)) failures.Remove(account.Id);
+                }
+                if (Settings.AutoSwitch) Select();
+                quotaSelectionError = null;
+            }
             catch (NoEligibleAccountException) { quotaSelectionError = null; }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.Cryptography.CryptographicException)
             { quotaSelectionError = "quota_selection_persistence_failed"; }
@@ -210,7 +232,7 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
                     throw;
                 }
                 if (ex.Code is "auth_temporarily_unavailable" or "refresh_not_yet_allowed")
-                { lock (gate) failures[id] = (PoolAvailability.Auth(ex.Code), DateTimeOffset.UtcNow.AddSeconds(30)); }
+                { lock (gate) failures[id] = (PoolAvailability.Auth(ex.Code), DateTimeOffset.UtcNow.AddSeconds(30), DateTimeOffset.UtcNow); }
                 else if (vault.Find(id)?.AuthStatus == "reauth_required" || ex.Code is "reauth_required" or "account_identity_mismatch" or "rotated_token_persistence_failed")
                     RecordFailure(id, PoolAvailability.Auth("reauth_required") with { FailoverReason = "auth_rejected" });
                 else throw;
@@ -265,14 +287,6 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
                 && vault.Find(x.Id)?.ProviderKind == provider
                 && StickyScheduler.ExclusionReason(x, Settings, DateTimeOffset.UtcNow) is null).Select(x => x.Id)).ToArray();
         }
-    }
-    public void Rejected(ModelLease lease, string reason)
-    {
-        // Only explicit structured quota/auth rejection reaches this callback; network errors never do.
-        var usage = quota.Snapshot(lease.AccountId);
-        var reset = usage?.Windows.Where(x => x.UsedPercent >= 100 && x.ResetAt > DateTimeOffset.UtcNow)
-            .Select(x => (DateTimeOffset?)x.ResetAt).Max();
-        vault.Cooldown(lease.AccountId, reason == "quota_rejected" ? reset ?? DateTimeOffset.UtcNow.AddMinutes(1) : DateTimeOffset.UtcNow.AddSeconds(30));
     }
     public void Complete(AccountSelection lease, RelayResult result, string? failoverReason = null, string? model = null)
     {

@@ -11,9 +11,14 @@ public sealed record QuotaCredits(bool HasCredits, bool Unlimited, decimal? Bala
 public sealed record QuotaRefreshFailure(string AccountId, string Code, DateTimeOffset At);
 public sealed record QuotaSnapshot(string AccountId, string Source, string? Plan, DateTimeOffset UpdatedAt, IReadOnlyList<QuotaWindow> Windows,
     bool? Allowed = null, bool? LimitReached = null, QuotaCredits? Credits = null, bool? SpendControlReached = null,
-    string WindowState = "unknown")
+    string WindowState = "unknown", DateTimeOffset? RequestedAt = null)
 {
     public bool Fresh(DateTimeOffset now) => now - UpdatedAt <= TimeSpan.FromMinutes(2) && UpdatedAt <= now.AddSeconds(30);
+    // A response to a query already in flight when rejection occurred is not recovery evidence.
+    public bool ConfirmsRecovery(DateTimeOffset rejectedAt, DateTimeOffset now) => Fresh(now)
+        && RequestedAt > rejectedAt && RequestedAt <= UpdatedAt && Allowed == true && LimitReached != true
+        && SpendControlReached != true && WindowState is "reported" or "not_reported"
+        && Windows.All(w => w.ResetAt > now && w.UsedPercent < 100);
     public IEnumerable<QuotaWindow> Applicable(string? model) => Windows.Where(w => w.LimitId == "codex" || model is not null && w.Model == model);
     public bool CreditsAvailable => Credits is { HasCredits: true } or { Unlimited: true };
     public IEnumerable<QuotaWindow> RoutingWindows(string? model, DateTimeOffset now) => Applicable(model).Where(w => w.ResetAt > now
@@ -29,12 +34,12 @@ public sealed class Quota(HttpClient http, OAuth auth, Vault vault)
     public object[] Views => vault.Accounts.Select(x => View(x.Id)).ToArray();
     public QuotaSnapshot? Snapshot(string id) => snapshots.GetValueOrDefault(id);
     public void Forget(string id) { snapshots.TryRemove(id, out _); refreshFailures.TryRemove(id, out _); }
-    public async Task RefreshAllAsync(IEnumerable<string> accountIds, CancellationToken cancellationToken)
+    public async Task RefreshAllAsync(IEnumerable<string> accountIds, CancellationToken cancellationToken, bool force = false)
     {
         foreach (var id in accountIds.ToArray())
         {
             cancellationToken.ThrowIfCancellationRequested();
-            try { await RefreshAsync(id, cancellationToken); }
+            try { await RefreshAsync(id, cancellationToken, force); }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
             catch (AuthFailure ex) when (ex.Code == "account_not_found") { Forget(id); }
             catch (Exception ex) when (ex is AuthFailure or HttpRequestException or JsonException or IOException
@@ -52,7 +57,7 @@ public sealed class Quota(HttpClient http, OAuth auth, Vault vault)
             }
         }
     }
-    public async Task<object> RefreshAsync(string id, CancellationToken cancellationToken)
+    public async Task<object> RefreshAsync(string id, CancellationToken cancellationToken, bool force = false)
     {
         using var use = vault.AcquireUse(id);
         var account = vault.Find(id) ?? throw new AuthFailure("account_not_found");
@@ -60,12 +65,13 @@ public sealed class Quota(HttpClient http, OAuth auth, Vault vault)
         var singleFlight = locks.GetOrAdd(id, _ => new(1, 1)); await singleFlight.WaitAsync(cancellationToken);
         try
         {
-            if (snapshots.TryGetValue(id, out var current) && DateTimeOffset.UtcNow - current.UpdatedAt < TimeSpan.FromSeconds(30)) return current;
+            if (!force && snapshots.TryGetValue(id, out var current) && DateTimeOffset.UtcNow - current.UpdatedAt < TimeSpan.FromSeconds(30)) return current;
             account = await auth.ReadyAsync(id, cancellationToken);
             using var request = new HttpRequestMessage(HttpMethod.Get, "https://chatgpt.com/backend-api/wham/usage");
             request.Headers.Authorization = new("Bearer", account.AccessToken);
             request.Headers.TryAddWithoutValidation("ChatGPT-Account-Id", account.BackendAccountId);
             request.Headers.UserAgent.ParseAdd("codex_pool/0.1.0");
+            var requestedAt = DateTimeOffset.UtcNow;
             using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
@@ -76,7 +82,7 @@ public sealed class Quota(HttpClient http, OAuth auth, Vault vault)
             using var buffer = new MemoryStream(); var bytes = new byte[8192];
             while (true) { var count = await stream.ReadAsync(bytes, cancellationToken); if (count == 0) break;
                 if (buffer.Length + count > 512 * 1024) throw new AuthFailure("oversized_quota_response"); buffer.Write(bytes, 0, count); }
-            var snapshot = Parse(id, buffer.ToArray()); vault.SaveQuota(snapshot); snapshots[id] = snapshot;
+            var snapshot = Parse(id, buffer.ToArray()) with { RequestedAt = requestedAt }; vault.SaveQuota(snapshot); snapshots[id] = snapshot;
             refreshFailures.TryRemove(id, out _); return snapshot;
         }
         finally { singleFlight.Release(); }
