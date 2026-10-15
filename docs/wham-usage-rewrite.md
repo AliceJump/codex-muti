@@ -81,3 +81,5 @@ CLI / app-server 路径已有原生验收；**ChatGPT Desktop 经池发送的端
 现场只读对比已确认旧服务返回的 `allowed=true` 响应缺少官方 `user_id` 与 primary window，而官方接口同身份返回完整字段且 `allowed=false`。这能证明响应缺陷，不能单独证明实际发送按钮已恢复。安装客户端的用量走独立 HTTP fetch service，不能用修改 App Server `ordinaryUsageAllowed` 代替；当前桥接与启动入口保持原有实现。推送模式还可能接收官方 `usage.snapshot`，仅拒绝订阅 POST 不能保证隔离旧快照，不能拿 GET 改写测试当成 push/真实按钮验收。
 
 HTTPS 回归使用临时自签名测试证书和空闲 loopback 端口，验证实际 TLS 握手、显式信任与未信任拒绝、证书 IP/有效期/用途校验及控制入口隔离；不写系统信任库。Windows 安装脚本、当前用户系统信任与真实 Desktop 登录仍需真机验收。
+
+2026-10-15 已平滑部署完整用量改写到本机，仅替换 Daemon，保留两个池账户、设置和启用的实验压缩桥接。同一真实登录身份对比：官方与本地 WHAM 均返回 200；用户、账号、套餐、primary/secondary window 均一致；官方 `allowed=false`，本地在池可路由时 `allowed=true / limit_reached=false`。官方与本地 `accounts/check`、`profiles/me` 均返回 200，新服务已收到客户端用量查询。以上仅记录状态与字段一致性，不保存凭据、账号标识或原始响应。该 HTTP 验证不代表手机配对或实际点击发送已通过。
