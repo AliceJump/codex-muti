@@ -35,6 +35,7 @@
 | **Daemon** | 模型代理、账户、额度、本地 API、Dashboard 静态页 | `http://127.0.0.1:3210`（仅 loopback） |
 | **Dashboard** | 浏览器账户/额度/阈值控制台 | 同端口；`pool.ps1 dashboard` 建立短期安全会话 |
 | **Widget** | 可固定和拖动的托盘账户面板 | `pool.ps1 widget` / `Ctrl+Alt+W` |
+| **代理控制托盘** | 独立图标，启动／关闭代理、切换账户与自动切换 | `scripts/start-proxy-tray.ps1` |
 
 Daemon 本身不依赖 Node。协议基准为官方 Codex CLI `0.157.1`（Node 22 仅用于验证脚本/MCP 夹具）。
 
@@ -108,6 +109,18 @@ chatgpt_base_url = "http://127.0.0.1:3210/backend-api"
 
 ## 本地组合部署
 
+### 实验：额度预警触发真实压缩
+
+已实现可选 App Server stdio 桥接、提前额度预警和条件账户预留。默认关闭，仅支持已核对的 CLI `0.162.1`。2026-10-14 已在用户真实环境观察到压缩完成、切换账户及新账户成功继续请求；完整故障矩阵与长会话验收仍待完成。
+
+已有本地构建时，双击仓库根目录 **`start-codex.cmd`**，即可按需启动实验代理、账户托盘和带桥接的 Codex Desktop。也可以安装桌面快捷方式：
+
+```powershell
+pwsh -NoProfile -File scripts/install-codex-shortcut.ps1
+```
+
+以后双击桌面的 **Codex Pool**。保留已有账户、自动切换设置与阈值，重复点击复用已有桥接实例。普通 Desktop 正在运行或旧代理没有开启压缩能力时，入口会提示退出对应旧实例，不会自动中断工作。构建、检查与回滚见 [docs/compaction-bridge.md](docs/compaction-bridge.md)。
+
 双击 `deploy.cmd` 可选择全部、仅核心或仅桌面组件。核心包含代理和 Dashboard；桌面组件为支持固定的托盘面板。
 
 ```powershell
@@ -147,6 +160,8 @@ pwsh -NoProfile -File .\scripts\deploy-local.ps1 -Target Core -Dashboard
 - 托盘右键玻璃菜单（与面板同主题）已在 [PR #8](https://github.com/AliceJump/codex-muti/pull/8) 合入。
 
 详见 [docs/desktop-widget.md](docs/desktop-widget.md)。
+
+独立代理控制图标见 [docs/proxy-tray.md](docs/proxy-tray.md)。原有面板退出只关界面；代理图标的“关闭代理”才停止服务，图标保留以便重新启动。
 
 ### macOS 原型
 

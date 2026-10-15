@@ -27,6 +27,8 @@ public sealed class AccountCredential
     public bool Paused { get; set; }
     public bool Draining { get; set; }
     public DateTimeOffset? CooldownUntil { get; set; }
+    public string? CooldownErrorCode { get; set; }
+    public DateTimeOffset? CooldownObservedAt { get; set; }
     public string AuthStatus { get; set; } = "ready";
     public DateTimeOffset ExpiresAt { get; set; }
     public DateTimeOffset? EarliestRefreshAt { get; set; }
@@ -128,9 +130,36 @@ public sealed class Vault
             Persist(next); document = next;
         }
     }
-    public void Cooldown(string id, DateTimeOffset until)
+    public void Cooldown(string id, DateTimeOffset until, string? errorCode = null, DateTimeOffset? observedAt = null)
     {
-        lock (gate) { var next = CloneDocument(document); next.Accounts.Single(x => x.Id == id).CooldownUntil = until; Persist(next); document = next; }
+        lock (gate)
+        {
+            var next = CloneDocument(document); var account = next.Accounts.Single(x => x.Id == id);
+            account.CooldownUntil = until; account.CooldownErrorCode = errorCode; account.CooldownObservedAt = observedAt;
+            Persist(next); document = next;
+        }
+    }
+    public void ClearQuotaCooldown(string id, DateTimeOffset observedAt)
+    {
+        lock (gate)
+        {
+            var current = document.Accounts.Single(x => x.Id == id);
+            if (current.CooldownObservedAt != observedAt || !ModelErrors.IsUsageCode(current.CooldownErrorCode)) return;
+            var next = CloneDocument(document); var account = next.Accounts.Single(x => x.Id == id);
+            account.CooldownUntil = null; account.CooldownErrorCode = null; account.CooldownObservedAt = null;
+            Persist(next); document = next;
+        }
+    }
+    public void ClearLegacyCooldown(string id, DateTimeOffset expectedUntil)
+    {
+        lock (gate)
+        {
+            var current = document.Accounts.Single(x => x.Id == id);
+            if (current.CooldownUntil != expectedUntil || current.CooldownErrorCode is not null || current.CooldownObservedAt is not null) return;
+            var next = CloneDocument(document);
+            next.Accounts.Single(x => x.Id == id).CooldownUntil = null;
+            Persist(next); document = next;
+        }
     }
     public int DistinctUsers { get { lock (gate) return document.Accounts.Select(x => x.Subject).Distinct(StringComparer.Ordinal).Count(); } }
     public int NativeDistinctUsers { get { lock (gate) return document.Accounts.Where(x => x.ProviderKind == "native").Select(x => x.Subject).Distinct(StringComparer.Ordinal).Count(); } }
@@ -154,6 +183,7 @@ public sealed class Vault
                     AccessToken = credential.AccessToken, RefreshToken = credential.RefreshToken, IdToken = credential.IdToken,
                     Scope = credential.Scope, ExpiresAt = credential.ExpiresAt, EarliestRefreshAt = credential.EarliestRefreshAt, UpdatedAt = credential.UpdatedAt,
                     Enabled = existing.Enabled, Paused = existing.Paused, Draining = existing.Draining, CooldownUntil = existing.CooldownUntil,
+                    CooldownErrorCode = existing.CooldownErrorCode, CooldownObservedAt = existing.CooldownObservedAt,
                     ProviderKind = credential.ProviderKind, BackendAccountId = credential.BackendAccountId, Plan = credential.Plan };
                 next.Accounts[duplicate] = credential;
             }

@@ -12,6 +12,10 @@ public sealed record PoolSettings(bool AutoSwitch = false, double FiveHourThresh
 }
 public sealed record AccountSelection(string AccountId, long Epoch, string? SwitchReason);
 public sealed record AccountSwitch(DateTimeOffset At, string? From, string To, string Reason, long Epoch);
+public sealed record CompactionAdvice(string AccountId, long Epoch, string Model);
+public sealed record CompactionHold(string Id, string AccountId, long Epoch, string Model, DateTimeOffset ExpiresAt);
+public sealed class CompactionRejectedException(string code) : Exception(code)
+{ public string Code { get; } = code; }
 
 public sealed class NoEligibleAccountException : Exception
 { public NoEligibleAccountException() : base("no_eligible_account") { } }
@@ -22,14 +26,66 @@ public sealed class StickyScheduler(string? activeId, Action<string>? persistSel
     private readonly object gate = new();
     private string? active = activeId;
     private long epoch;
+    private CompactionHold? compactionHold;
+    private long? attemptedCompactionEpoch;
     private readonly Queue<AccountSwitch> history = new();
     public string? Active { get { lock (gate) return active; } }
+    public AccountSelection Current { get { lock (gate) return new(active ?? "", epoch, null); } }
+    public CompactionHold? Hold { get { lock (gate) return compactionHold; } }
+
+    // One attempt per routing epoch: weekly windows warn two percentage points
+    // before the switch threshold, other windows five. Unknown/stale quota cannot warn.
+    public CompactionAdvice? AdviseCompaction(string model, IReadOnlyList<PoolAccount> accounts, PoolSettings settings, DateTimeOffset now)
+    {
+        lock (gate)
+        {
+            if (!settings.AutoSwitch || attemptedCompactionEpoch == epoch || compactionHold is not null) return null;
+            var account = accounts.FirstOrDefault(x => x.Id == active);
+            if (account is null || !CanHold(account, now) || account.Windows is null
+                || !account.Windows.Any(w => w.ResetAt > now && double.IsFinite(w.UsedPercent)
+                    && w.UsedPercent >= Math.Max(0, settings.Threshold(w.WindowSeconds) - (w.WindowSeconds == 604800 ? 2 : 5)))) return null;
+            if (!accounts.Any(x => x.Id != active && ExclusionReason(x, settings, now) is null)) return null;
+            return new(account.Id, epoch, model);
+        }
+    }
+
+    public CompactionHold ReserveCompaction(CompactionAdvice expected, IReadOnlyList<PoolAccount> accounts, PoolSettings settings, DateTimeOffset now)
+    {
+        lock (gate)
+        {
+            if (expected.AccountId != active || expected.Epoch != epoch) throw new CompactionRejectedException("selection_changed");
+            if (AdviseCompaction(expected.Model, accounts, settings, now) is null) throw new CompactionRejectedException("compaction_not_available");
+            attemptedCompactionEpoch = epoch;
+            return compactionHold = new(Guid.NewGuid().ToString("N"), expected.AccountId, epoch, expected.Model, now.AddMinutes(3));
+        }
+    }
+
+    public bool FinishCompaction(string id, bool completed, IReadOnlyList<PoolAccount> accounts, PoolSettings settings, DateTimeOffset now)
+    {
+        lock (gate)
+        {
+            if (compactionHold is not { } hold || hold.Id != id) return false;
+            compactionHold = null;
+            if (!completed || !settings.AutoSwitch || hold.ExpiresAt <= now || hold.AccountId != active || hold.Epoch != epoch
+                || !accounts.Any(x => x.Id == hold.AccountId && CanHold(x, now))) return false;
+            var next = accounts.FirstOrDefault(x => x.Id != active && ExclusionReason(x, settings, now) is null);
+            if (next is null) return false;
+            Switch(next.Id, "compaction_completed", now);
+            return true;
+        }
+    }
+
+    private static bool CanHold(PoolAccount account, DateTimeOffset now) => AdmissionReason(account, now) is null
+        && account.QuotaUpdatedAt is { } updated && now - updated <= TimeSpan.FromMinutes(2) && updated <= now.AddSeconds(30)
+        && account.Windows is { Count: > 0 } windows && !windows.Any(w => w.ResetAt > now
+            && (!double.IsFinite(w.UsedPercent) || w.UsedPercent is < 0 or >= 100));
     public void AccountDeleted(string id, string? replacement, DateTimeOffset now)
     {
         lock (gate)
         {
             if (active != id) return;
             active = replacement; epoch++;
+            compactionHold = null;
             if (replacement is not null)
             {
                 history.Enqueue(new(now, id, replacement, "account_deleted", epoch));
@@ -54,6 +110,12 @@ public sealed class StickyScheduler(string? activeId, Action<string>? persistSel
         lock (gate)
         {
             var current = accounts.FirstOrDefault(x => x.Id == active);
+            if (compactionHold is { } hold)
+            {
+                if (settings.AutoSwitch && hold.ExpiresAt > now && hold.AccountId == active && hold.Epoch == epoch
+                    && current is not null && CanHold(current, now)) return new(current.Id, epoch, null);
+                compactionHold = null;
+            }
             var reason = current is null ? "no_active_account" : ExclusionReason(current, settings, now);
             if (reason is null) return new(current!.Id, epoch, null);
             if (active is not null && !settings.AutoSwitch) throw new NoEligibleAccountException();
@@ -101,6 +163,7 @@ public sealed class StickyScheduler(string? activeId, Action<string>? persistSel
         // Publish only after durable selection succeeds; failures leave the epoch untouched.
         persistSelection?.Invoke(replacement);
         var old = active; active = replacement; epoch++;
+        compactionHold = null;
         if (old == replacement) return;
         history.Enqueue(new(now, old, replacement, reason, epoch)); while (history.Count > 100) history.Dequeue();
     }

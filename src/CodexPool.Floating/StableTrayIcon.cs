@@ -12,6 +12,7 @@ internal sealed class StableTrayIcon : Forms.NativeWindow, IDisposable
     private const uint GuidFlag = 0x20;
     private readonly uint taskbarCreated = RegisterWindowMessage("TaskbarCreated");
     private readonly NotifyCall notify;
+    private readonly Guid identity;
     private System.Drawing.Icon icon;
     private string text;
     private bool registered, disposed;
@@ -21,9 +22,10 @@ internal sealed class StableTrayIcon : Forms.NativeWindow, IDisposable
     public event EventHandler<Forms.MouseEventArgs>? ContextMenuRequested;
 
     internal delegate bool NotifyCall(uint operation, ref NotifyData data);
-    public StableTrayIcon(System.Drawing.Icon icon, string text, NotifyCall? notify = null)
+    public StableTrayIcon(System.Drawing.Icon icon, string text, NotifyCall? notify = null, Guid? identity = null)
     {
         this.notify = notify ?? Shell_NotifyIcon;
+        this.identity = identity ?? Identity;
         this.icon = icon; this.text = text;
         // A hidden top-level window also receives Explorer's restart broadcast.
         CreateHandle(new Forms.CreateParams { Caption = "Codex Pool · Tray", ExStyle = 0x80 });
@@ -43,7 +45,7 @@ internal sealed class StableTrayIcon : Forms.NativeWindow, IDisposable
     {
         Size = (uint)Marshal.SizeOf<NotifyData>(), Window = Handle, Id = 1,
         Flags = flags | GuidFlag, CallbackMessage = Callback, Icon = icon.Handle,
-        Tip = text.Length > 127 ? text[..127] : text, Info = "", InfoTitle = "", Guid = Identity
+        Tip = text.Length > 127 ? text[..127] : text, Info = "", InfoTitle = "", Guid = identity
     };
     private void Publish()
     {
@@ -67,8 +69,8 @@ internal sealed class StableTrayIcon : Forms.NativeWindow, IDisposable
     }
     internal bool TryGetBounds(out System.Drawing.Rectangle bounds)
     {
-        var identity = new IconIdentifier { Size = (uint)Marshal.SizeOf<IconIdentifier>(), Window = Handle, Id = 1, Guid = Identity };
-        if (registered && Shell_NotifyIconGetRect(ref identity, out var rect) == 0)
+        var identifier = new IconIdentifier { Size = (uint)Marshal.SizeOf<IconIdentifier>(), Window = Handle, Id = 1, Guid = identity };
+        if (registered && Shell_NotifyIconGetRect(ref identifier, out var rect) == 0)
         { bounds = System.Drawing.Rectangle.FromLTRB(rect.Left, rect.Top, rect.Right, rect.Bottom); return true; }
         bounds = default; return false;
     }

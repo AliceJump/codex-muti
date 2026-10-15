@@ -9,6 +9,11 @@ const durationLabel = seconds => !Number.isInteger(seconds)||seconds<=0?'额度�
 const windowLabel = w => `${w.limitId&&w.limitId!=='codex'?(w.limitName||'附加额度')+' · ':''}${durationLabel(w.windowSeconds??(w.kind==='5h'?18000:w.kind==='weekly'?604800:null))}`;
 const states = {active:'使用中',standby:'待命',paused:'已暂停',draining:'Drain',disabled:'已禁用',cooldown:'冷却中'};
 const availabilityReasons={quota_threshold:'达到额度窗口切换阈值',quota_exhausted:'额度耗尽',auth_unavailable:'需要重新授权',access_unavailable:'套餐不包含模型权限',auth_temporarily_unavailable:'授权暂时不可用',configuration_unavailable:'账户配置不可用','5h_threshold':'达到 5h 切换阈值',weekly_threshold:'达到周切换阈值',cooldown:'冷却中',disabled:'已禁用',paused:'已暂停',draining:'排空中'};
+function availabilityLabel(access){
+  if(access.reason==='quota_exhausted'&&['usage_limit_reached','quota_exhausted','subscription_sharing_usage_limit_exceeded'].includes(access.errorCode))return '上次模型请求被额度限制';
+  if(access.reason==='quota_exhausted'&&['insufficient_quota','credit_balance_exhausted','organization_spend_limit_exceeded','project_spend_limit_exceeded','organization_usage_limit_exceeded'].includes(access.errorCode))return '模型余额或支出额度不足';
+  return availabilityReasons[access.reason]||'暂不可用';
+}
 const reasons = {quota_threshold:'达到额度窗口阈值','manual':'手动切换','5h_threshold':'达到 5h 阈值','weekly_threshold':'达到 Weekly 阈值',cooldown:'额度 / 认证冷却',disabled:'账户已禁用',paused:'账户已暂停',draining:'账户 Drain',auth_unavailable:'授权不可用',safe_precommit_failover:'请求发送前安全切换',quota_rejected:'明确额度拒绝',auth_rejected:'明确授权拒绝',no_active_account:'初始选择'};
 const text = (tag, value, cls) => { const el = document.createElement(tag); el.textContent = value; if(cls) el.className=cls; return el; };
 function notice(message) { $('notice').textContent=message; $('notice').hidden=!message; }
@@ -58,8 +63,10 @@ function render(s) {
     if(a.active)card.append(text('span','✓','check-mark'));
     head.append(text('strong',a.name),text('span',states[a.state]||a.state,'badge'));card.append(head);const meta=text('div','','meta');meta.append(text('span',a.plan||'Plan 待确认'),text('span',`授权：${a.auth}`));card.append(meta);
     if(canActivate&&!a.active){card.classList.add('selectable');card.addEventListener('click',e=>{if(e.target.closest('.controls')||e.target.closest('button'))return;action(`/accounts/${a.id}/activate`);});}
-    const access=s.accountAvailability?.find(x=>x.accountId===a.id);if(access?.reason)card.append(text('small',`模型访问：${availabilityReasons[access.reason]||'暂不可用'}`));
+    const access=s.accountAvailability?.find(x=>x.accountId===a.id);if(access?.reason)card.append(text('small',`模型访问：${availabilityLabel(access)}`));
+    if(a.cooldownUntil&&Date.parse(a.cooldownUntil)>Date.now())card.append(text('small',`冷却剩余 ${reset(a.cooldownUntil)}`));
     const usage=s.usage.find(u=>u.accountId===a.id),fresh=usage?.updatedAt&&Date.now()-Date.parse(usage.updatedAt)<=120000&&Date.parse(usage.updatedAt)<=Date.now()+30000;
+    if(s.quotaRefreshErrors?.some(x=>x.accountId===a.id))card.append(text('small','额度更新失败，保留上次数据'));
     for(const w of usage?.windows||[]){const label=windowLabel(w),row=text('div','','quota'),qhead=text('div','','quota-head');const valid=fresh&&w.resetAt&&Date.parse(w.resetAt)>Date.now(),remaining=valid?Number(w.remainingPercent):null;const tone=remainingTone(remaining);qhead.append(text('span',label),text('b',valid?`剩 ${remaining.toFixed(0)}%`:'待确认'));row.append(qhead);if(valid){const bar=document.createElement('progress');bar.max=100;bar.value=Math.max(0,Math.min(100,remaining));bar.className=tone?`quota-${tone}`:'';bar.setAttribute('aria-label',`${label}剩余 ${remaining.toFixed(0)}%`);row.append(bar,text('small',`${reset(w.resetAt)} 后重置`));}else row.append(text('small',!fresh?'额度数据已过期':!w.resetAt?'重置时间未知':'等待重置后的新额度'));card.append(row);}
     if(!usage?.windows?.length)card.append(text('div',fresh&&usage.windowState==='not_reported'?'上游未提供固定额度窗口':'额度窗口未知','account-tokens'));
     if(usage?.credits){const c=usage.credits;card.append(text('div',`${!fresh?'历史 ':''}Credits：${c.unlimited?'无额度上限':c.balance!=null?number(c.balance):c.hasCredits?'可用':'不可用'}`,'account-tokens'));}
@@ -77,7 +84,7 @@ function render(s) {
 }
 $('settings').onsubmit=e=>{e.preventDefault();const f=e.target;action('/settings',{autoSwitch:f.elements.autoSwitch.checked,windowThreshold:Number(f.elements.windowThreshold.value)});};
 $('login').onsubmit=e=>{e.preventDefault();action('/accounts/native-login',{name:e.target.elements.name.value});};
-$('refresh').onclick=async()=>{try{await api('/usage');render(await api('/status'));notice('额度已更新');}catch(e){notice(e.message);}};
+$('refresh').onclick=async()=>{try{await api('/usage');const s=await api('/status');render(s);const failed=s.quotaRefreshErrors?.length||0;notice(failed?`${failed} 个账户额度更新失败，保留上次数据`:'额度已更新');}catch(e){notice(e.message);}};
 for(const button of $('statistics-periods').querySelectorAll('button'))button.onclick=()=>{statisticsPeriod=button.dataset.period;if(state)renderStatistics(state.tokenStatistics,new Map(state.accounts.map(a=>[a.id,a.name])));};
 async function start(){try{csrf=(await api('/browser-session')).csrf;$('workspace').hidden=false;render(await api('/status'));const events=new EventSource('/events');events.addEventListener('status',e=>{render(JSON.parse(e.data));$('connection').textContent='服务在线';});events.onerror=()=>{$('connection').textContent='正在重新连接';};}catch{$('locked').hidden=false;$('connection').textContent='等待安全会话';}}
 start();setInterval(()=>{if(state)render(state);},30000);

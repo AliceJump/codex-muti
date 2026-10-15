@@ -3,18 +3,51 @@ using CodexPool.Core;
 namespace CodexPool.Daemon;
 
 // Coordinates durable active selection with the in-memory epoch. It never owns Codex state.
-public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool boundaryProbe)
+public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool boundaryProbe, bool experimentalCompaction = false)
 {
     private readonly object gate = new();
     private long requestsStarted;
     private string? quotaSelectionError;
     public string? QuotaSelectionError { get { lock (gate) return quotaSelectionError; } }
-    private readonly Dictionary<string, (ModelError Error, DateTimeOffset Until)> failures = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (ModelError Error, DateTimeOffset Until, DateTimeOffset ObservedAt)> failures = new(StringComparer.Ordinal);
+    // Pre-metadata versions persisted quota/auth cooldowns without their cause. Retain the
+    // old 30-second auth backoff, then require a successful query begun after this boundary.
+    private readonly DateTimeOffset legacyRecoveryAfter = DateTimeOffset.UtcNow.AddSeconds(30);
+    private readonly Dictionary<string, DateTimeOffset> legacyCooldowns = vault.Accounts
+        .Where(x => x.ProviderKind == "native" && x.CooldownUntil > DateTimeOffset.UtcNow
+            && x.CooldownErrorCode is null && x.CooldownObservedAt is null)
+        .ToDictionary(x => x.Id, x => x.CooldownUntil!.Value, StringComparer.Ordinal);
     private readonly StickyScheduler scheduler = new(vault.ActiveId, id =>
     { if (!vault.ActivateForProbe(id)) throw new NoEligibleAccountException(); });
     public PoolSettings Settings => boundaryProbe ? vault.Settings : vault.Settings with { AutoSwitch = false };
     public AccountSwitch[] History => scheduler.History;
     public string? Active => scheduler.Active;
+    public bool CompactionEnabled => boundaryProbe && experimentalCompaction;
+    public object CompactionState => new { enabled = CompactionEnabled, selection = scheduler.Current,
+        reservation = scheduler.Hold is { } hold ? new { hold.AccountId, hold.Epoch, hold.Model, hold.ExpiresAt } : null };
+    public CompactionAdvice? CompactionAdvice(string model)
+    {
+        lock (gate) return CompactionEnabled ? scheduler.AdviseCompaction(model, RoutingAccounts(model), Settings, DateTimeOffset.UtcNow) : null;
+    }
+    public CompactionHold BeginCompaction(CompactionAdvice expected)
+    {
+        lock (gate)
+        {
+            if (!CompactionEnabled) throw new CompactionRejectedException("compaction_bridge_disabled");
+            return scheduler.ReserveCompaction(expected, RoutingAccounts(expected.Model), Settings, DateTimeOffset.UtcNow);
+        }
+    }
+    public bool FinishCompaction(string id, bool completed)
+    {
+        lock (gate)
+        {
+            var model = scheduler.Hold?.Model;
+            return scheduler.FinishCompaction(id, completed, RoutingAccounts(model), Settings, DateTimeOffset.UtcNow);
+        }
+    }
+    private PoolSettings AdmissionSettings(string id, DateTimeOffset now) => scheduler.Hold is { } hold
+        && hold.AccountId == id && hold.Epoch == scheduler.Current.Epoch && hold.ExpiresAt > now
+        ? Settings with { AutoSwitch = false } : Settings;
     public AccountAvailability[] Availability(string? model = null)
     {
         lock (gate)
@@ -46,7 +79,7 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
                 {
                     var candidate = new PoolAccount(x.Id, x.Enabled, x.Paused, x.Draining, true, x.CooldownUntil,
                         QuotaUpdatedAt: usage?.UpdatedAt, Windows: fresh ? RoutingWindows(usage!, model, now) : []);
-                    reason = StickyScheduler.ExclusionReason(candidate, Settings, now);
+                    reason = StickyScheduler.ExclusionReason(candidate, AdmissionSettings(x.Id, now), now);
                 }
                 return new AccountAvailability(x.Id, reason, code, reset, usage?.Plan, minutes);
             }).ToArray();
@@ -79,8 +112,17 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
         if (error.FailoverReason is null) return;
         lock (gate)
         {
-            var until = error.ResetsAt is { } reset ? DateTimeOffset.FromUnixTimeSeconds(reset) : DateTimeOffset.UtcNow.AddMinutes(1);
-            failures[id] = (error, until);
+            var now = DateTimeOffset.UtcNow;
+            legacyCooldowns.Remove(id);
+            var until = error.ResetsAt is { } reset ? DateTimeOffset.FromUnixTimeSeconds(reset) : now.AddMinutes(1);
+            var usage = quota.Snapshot(id);
+            var cooldown = error.FailoverReason == "quota_rejected"
+                ? error.ResetsAt is not null ? until : usage?.Windows.Where(x => x.UsedPercent >= 100 && x.ResetAt > now)
+                    .Select(x => x.ResetAt).Max() ?? until
+                : now.AddSeconds(30);
+            // Keep the classification and durable cooldown atomic relative to quota reconciliation.
+            failures[id] = (error, until, now);
+            vault.Cooldown(id, cooldown, error.Code, now);
         }
     }
     public void RecordSuccess(string id) { lock (gate) failures.Remove(id); }
@@ -128,8 +170,30 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
     {
         lock (gate)
         {
-            if (!Settings.AutoSwitch) return;
-            try { Select(); quotaSelectionError = null; }
+            try
+            {
+                var now = DateTimeOffset.UtcNow;
+                var failedRefreshes = quota.RefreshErrors.Select(x => x.AccountId).ToHashSet(StringComparer.Ordinal);
+                foreach (var account in vault.Accounts)
+                {
+                    if (failedRefreshes.Contains(account.Id) || quota.Snapshot(account.Id) is not { } snapshot) continue;
+                    if (legacyCooldowns.TryGetValue(account.Id, out var legacyUntil) && account.CooldownUntil == legacyUntil
+                        && account.CooldownErrorCode is null && account.CooldownObservedAt is null
+                        && account.AuthStatus == "ready" && auth.Health(account.Id) != "reauth_required"
+                        && !failures.ContainsKey(account.Id) && snapshot.ConfirmsRecovery(legacyRecoveryAfter, now))
+                    {
+                        vault.ClearLegacyCooldown(account.Id, legacyUntil);
+                        legacyCooldowns.Remove(account.Id);
+                    }
+                    if (ModelErrors.IsUsageCode(account.CooldownErrorCode) && account.CooldownObservedAt is { } observedAt
+                        && snapshot.ConfirmsRecovery(observedAt, now))
+                        vault.ClearQuotaCooldown(account.Id, observedAt);
+                    if (failures.TryGetValue(account.Id, out var failure) && ModelErrors.IsUsageCode(failure.Error.Code)
+                        && snapshot.ConfirmsRecovery(failure.ObservedAt, now)) failures.Remove(account.Id);
+                }
+                if (Settings.AutoSwitch) Select();
+                quotaSelectionError = null;
+            }
             catch (NoEligibleAccountException) { quotaSelectionError = null; }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.Cryptography.CryptographicException)
             { quotaSelectionError = "quota_selection_persistence_failed"; }
@@ -156,7 +220,7 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
             {
                 foreach (var id in ids) uses.Add(vault.AcquireUse(id, model: true));
                 requestsStarted++;
-                return new(selection, ids, uses, Settings.AutoSwitch);
+                return new(selection, ids, uses, Settings.AutoSwitch && scheduler.Hold is null);
             }
             catch { foreach (var use in uses) use.Dispose(); throw; }
         }
@@ -184,7 +248,7 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
                     throw;
                 }
                 if (ex.Code is "auth_temporarily_unavailable" or "refresh_not_yet_allowed")
-                { lock (gate) failures[id] = (PoolAvailability.Auth(ex.Code), DateTimeOffset.UtcNow.AddSeconds(30)); }
+                { lock (gate) failures[id] = (PoolAvailability.Auth(ex.Code), DateTimeOffset.UtcNow.AddSeconds(30), DateTimeOffset.UtcNow); }
                 else if (vault.Find(id)?.AuthStatus == "reauth_required" || ex.Code is "reauth_required" or "account_identity_mismatch" or "rotated_token_persistence_failed")
                     RecordFailure(id, PoolAvailability.Auth("reauth_required") with { FailoverReason = "auth_rejected" });
                 else throw;
@@ -220,6 +284,7 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
             scheduler.AccountDeleted(id, newActiveId, DateTimeOffset.UtcNow);
             quota.Forget(id);
             failures.Remove(id);
+            legacyCooldowns.Remove(id);
             return true;
         }
     }
@@ -232,20 +297,13 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
     {
         lock (gate)
         {
-            if (!Settings.AutoSwitch) return [selection.AccountId];
+            if (!Settings.AutoSwitch || scheduler.Hold is { } hold && hold.AccountId == selection.AccountId && hold.Epoch == selection.Epoch)
+                return [selection.AccountId];
             var provider = vault.Find(selection.AccountId)?.ProviderKind;
             return new[] { selection.AccountId }.Concat(Accounts(model).Where(x => x.Id != selection.AccountId
                 && vault.Find(x.Id)?.ProviderKind == provider
                 && StickyScheduler.ExclusionReason(x, Settings, DateTimeOffset.UtcNow) is null).Select(x => x.Id)).ToArray();
         }
-    }
-    public void Rejected(ModelLease lease, string reason)
-    {
-        // Only explicit structured quota/auth rejection reaches this callback; network errors never do.
-        var usage = quota.Snapshot(lease.AccountId);
-        var reset = usage?.Windows.Where(x => x.UsedPercent >= 100 && x.ResetAt > DateTimeOffset.UtcNow)
-            .Select(x => (DateTimeOffset?)x.ResetAt).Max();
-        vault.Cooldown(lease.AccountId, reason == "quota_rejected" ? reset ?? DateTimeOffset.UtcNow.AddMinutes(1) : DateTimeOffset.UtcNow.AddSeconds(30));
     }
     public void Complete(AccountSelection lease, RelayResult result, string? failoverReason = null, string? model = null)
     {

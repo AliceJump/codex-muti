@@ -8,6 +8,8 @@ Status: proposed architecture with Phase 0 acceptance gates. Date: 2026-10-12 (A
 
 Official CLI/Desktop retains Session, Context, Compaction, Resume, tools, Shell, MCP, Git, approvals and the agent loop. The daemon never executes tools, rewrites a rollout or controls a worktree. A single optional `mcodex` wrapper supplies provider configuration and a local proxy credential, then delegates to the official executable without interpreting its output.
 
+User-authorized experimental exception (2026-10-14): an optional client stdio bridge may request official compaction at an idle boundary. It owns the sole App Server pipe, defers incoming workflow requests, verifies no autonomous goal, and forwards native lifecycle events. Extra remote/control connections are disabled; tools, approvals, history and workflow recovery remain Codex-owned. The daemon only provides quota advice and conditional account reservations. This does not clear the real Desktop/encrypted-state release gates. See [docs/compaction-bridge.md](docs/compaction-bridge.md).
+
 ```text
 Official Codex CLI/Desktop
     -> loopback Responses HTTP/SSE

@@ -2,6 +2,7 @@ using CodexPool.Floating;
 using System.Windows.Media;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Runtime.InteropServices;
 using System.Reflection;
 using System.Windows.Threading;
@@ -11,8 +12,25 @@ using System.Text.Json;
 internal static class Program
 {
     [STAThread]
-    private static int Main()
+    private static int Main(string[] args)
     {
+        if (args.Length == 1 && args[0] == "--proxy-icon-check")
+        {
+            foreach (var guid in new[] { StableTrayIcon.Identity, ProxyTrayController.Identity })
+            {
+                var identifier = new PublishedIconIdentifier { Size = (uint)Marshal.SizeOf<PublishedIconIdentifier>(), Guid = guid };
+                Check(Shell_NotifyIconGetRect(ref identifier, out _) == 0);
+            }
+            Console.WriteLine("PASS read-only Explorer check: account and proxy icons are both registered");
+            return 0;
+        }
+        if (args.Length == 2 && args[0] == "--proxy-owner-check")
+        {
+            var identity = ProxyDaemonProcess.Capture(args[1]);
+            Console.WriteLine($"PASS read-only proxy identity: PID={identity.Pid}, executable={System.IO.Path.GetFileName(identity.Path)}");
+            return 0;
+        }
+        var application = new App(false); application.InitializeComponent(); application.ShutdownMode = ShutdownMode.OnExplicitShutdown;
         var failed = 0; var total = 0;
         void Run(string name, Action test)
         {
@@ -20,6 +38,34 @@ internal static class Program
             try { test(); Console.WriteLine("PASS " + name); }
             catch (Exception ex) { failed++; Console.WriteLine("FAIL " + name + " " + ex.GetType().Name + ": " + ex.Message); Console.WriteLine(ex.StackTrace); }
         }
+        Run("Proxy and account trays have independent Explorer identities", () =>
+        {
+            var calls = new List<StableTrayIcon.NotifyData>();
+            bool Record(uint operation, ref StableTrayIcon.NotifyData data) { calls.Add(data); return true; }
+            using var tray = new StableTrayIcon(QuotaTrayIcon.Create(50), "代理预览", Record, ProxyTrayController.Identity);
+            Check(ProxyTrayController.Identity != StableTrayIcon.Identity);
+            tray.Dispose();
+            Check(calls.Count > 0 && calls.All(x => x.Guid == ProxyTrayController.Identity));
+        });
+        Run("Proxy switch toggle preserves unified and legacy non-default thresholds", () =>
+        {
+            var state = JsonSerializer.SerializeToElement(new { settings = new { autoSwitch = true, fiveHourThreshold = 98, weeklyThreshold = 92, windowThreshold = (double?)null } });
+            var settings = ProxyTrayController.ToggleSettings(state);
+            Check(!settings.AutoSwitch && settings.FiveHourThreshold == 98 && settings.WeeklyThreshold == 92 && settings.WindowThreshold is null);
+            state = JsonSerializer.SerializeToElement(new { settings = new { autoSwitch = false, fiveHourThreshold = 98, weeklyThreshold = 92, windowThreshold = 87d } });
+            settings = ProxyTrayController.ToggleSettings(state);
+            Check(settings.AutoSwitch && settings.WindowThreshold == 87);
+        });
+        Run("Proxy process control excludes Codex, foreign roots and path traversal", () =>
+        {
+            const string root = @"D:\items\codex-pool";
+            Check(ProxyDaemonProcess.OwnedPath(root + @"\.local\builds\one\Daemon\CodexPool.Daemon.exe", root));
+            Check(!ProxyDaemonProcess.OwnedPath(root + @"\.local\builds\codex.exe", root));
+            Check(!ProxyDaemonProcess.OwnedPath(root + @"\.local-other\CodexPool.Daemon.exe", root));
+            Check(!ProxyDaemonProcess.OwnedPath(root + @"\.local\..\foreign\CodexPool.Daemon.exe", root));
+            Check(!ProxyDaemonProcess.OwnedPath(@"C:\other\.local\CodexPool.Daemon.exe", root));
+            Check(!ProxyDaemonProcess.OwnedPath(root + @"\.local\CodexPool.Daemon.exe", ""));
+        });
         Run("Either quota window exhausted marks the account, unknown alone does not", () =>
         {
             Check(QuotaIndicator.IsExhausted(0, 70));
@@ -103,6 +149,95 @@ internal static class Program
             var overflow = FlyoutPlacement.Above(work, new(1600, 850, 24, 24), 206, 53, 12);
             Check(overflow.Y + 53 + 12 == 850);
         });
+        Run("Account menu groups choices, marks current and excludes unavailable actions", () =>
+        {
+            var a = Guid.NewGuid().ToString("N"); var b = Guid.NewGuid().ToString("N"); var c = Guid.NewGuid().ToString("N");
+            var state = JsonSerializer.SerializeToElement(new { activeAccountId = a, accounts = new[] {
+                new { id=a, name="当前账户", enabled=true, paused=false, drain=false },
+                new { id=b, name="备用账户", enabled=true, paused=false, drain=false },
+                new { id=c, name="暂停账户", enabled=true, paused=true, drain=false } } });
+            string? activated = null;
+            var item = ProxyTrayController.AccountMenu(state, id => activated = id);
+            Check(item.Label == "当前账户：当前账户" && item.Invoke is null && item.Children?.Count == 3);
+            Check(item.Children![0].IsChecked && !item.Children[0].Enabled && item.Children[0].Invoke is null);
+            Check(!item.Children[2].Enabled && item.Children[2].Invoke is null);
+            item.Children[1].Invoke!(); Check(activated == b);
+        });
+        Run("Submenu prefers right, flips at the edge and clamps in negative-coordinate work areas", () =>
+        {
+            var work = new System.Drawing.Rectangle(0, 0, 1920, 1040);
+            Check(FlyoutPlacement.Beside(work, new(900, 600, 190, 26), 172, 100, 0) == new System.Drawing.Point(1090, 600));
+            Check(FlyoutPlacement.Beside(work, new(1700, 980, 190, 26), 172, 100, 0) == new System.Drawing.Point(1528, 940));
+            Check(FlyoutPlacement.Beside(new(-1920, 0, 1920, 1040), new(-500, 500, 172, 26), 172, 100, 0) == new System.Drawing.Point(-328, 500));
+        });
+        Run("Compact hover submenu keeps its parent alive and closes the group before an account action", () =>
+        {
+            var closed = false; var invoked = false;
+            GlassTrayMenu? child = null;
+            var root = new GlassTrayMenu(new GlassMenuItem[] {
+                new("当前账户：主账户", Children: new GlassMenuItem[] {
+                    new("主账户", Enabled:false, IsChecked:true),
+                    new("备用账户", () => { Check(closed && child is not null && !child.IsVisible); invoked=true; }) }),
+                new("打开账户管理", () => { }), new("关闭自动切换", () => { }), new("更新额度", () => { }), new("关闭代理", () => { }), new("退出代理托盘", () => { }) }, () => closed=true);
+            try
+            {
+                var work = System.Windows.Forms.Screen.PrimaryScreen!.WorkingArea;
+                root.ShowNear(new(work.Left + 400, work.Top + 500), null);
+                Check(root.ActualHeight < 190 && root.ActualWidth <= 260);
+                var button = (Button)((StackPanel)((Border)root.Content).Child).Children[0];
+                button.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0) { RoutedEvent=UIElement.MouseEnterEvent });
+                child = root.Submenu;
+                Check(child is not null && child.IsVisible && root.IsVisible && !closed);
+                button.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0) { RoutedEvent=UIElement.MouseEnterEvent });
+                Check(ReferenceEquals(root.Submenu, child));
+                Check(GetWindowRect(new System.Windows.Interop.WindowInteropHelper(root).Handle, out var parentRect));
+                Check(GetWindowRect(new System.Windows.Interop.WindowInteropHelper(child!).Handle, out var childRect));
+                Check(childRect.Left == parentRect.Right);
+                child!.Activate(); Pump(30);
+                Check(root.IsVisible && child.IsVisible && !closed);
+                var choice = (Button)((StackPanel)((Border)child.Content).Child).Children[1];
+                choice.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                Check(closed && invoked && !root.IsVisible && !child.IsVisible);
+            }
+            finally { root.Close(); }
+        });
+        Run("Glass menu is created hidden and every visible native position is anchored on the target monitor", () =>
+        {
+            foreach (var screen in System.Windows.Forms.Screen.AllScreens)
+            {
+                var work = screen.WorkingArea;
+                var cursor = new System.Drawing.Point(work.Right - 20, work.Bottom - 20);
+                var anchor = new System.Drawing.Rectangle(cursor.X - 12, cursor.Y - 12, 24, 24);
+                var visible = new List<(WindowRect Rect, uint Dpi)>();
+                var createdHidden = false;
+                var menu = new GlassTrayMenu([("首次显示位置", () => { }), ("第二行菜单", () => { })]);
+                menu.SourceInitialized += (_, _) =>
+                {
+                    var handle = new System.Windows.Interop.WindowInteropHelper(menu).Handle;
+                    createdHidden = !IsWindowVisible(handle);
+                    System.Windows.Interop.HwndSource.FromHwnd(handle)!.AddHook((nint window, int message, nint wParam, nint lParam, ref bool handled) =>
+                    {
+                        if (message is 0x0047 or 0x0018 && IsWindowVisible(window) && GetWindowRect(window, out var rect))
+                            visible.Add((rect, GetDpiForWindow(window)));
+                        return 0;
+                    });
+                };
+                try
+                {
+                    menu.ShowNear(cursor, anchor); Pump(50);
+                    Check(createdHidden && visible.Count > 0);
+                    Check(GetWindowRect(new System.Windows.Interop.WindowInteropHelper(menu).Handle, out var finalRect));
+                    Check(visible.All(x => x.Rect.Left == finalRect.Left && x.Rect.Top == finalRect.Top
+                        && x.Rect.Right == finalRect.Right && x.Rect.Bottom == finalRect.Bottom));
+                    foreach (var (rect, dpi) in visible)
+                    {
+                        var point = FlyoutPlacement.Above(work, anchor, rect.Right - rect.Left, rect.Bottom - rect.Top, (int)Math.Round(8 * dpi / 96d));
+                        Check(rect.Left == point.X && rect.Top == point.Y);
+                    }
+                }
+                finally { menu.Close(); }
+            }
+        });
         Run("Glass menu uses native pixels on each monitor and closes before invoking an action", () =>
         {
             foreach (var screen in System.Windows.Forms.Screen.AllScreens)
@@ -128,9 +263,12 @@ internal static class Program
         });
         SceneTests.Run(Run);
         Console.WriteLine($"{total - failed}/{total} UI tests passed; isolated native windows, no credentials or proxy processes");
+        application.Shutdown();
         return failed == 0 ? 0 : 1;
     }
     private static void Check(bool value) { if (!value) throw new InvalidOperationException(); }
+    [StructLayout(LayoutKind.Sequential)] private struct PublishedIconIdentifier { public uint Size; public nint Window; public uint Id; public Guid Guid; }
+    [DllImport("shell32.dll")] private static extern int Shell_NotifyIconGetRect(ref PublishedIconIdentifier identity, out WindowRect rect);
     private static void Pump(int milliseconds)
     {
         var frame = new DispatcherFrame();
@@ -140,6 +278,8 @@ internal static class Program
     }
     [DllImport("user32.dll")] private static extern nint SendMessage(nint window, uint message, nint wParam, nint lParam);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern uint RegisterWindowMessage(string name);
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool IsWindowVisible(nint window);
+    [DllImport("user32.dll")] private static extern uint GetDpiForWindow(nint window);
     [StructLayout(LayoutKind.Sequential)] private struct WindowRect { public int Left, Top, Right, Bottom; }
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetWindowRect(nint window, out WindowRect rect);
 }

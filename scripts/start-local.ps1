@@ -24,5 +24,6 @@ if (-not $taskOnline) {
 } else { Write-Host '代理已经运行，保留现有代理，不替换进程。新代理修复需你手动退出旧代理后再启动。' }
 . (Join-Path $PSScriptRoot 'desktop-client.ps1')
 Start-PoolDesktopClient -BuildDirectory $taskBuild -Tray
+if (Test-Path -LiteralPath (Join-Path $taskRoot '.local/proxy-tray/current-build.json')) { & (Join-Path $PSScriptRoot 'start-proxy-tray.ps1') }
 Write-Host '托盘客户端已启动。若旧客户端仍在运行，请从其托盘菜单退出界面后重试；这不会停止代理。'
 if ($Dashboard) { & $taskDaemon dashboard }

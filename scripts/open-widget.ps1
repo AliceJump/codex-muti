@@ -13,3 +13,4 @@ if (-not (Test-Path -LiteralPath $taskWindow)) {
 # The widget starts the adjacent daemon if needed; Web is already part of that daemon.
 . (Join-Path $PSScriptRoot 'desktop-client.ps1')
 Start-PoolDesktopClient -BuildDirectory $taskBuild -Tray
+if (Test-Path -LiteralPath (Join-Path $taskRoot '.local/proxy-tray/current-build.json')) { & (Join-Path $PSScriptRoot 'start-proxy-tray.ps1') }
