@@ -143,12 +143,12 @@ try
         return quota.Views;
     });
     // ChatGPT Desktop / Codex 在 chatgpt_base_url 或 CODEX_API_BASE_URL 指向本机时读取用量；按池可用性改写 allowed。
-    IResult WhamUsageEndpoint(HttpContext context)
+    async Task WhamUsageEndpoint(HttpContext context)
     {
-        var availability = pool.Availability();
-        var plan = availability.Select(x => x.Plan).FirstOrDefault(p => !string.IsNullOrWhiteSpace(p))
-            ?? vault.Accounts.Select(x => quota.Snapshot(x.Id)?.Plan).FirstOrDefault(p => !string.IsNullOrWhiteSpace(p));
-        return Results.Json(WhamUsage.Response(pool.CanRouteModelRequest(), WhamUsage.HeaderAccountId(context.Request), plan));
+        var allowed = pool.CanRouteModelRequest();
+        await chatGptBackend.ForwardUsageAsync(context, allowed, model => pool.CanRouteModelRequest(model));
+        recent.Enqueue(new { at = DateTimeOffset.UtcNow, type = "wham_usage", status = context.Response.StatusCode, poolAllowed = allowed });
+        while (recent.Count > 100) recent.TryDequeue(out _);
     }
     app.MapGet("/backend-api/wham/usage", WhamUsageEndpoint);
     app.MapGet("/api/codex/usage", WhamUsageEndpoint);

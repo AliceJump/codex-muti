@@ -4,7 +4,7 @@
 
 ChatGPT Desktop 在订阅额度耗尽时，会根据 `GET …/wham/usage` 的 `rate_limit.allowed === false` 硬禁用发送，即使 `openai_base_url` 已指向自定义 provider。见 [openai/codex#48816](https://github.com/openai/codex/issues/48816)。
 
-Codex Pool 在 loopback 上提供改写后的用量接口，同时转发其余 ChatGPT 后端请求：Desktop 使用自己的 ChatGPT 登录访问官方服务，按**模型路由**能否选择账户决定是否放行本地发送。
+Codex Pool 在 loopback 上提供改写后的用量接口，同时转发其余 ChatGPT 后端请求：Desktop 使用自己的 ChatGPT 登录读取完整官方用量，再按**模型路由**能否选择账户调整发送许可。
 
 ## 配置
 
@@ -46,7 +46,11 @@ chatgpt_base_url = "https://127.0.0.1:3211/backend-api"
 | 未选中账户且池内有可用初始账户 | `true` | `false` |
 | 池为空或全部不可用 | `false` | `true` |
 
-用量查询只读复用 `PoolRuntime.CanRouteModelRequest`，不改变 active、epoch、凭据或请求预留。`plan_type` 始终存在，未知时为 `unknown`。该路径不要求本地控制密钥（Desktop 带 ChatGPT bearer），但仍受 loopback 与 Host/Origin 约束。不会把 Desktop 登录导入账户池，也不会用其 token 向上游查真实用量。
+用量查询只读复用 `PoolRuntime.CanRouteModelRequest`，不改变 active、epoch、凭据或请求预留。请求必须带客户端自己的 ChatGPT Bearer，使用同一身份单次读取官方 WHAM；缺失返回 401，本地控制密钥返回 403，绝不出站。两个本地用量路径均读取官方 `/backend-api/wham/usage`。
+
+完整保留官方 `user_id`、`account_id`、`plan_type`、额度窗口、重置时间、余额与未知字段；只修改 `rate_limit.allowed / limit_reached`。池可路由时，同时解除登录账户的 `spend_control.reached` / `credits.overage_limit_reached` 发送限制，清除普通额度耗尽的 `rate_limit_upsell`；保留 reserve 专属 banner，带 `normal_model_slug` 的附加桶按该模型的池可路由状态单独改写许可。不会把已用百分比改为零或编造余额。
+
+原简化响应缺少 `user_id` 和窗口数据，只返回 `allowed=true`，无法保留 Desktop 身份匹配、用量详情及状态恢复所需信息。修复后不再使用池账户的套餐代替客户端套餐，也不使用请求头伪造响应账号。官方认证/限流失败保留状态码，网络失败返回 502/504，响应无效或超过 1 MiB 返回 502；不伪造成功用量、不重试、不切换池账户。`recentRequests` 只记录用量请求的时间、状态码和池许可，不记录身份、凭据或原始用量正文。
 
 ## 登录状态与后端转发
 
@@ -72,6 +76,8 @@ HTTPS 校验与工作区路由选择见 [workspace_routing.rs](https://github.co
 
 CLI / app-server 路径已有原生验收；**ChatGPT Desktop 经池发送的端到端验收仍待完成**。#7 合入后仍需单独做 Desktop 真机确认。
 
-后端转发回归使用合成凭据覆盖账号检查、profile、配置初始化、身份与查询参数保留、本地凭据隔离、真实认证拒绝、重定向和网络失败。合成测试不代表真实账号重新登录或 refresh 已通过验收。
+后端转发回归使用合成凭据覆盖账号检查、profile、配置初始化、身份与查询参数保留、本地凭据隔离、真实认证拒绝、重定向和网络失败。用量回归额外检查完整身份/窗口/余额/未知字段保留、普通与模型专属许可、阻止本地密钥出站、上游错误和超大响应。合成测试不代表真实账号重新登录或 refresh 已通过验收。
+
+现场只读对比已确认旧服务返回的 `allowed=true` 响应缺少官方 `user_id` 与 primary window，而官方接口同身份返回完整字段且 `allowed=false`。这能证明响应缺陷，不能单独证明实际发送按钮已恢复。安装客户端的用量走独立 HTTP fetch service，不能用修改 App Server `ordinaryUsageAllowed` 代替；当前桥接与启动入口保持原有实现。推送模式还可能接收官方 `usage.snapshot`，仅拒绝订阅 POST 不能保证隔离旧快照，不能拿 GET 改写测试当成 push/真实按钮验收。
 
 HTTPS 回归使用临时自签名测试证书和空闲 loopback 端口，验证实际 TLS 握手、显式信任与未信任拒绝、证书 IP/有效期/用途校验及控制入口隔离；不写系统信任库。Windows 安装脚本、当前用户系统信任与真实 Desktop 登录仍需真机验收。

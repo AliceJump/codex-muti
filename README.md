@@ -111,6 +111,8 @@ chatgpt_base_url = "https://127.0.0.1:3211/backend-api"
 
 官方工作区发现结果保持原样；若工作区要求特定区域后端，Codex 可能使用官方发现的地址，本地用量改写不保证生效。配置步骤、停用方法与验收限制见 [docs/wham-usage-rewrite.md](docs/wham-usage-rewrite.md)。
 
+用量改写会使用客户端原身份读取完整官方响应，保留账号、用户、套餐、窗口、重置时间和余额，再按池可路由状态调整发送许可。旧版仅返回简化 `allowed` 的实现会丢失用量详情。压缩桥接及其启动方式保持原有实现。
+
 模型入口可接受池内原生 access token，或只读核对 Daemon `CODEX_HOME/auth.json` 中的当前 ChatGPT 登录；代理不导入、复制、刷新或写入该文件。实际上游账户仍由 sticky 调度决定。
 
 原生 WebSocket 探测返回 426，使 Codex 回落 HTTP/SSE。`/v1/models` 返回原生目录；带 `client_version` 时优先原样转发。支持原生 zstd（解压上限 32 MiB）。错误汇总见 [docs/model-errors.md](docs/model-errors.md)；provider 验收见 [docs/local-provider-acceptance.md](docs/local-provider-acceptance.md)。

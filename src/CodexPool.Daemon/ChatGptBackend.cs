@@ -1,4 +1,5 @@
 using System.Net.Http.Headers;
+using System.Text.Json;
 using Microsoft.AspNetCore.Http.Features;
 
 namespace CodexPool.Daemon;
@@ -18,11 +19,17 @@ public sealed class ChatGptBackend(HttpClient http, string localKey)
         AutomaticDecompression = System.Net.DecompressionMethods.All,
     }) { Timeout = TimeSpan.FromSeconds(30) };
 
-    public async Task ForwardAsync(HttpContext context)
+    public Task ForwardAsync(HttpContext context) => ForwardAsync(context, null, null);
+    public Task ForwardUsageAsync(HttpContext context, bool allowed, Func<string, bool>? canRouteModel = null)
+        => ForwardAsync(context, allowed, canRouteModel);
+
+    private async Task ForwardAsync(HttpContext context, bool? usageAllowed, Func<string, bool>? canRouteModel)
     {
         var input = context.Request;
         var path = input.Path.Value ?? "";
-        if (!IsPassthroughPath(path)) { context.Response.StatusCode = 404; return; }
+        var usage = path is "/backend-api/wham/usage" or "/api/codex/usage";
+        if (usageAllowed is not null ? !usage || input.Method != "GET" : !IsPassthroughPath(path))
+        { context.Response.StatusCode = 404; return; }
         if (input.Headers.Authorization.Count != 1
             || !AuthenticationHeaderValue.TryParse(input.Headers.Authorization.ToString(), out var authorization)
             || !authorization.Scheme.Equals("Bearer", StringComparison.OrdinalIgnoreCase)
@@ -31,14 +38,15 @@ public sealed class ChatGptBackend(HttpClient http, string localKey)
         // A local control key must never leave the machine.
         if (LocalCommands.EqualSecret(authorization.Parameter, localKey))
         { context.Response.StatusCode = 403; return; }
-        if (!Uri.TryCreate("https://chatgpt.com" + path + input.QueryString.Value, UriKind.Absolute, out var target)
+        var upstreamPath = usageAllowed is not null ? "/backend-api/wham/usage" : path;
+        if (!Uri.TryCreate("https://chatgpt.com" + upstreamPath + input.QueryString.Value, UriKind.Absolute, out var target)
             || target.Scheme != "https" || target.Host != "chatgpt.com" || target.Port != 443
-            || !IsPassthroughPath(target.AbsolutePath) || target.Fragment.Length != 0)
+            || (usageAllowed is not null ? target.AbsolutePath != "/backend-api/wham/usage" : !IsPassthroughPath(target.AbsolutePath)) || target.Fragment.Length != 0)
         { context.Response.StatusCode = 400; return; }
         using var request = new HttpRequestMessage(new HttpMethod(input.Method), target);
         request.Headers.Authorization = authorization;
         // Do not forward local browser cookies, control/CSRF headers, Host or Origin.
-        foreach (var name in new[] { "Accept", "User-Agent", "ChatGPT-Account-Id", "ChatGPT-User-Id", "X-OpenAI-Fedramp", "OpenAI-Beta", "originator", "version" })
+        foreach (var name in new[] { "Accept", "User-Agent", "ChatGPT-Account-Id", "ChatGPT-User-Id", "X-OpenAI-Fedramp", "OpenAI-Beta", "originator", "version", "OAI-App-Brand", "x-openai-codex-pricing-chooser" })
             if (input.Headers.TryGetValue(name, out var value)) request.Headers.TryAddWithoutValidation(name, value.ToArray());
         // HTTP/2 request bodies can have neither Content-Length nor Transfer-Encoding.
         var hasBody = context.Features.Get<IHttpRequestBodyDetectionFeature>()?.CanHaveBody
@@ -59,6 +67,23 @@ public sealed class ChatGptBackend(HttpClient http, string localKey)
             {
                 // Preserve genuine auth failures but never expose upstream error bodies.
                 await ErrorAsync(context, (int)response.StatusCode, "chatgpt_backend_rejected"); return;
+            }
+            if (usageAllowed is { } allowed)
+            {
+                await using var stream = await response.Content.ReadAsStreamAsync(context.RequestAborted);
+                using var buffer = new MemoryStream(); var chunk = new byte[8192];
+                while (true)
+                {
+                    var count = await stream.ReadAsync(chunk, context.RequestAborted); if (count == 0) break;
+                    if (buffer.Length + count > WhamUsage.MaxResponseBytes)
+                    { await ErrorAsync(context, 502, "chatgpt_usage_invalid"); return; }
+                    buffer.Write(chunk, 0, count);
+                }
+                byte[] rewritten;
+                try { rewritten = WhamUsage.Rewrite(buffer.ToArray(), allowed, canRouteModel); }
+                catch (JsonException) { await ErrorAsync(context, 502, "chatgpt_usage_invalid"); return; }
+                context.Response.StatusCode = 200; context.Response.ContentType = "application/json";
+                await context.Response.Body.WriteAsync(rewritten, context.RequestAborted); return;
             }
             context.Response.StatusCode = (int)response.StatusCode;
             if (response.Content.Headers.ContentType is { } type) context.Response.ContentType = type.ToString();
