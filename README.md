@@ -33,6 +33,7 @@
 | 组件 | 作用 | 默认地址 / 入口 |
 |------|------|-----------------|
 | **Daemon** | 模型代理、账户、额度、本地 API、Dashboard 静态页 | `http://127.0.0.1:3210`（仅 loopback） |
+| **ChatGPT HTTPS 后端** | 可选用量改写与官方后端转发 | `https://127.0.0.1:3211/backend-api`（安装证书后启用，仅 loopback） |
 | **Dashboard** | 浏览器账户/额度/阈值控制台 | 同端口；`pool.ps1 dashboard` 建立短期安全会话 |
 | **Widget** | 可固定和拖动的托盘账户面板 | `pool.ps1 widget` / `Ctrl+Alt+W` |
 | **代理控制托盘** | 独立图标，启动／关闭代理、切换账户与自动切换 | `scripts/start-proxy-tray.ps1` |
@@ -89,21 +90,26 @@ Wrapper 只提供 custom provider 配置和本地代理凭证，不接管 sessio
 
 ## Codex / Desktop 配置（`~/.codex/config.toml`）
 
-使用内置 OpenAI provider、并希望流量与用量查询都打到本机 Daemon 时，在用户级配置顶层设置：
+使用内置 OpenAI provider 时，先仅在用户级配置顶层设置模型入口，登录与用量查询保留官方后端：
 
 ```toml
 openai_base_url = "http://127.0.0.1:3210/v1"
-chatgpt_base_url = "http://127.0.0.1:3210/backend-api"
 ```
 
 | 键 | 作用 |
 |----|------|
 | `openai_base_url` | 模型请求转到本机池（`master` 已支持相关入口说明） |
-| `chatgpt_base_url` | ChatGPT 后端入口：用量按池可用性改写；账号检查、登录后的初始化和其他后端请求使用客户端原有身份转发官方服务，说明见 [docs/wham-usage-rewrite.md](docs/wham-usage-rewrite.md) |
+| `chatgpt_base_url` | 可选 ChatGPT 后端入口；新版 Codex 要求 HTTPS，不能配置为本地 HTTP 地址 |
 
-可选：`CODEX_API_BASE_URL=http://127.0.0.1:3210`（对应 `GET /api/codex/usage`，语义与 WHAM 改写相同，已随 #7 合入）。
+需要本地用量改写时，先执行 `pwsh -NoProfile -File scripts/setup-backend-https.ps1`，为当前 Windows 用户安装仅用于 `127.0.0.1` 的服务器证书，再部署新版 Daemon。脚本不修改 Codex 配置、不重启服务；私钥保留在 Windows 当前用户证书存储中且不可导出。随后增加配置并重启 Codex：
 
-`chatgpt_base_url` 同时影响登录后的账号检查，并非用量专用配置。旧版只实现用量接口，其余后端请求会返回本地 401，导致 Desktop 显示未登录或登录失败。升级 Daemon 后再使用这项配置；尚未升级时可暂时移除 `chatgpt_base_url` 并重启客户端，保留 `openai_base_url` 的模型代理。若客户端登录已失效，需要重新完成官方登录。
+```toml
+chatgpt_base_url = "https://127.0.0.1:3211/backend-api"
+```
+
+`chatgpt_base_url` 同时影响登录后的账号检查，并非用量专用配置。新版 workspace routing 拒绝 HTTP，包括 loopback；报错 `workspace backend must use an HTTPS origin without credentials` 时，只升级转发代码或把协议文字改成 HTTPS 都不够，需要真实 TLS 监听与受信任的证书。尚未部署时，临时移除 `chatgpt_base_url` 并重启客户端，保留 `openai_base_url`。旧版 Daemon 对非用量后端请求返回本地 401 的问题也已补上身份透传。
+
+官方工作区发现结果保持原样；若工作区要求特定区域后端，Codex 可能使用官方发现的地址，本地用量改写不保证生效。配置步骤、停用方法与验收限制见 [docs/wham-usage-rewrite.md](docs/wham-usage-rewrite.md)。
 
 模型入口可接受池内原生 access token，或只读核对 Daemon `CODEX_HOME/auth.json` 中的当前 ChatGPT 登录；代理不导入、复制、刷新或写入该文件。实际上游账户仍由 sticky 调度决定。
 

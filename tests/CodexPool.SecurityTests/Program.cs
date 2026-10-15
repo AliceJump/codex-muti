@@ -54,6 +54,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Generic routing honors credits, explicit denial, budgets, model scope and stale snapshots", DynamicQuotaRouting),
     ("WHAM usage rewrite exposes pool allowed shape for Desktop chatgpt_base_url", WhamUsageRewrite),
     ("ChatGPT backend preserves Desktop account bootstrap and caller identity without leaking local credentials or retrying", ChatGptBackendTests.RunAsync),
+    ("Backend HTTPS validates certificate identity, isolates controls and completes trusted TLS without changing OS trust", BackendHttpsTests.RunAsync),
     ("Caller cancellation cannot abandon an accepted refresh rotation", RefreshCancellation),
     ("Refresh timeouts distinguish discovery, exchange and identity validation", RefreshTimeoutStages),
     ("Malformed native rotations fail closed without reusing credentials", NativeMalformedRefresh),
