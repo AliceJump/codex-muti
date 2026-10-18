@@ -39,6 +39,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Native JSON refresh isolates A/B and accepts omitted replacement refresh token", NativeRefresh),
     ("Official model ingress accepts A/B, tracks rotation, excludes controls and never writes login", OfficialIngress),
     ("Native zstd request bytes survive decoding; corrupt, unsupported and oversized bodies fail safely", CompressedRequest),
+    ("Raw and zstd request bodies accept 128 MiB and reject one byte over the default limit", RequestBodyBoundary),
     ("Delete removes vault entry and rejects unknown id", AccountDelete),
     ("Delete protects selected and standby model reservations, releases on failure and clears empty scheduler", DeleteModelReservations),
     ("Delete refuses active handover beyond the migration gate and preserves eligible routing", DeleteMigrationGate),
@@ -206,6 +207,30 @@ async Task CompressedRequest()
     using var canceled = new CancellationTokenSource(); canceled.Cancel();
     try { await ModelRequestBody.ReadAsync(canceledSource, "zstd", canceled.Token); Check(false); }
     catch (OperationCanceledException) { }
+}
+async Task RequestBodyBoundary()
+{
+    var payload = new byte[128 * 1024 * 1024 + 1];
+    Array.Fill(payload, (byte)'x');
+    using var compressor = new ZstdSharp.Compressor();
+    foreach (var encoding in new[] { "", "zstd" })
+    {
+        foreach (var length in new[] { payload.Length - 1, payload.Length })
+        {
+            using var source = encoding.Length == 0
+                ? new MemoryStream(payload, 0, length, writable: false)
+                : new MemoryStream(compressor.Wrap(payload.AsSpan(0, length)).ToArray());
+            try
+            {
+                var decoded = await ModelRequestBody.ReadAsync(source, encoding, default);
+                Check(length == payload.Length - 1 && decoded.AsSpan().SequenceEqual(payload.AsSpan(0, length)));
+            }
+            catch (RequestBodyFailure ex)
+            {
+                Check(length == payload.Length && ex.Status == 413 && ex.Code == "request_body_too_large");
+            }
+        }
+    }
 }
 async Task Storage()
 {

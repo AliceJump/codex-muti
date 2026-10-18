@@ -33,7 +33,7 @@ try
         options.Listen(System.Net.IPAddress.Loopback, 3210);
         if (backendCertificate is not null)
             options.Listen(System.Net.IPAddress.Loopback, BackendHttps.Port, listener => listener.UseHttps(backendCertificate));
-        options.Limits.MaxRequestBodySize = 32 * 1024 * 1024;
+        options.Limits.MaxRequestBodySize = ModelRequestBody.MaximumBytes;
         options.Limits.RequestHeadersTimeout = TimeSpan.FromSeconds(15);
     });
     var app = builder.Build();

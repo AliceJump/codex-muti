@@ -11,7 +11,7 @@ public sealed class RequestBodyFailure(string code, int status) : Exception(code
 
 public static class ModelRequestBody
 {
-    public const int MaximumBytes = 32 * 1024 * 1024;
+    public const int MaximumBytes = 128 * 1024 * 1024;
     public static async Task<byte[]> ReadAsync(Stream source, string encoding, CancellationToken token, int maximumBytes = MaximumBytes)
     {
         if (maximumBytes <= 0) throw new ArgumentOutOfRangeException(nameof(maximumBytes));
