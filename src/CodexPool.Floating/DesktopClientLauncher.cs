@@ -19,14 +19,15 @@ internal static class DesktopClientLauncher
         return start;
     }
 
-    internal static async Task OpenAsync(bool accountPanel, CancellationToken token)
+    internal static async Task OpenAsync(bool accountPanel, CancellationToken token, bool show = true)
     {
         token.ThrowIfCancellationRequested();
         var name = accountPanel ? "CodexPoolWidget" : "CodexPoolProxyTray";
         try
         {
             using var signal = EventWaitHandle.OpenExisting("Local\\" + name + "Show-" + Environment.UserName);
-            signal.Set(); return;
+            if (show) signal.Set();
+            return;
         }
         catch (WaitHandleCannotBeOpenedException) { }
         var start = StartInfo(Environment.GetEnvironmentVariable("CODEX_POOL_ROOT") ?? "", accountPanel);

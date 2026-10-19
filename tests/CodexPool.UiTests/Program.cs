@@ -86,7 +86,8 @@ internal static class Program
                 window.Preview(state, 0, online: false);
                 var disconnected = window.BuildTrayMenu();
                 Check(disconnected.Single(x => x.Label == "启动代理").Enabled);
-                Check(disconnected.Where(x => x.Label is "关闭自动切换" or "刷新额度" or "打开账户管理与用量").All(x => !x.Enabled));
+                Check(!disconnected.Single(x => x.Label == "关闭自动切换").Enabled);
+                Check(disconnected.Where(x => x.Label is "刷新额度" or "打开账户管理与用量").All(x => x.Enabled));
             }
             finally { window.Close(); }
         });
@@ -328,6 +329,7 @@ internal static class Program
                 finally { menu.Close(); }
             }
         });
+        DesktopStartupTests.Run(Run);
         SceneTests.Run(Run);
         Console.WriteLine($"{total - failed}/{total} UI tests passed; isolated native windows, no credentials or proxy processes");
         application.Shutdown();

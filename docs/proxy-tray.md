@@ -22,9 +22,9 @@ pwsh -NoProfile -File scripts/build-proxy-tray.ps1
 pwsh -NoProfile -File scripts/start-proxy-tray.ps1
 ```
 
-构建保存到 `.local/proxy-tray/builds/`，安装到稳定的 `.local/desktop/Proxy/`。已有控制托盘运行时沿用旧实例；更新后请通过它的“退出代理托盘”再启动新版本，代理不必退出。账户面板部署不会关闭这个独立控制进程。
+独立构建保存到 `.local/proxy-tray/builds/`，安装到稳定的 `.local/desktop/Proxy/`。启动时选择完整构建和独立代理托盘构建中最后更新的指针，避免完整部署后又选回旧版本。单独启动时沿用已有实例；`deploy.cmd` 的全部／桌面组件部署会一起更新账户托盘和已经运行的代理托盘，失败时尝试恢复两者；仅部署核心保留两个 UI 进程。
 
-安装后，桌面 **Codex Pool** 快捷方式、`start-local.ps1` 和 `open-widget.ps1` 都会同时启动代理控制图标；重复启动仅唤醒现有控制菜单。新版平滑关闭能力需要新版 Daemon 实际运行，构建并不会替换运行中服务。
+安装后，桌面 **Codex Pool** 快捷方式、`start-local.ps1` 和 `open-widget.ps1` 都会同时启动代理控制图标；重复后台启动不展开控制菜单。只有用户主动点击图标或选择打开代理控制时才显示菜单。新版平滑关闭能力需要新版 Daemon 实际运行，构建并不会替换运行中服务。
 
 2026-10-14 验证：19 项界面测试、39 项安全测试（跳过需独占 3210 的旧 Local API 用例）及 17 项部署检查通过。两个独立进程已实际启动，Explorer 只读检查确认两个不同 GUID 的图标都已注册；原代理 PID 和启动时间保持不变。新版代理构建已备好，当前运行实例未被替换。
 

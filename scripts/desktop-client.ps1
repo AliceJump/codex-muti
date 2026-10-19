@@ -28,7 +28,7 @@ function Start-PoolDesktopClient {
         $taskManifest = Join-Path $taskStable 'source-build.txt'
         $taskInstalled = if (Test-Path -LiteralPath $taskManifest) { [IO.File]::ReadAllText($taskManifest) } else { '' }
         if ($taskInstalled -ne $taskSourceBuild) {
-            if ($taskRunning.Count -gt 0) { Write-Warning '旧界面仍在运行，已唤醒旧界面。请退出该 UI 后再次启动以更新；代理无需退出。' }
+            if ($taskRunning.Count -gt 0) { Write-Warning '旧界面仍在运行，保留现有界面。请退出该 UI 后再次启动以更新；代理无需退出。' }
             else {
                 $null = New-Item -ItemType Directory -Path $taskDesktop -Force
                 $taskStaged = Join-Path $taskDesktop ('.' + $taskKind + '-stage-' + [Guid]::NewGuid().ToString('N'))

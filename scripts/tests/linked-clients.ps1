@@ -27,6 +27,13 @@ Assert-Linked (($taskAccount.Arguments -join ',') -eq '--tray,--show') 'Cold lau
 Assert-Linked ($taskAccount.Root -eq $taskFixture -and $taskAccount.AutoStart -eq '0') 'Linked launch lost its root or may restart a stopped daemon.'
 Assert-Linked ($taskAccount.Path -eq (Join-Path $taskFixture '.local/desktop/Widget/CodexPool.Floating.exe')) 'Account launch bypassed the stable installed path.'
 Write-Output 'PASS open account client shows panel without starting proxy or proxy tray'
+$taskOldBuild = Join-Path $taskFixture '.local/old-proxy'
+$null = New-Item -ItemType Directory -Path (Join-Path $taskOldBuild 'Widget') -Force
+$null = New-Item -ItemType Directory -Path (Join-Path $taskFixture '.local/proxy-tray') -Force
+[IO.File]::WriteAllText((Join-Path $taskOldBuild 'Widget/CodexPool.Floating.exe'), 'fixture-not-executable')
+$taskProxyPointer = Join-Path $taskFixture '.local/proxy-tray/current-build.json'
+[IO.File]::WriteAllText($taskProxyPointer, (@{path=$taskOldBuild} | ConvertTo-Json -Compress))
+[IO.File]::SetLastWriteTimeUtc($taskProxyPointer, [DateTime]::UtcNow.AddMinutes(-5))
 & (Join-Path $taskFixture 'scripts/start-proxy-tray.ps1')
 Assert-Linked ($taskLaunches.Count -eq 2) 'Proxy control launch started extra clients.'
 $taskProxy = $taskLaunches[1]
@@ -35,4 +42,10 @@ Assert-Linked ($taskProxy.Path -eq (Join-Path $taskFixture '.local/desktop/Proxy
 foreach ($taskKey in $taskPrior.Keys) { Assert-Linked ([Environment]::GetEnvironmentVariable($taskKey,'Process') -ceq $taskPrior[$taskKey]) "Parent environment changed: $taskKey" }
 Assert-Linked (@($taskLaunches | Where-Object Style -NE Hidden).Count -eq 0) 'A helper window would be visible.'
 Write-Output 'PASS proxy control uses current-build fallback, independent stable path and restored parent environment'
-Write-Output '2/2 linked client checks passed; synthetic files and intercepted process creation only'
+Assert-Linked ([IO.File]::ReadAllText((Join-Path $taskFixture '.local/desktop/Proxy/source-build.txt')) -eq $taskBuild) 'An old dedicated proxy pointer overrode the newly deployed UI.'
+Write-Output 'PASS full UI deployment takes precedence over an older dedicated proxy build'
+[IO.File]::SetLastWriteTimeUtc($taskProxyPointer, [DateTime]::UtcNow.AddMinutes(1))
+& (Join-Path $taskFixture 'scripts/start-proxy-tray.ps1')
+Assert-Linked ([IO.File]::ReadAllText((Join-Path $taskFixture '.local/desktop/Proxy/source-build.txt')) -eq $taskOldBuild) 'A later explicit proxy build was ignored.'
+Write-Output 'PASS a later explicit proxy build remains selectable'
+Write-Output '4/4 linked client checks passed; synthetic files and intercepted process creation only'

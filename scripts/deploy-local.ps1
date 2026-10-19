@@ -73,8 +73,9 @@ function Wait-PoolDaemon($Process, [string]$Path) {
     }
     throw '代理未在预期时间内就绪。'
 }
-function Start-PoolUi([string]$Path, [bool]$Tray) {
-    if ($Tray) { Start-Process -FilePath $Path -ArgumentList '--tray' -WorkingDirectory (Split-Path $Path -Parent) -WindowStyle Hidden }
+function Start-PoolUi([string]$Path, [bool]$Tray, [bool]$Proxy = $false) {
+    if ($Proxy) { Start-Process -FilePath $Path -ArgumentList '--proxy-tray' -WorkingDirectory (Split-Path $Path -Parent) -WindowStyle Hidden }
+    elseif ($Tray) { Start-Process -FilePath $Path -ArgumentList '--tray' -WorkingDirectory (Split-Path $Path -Parent) -WindowStyle Hidden }
     else { Start-Process -FilePath $Path -WorkingDirectory (Split-Path $Path -Parent) -WindowStyle Normal }
 }
 
@@ -114,14 +115,14 @@ try {
         if ($taskRefreshGuard.Reauthorize.Count) { Write-Host '检测到持久 refresh_pending：这些账户需要重新授权；部署会保留其状态，不重用旧刷新令牌。' }
         $taskBoundary = [bool]$taskStatus.boundaryProbe; $taskOld.Boundary = $taskBoundary
     }
-    if ($taskDeployUi) { $taskOldUi = @(Get-CimInstance Win32_Process -Filter "Name='CodexPool.Floating.exe'" | Where-Object { (Test-PoolPath $_.ExecutablePath) -and $_.CommandLine -notmatch '(?:^|\s)--proxy-tray(?:\s|$)' } | ForEach-Object {
+    if ($taskDeployUi) { $taskOldUi = @(Get-CimInstance Win32_Process -Filter "Name='CodexPool.Floating.exe'" | Where-Object { Test-PoolPath $_.ExecutablePath } | ForEach-Object {
         $taskUiProcess = Get-Process -Id $_.ProcessId
         $taskOldSource = $null
         $taskOldManifest = Join-Path (Split-Path $_.ExecutablePath -Parent) 'source-build.txt'
         if ($_.ExecutablePath.StartsWith((Join-Path $taskRoot '.local\desktop') + '\', [StringComparison]::OrdinalIgnoreCase) -and (Test-Path -LiteralPath $taskOldManifest)) {
             $taskOldSource = [IO.File]::ReadAllText($taskOldManifest)
         }
-        [pscustomobject]@{Id=$_.ProcessId;Path=$_.ExecutablePath;StartTicks=$taskUiProcess.StartTime.ToUniversalTime().Ticks;Tray=($_.CommandLine -match '(?:^|\s)--(?:tray|widget)(?:\s|$)');Source=$taskOldSource}
+        [pscustomobject]@{Id=$_.ProcessId;Path=$_.ExecutablePath;StartTicks=$taskUiProcess.StartTime.ToUniversalTime().Ticks;Tray=($_.CommandLine -match '(?:^|\s)--(?:tray|widget)(?:\s|$)');Proxy=($_.CommandLine -match '(?:^|\s)--proxy-tray(?:\s|$)');Source=$taskOldSource}
     }) }
     Write-Host "2/4 仅停止所选范围：$Target。"
     foreach ($taskUi in $taskOldUi) { Stop-OwnedProcess $taskUi; $taskUiStopped += $taskUi }
@@ -137,6 +138,13 @@ try {
         $taskClient = Start-PoolDesktopClient -BuildDirectory $taskBuild -Tray -PassThru -NoDaemonStart:($Target -eq 'Components')
         $taskNewUi += [pscustomobject]@{Id=$taskClient.Id;Path=$taskClient.Path;StartTicks=$taskClient.StartTime.ToUniversalTime().Ticks}
         if ($taskClient.WaitForExit(500)) { throw '新托盘进程提前退出。' }
+        if (@($taskOldUi | Where-Object Proxy).Count -gt 0) {
+            # Both icons ship the same UI assembly. Never keep an old proxy menu
+            # while deploying startup/input fixes to only the account icon.
+            $taskProxyClient = Start-PoolDesktopClient -BuildDirectory $taskBuild -ProxyTray -NoDaemonStart -PassThru
+            $taskNewUi += [pscustomobject]@{Id=$taskProxyClient.Id;Path=$taskProxyClient.Path;StartTicks=$taskProxyClient.StartTime.ToUniversalTime().Ticks}
+            if ($taskProxyClient.WaitForExit(500)) { throw '新代理托盘进程提前退出。' }
+        }
     }
     [IO.File]::WriteAllText($taskPointer + '.tmp', (@{path=$taskBuild;builtAt=[DateTimeOffset]::UtcNow.ToString('O')} | ConvertTo-Json -Compress))
     Move-Item -LiteralPath ($taskPointer + '.tmp') -Destination $taskPointer -Force
@@ -162,8 +170,8 @@ try {
             # Old UI versions may not honor NoDaemonStart. Restore their files
             # without launching if doing so could start an unselected core.
             $taskCanRestoreUi = $Target -ne 'Components' -or [bool](Get-NetTCPConnection -LocalPort 3210 -State Listen -ErrorAction SilentlyContinue)
-            if ($taskUi.Source) { Start-PoolDesktopClient -BuildDirectory $taskUi.Source -Tray:$taskUi.Tray -NoDaemonStart:($Target -eq 'Components') -InstallOnly:(-not $taskCanRestoreUi) }
-            elseif ($taskCanRestoreUi) { Start-PoolUi $taskUi.Path $taskUi.Tray }
+            if ($taskUi.Source) { Start-PoolDesktopClient -BuildDirectory $taskUi.Source -Tray:$taskUi.Tray -ProxyTray:$taskUi.Proxy -NoDaemonStart:($Target -eq 'Components') -InstallOnly:(-not $taskCanRestoreUi) }
+            elseif ($taskCanRestoreUi) { Start-PoolUi $taskUi.Path $taskUi.Tray $taskUi.Proxy }
             if (-not $taskCanRestoreUi) { Write-Warning '已保留或恢复旧组件文件；核心未运行，未重启可能自动拉起核心的旧界面。' }
         } catch { Write-Warning '旧界面恢复失败，请从上一版本目录手动启动。' }
     }

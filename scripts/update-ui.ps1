@@ -20,7 +20,7 @@ $taskOldUi = @(Get-CimInstance Win32_Process -Filter "Name='CodexPool.Floating.e
     $taskExecutable -and @($taskRoots | Where-Object { $taskExecutable.StartsWith((Join-Path $_ '.local') + '\', [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
 } | ForEach-Object {
     $taskProcess = Get-Process -Id $_.ProcessId
-    [pscustomobject]@{Id=$_.ProcessId;Path=$_.ExecutablePath;StartTicks=$taskProcess.StartTime.ToUniversalTime().Ticks;Tray=($_.CommandLine -match '(?:^|\s)--(?:tray|widget)(?:\s|$)')}
+    [pscustomobject]@{Id=$_.ProcessId;Path=$_.ExecutablePath;StartTicks=$taskProcess.StartTime.ToUniversalTime().Ticks;Tray=($_.CommandLine -match '(?:^|\s)--(?:tray|widget)(?:\s|$)');Proxy=($_.CommandLine -match '(?:^|\s)--proxy-tray(?:\s|$)')}
 })
 foreach ($taskUi in $taskOldUi) {
     $taskProcess = Get-Process -Id $taskUi.Id -ErrorAction SilentlyContinue
@@ -30,7 +30,8 @@ foreach ($taskUi in $taskOldUi) {
     if (-not $taskProcess.WaitForExit(10000)) { throw '旧 UI 尚未退出，停止更新。' }
 }
 . (Join-Path $PSScriptRoot 'desktop-client.ps1')
-Start-PoolDesktopClient -BuildDirectory $taskBuild -Tray
+Start-PoolDesktopClient -BuildDirectory $taskBuild -Tray -NoDaemonStart
+if (@($taskOldUi | Where-Object Proxy).Count -gt 0) { Start-PoolDesktopClient -BuildDirectory $taskBuild -ProxyTray -NoDaemonStart }
 if ($Show) {
     $taskShown = $false
     for ($taskAttempt=0; $taskAttempt -lt 30; $taskAttempt++) {

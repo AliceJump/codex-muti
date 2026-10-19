@@ -106,12 +106,12 @@ function script:Start-Process {
     return $taskTestState.Core
 }
 function script:Invoke-RestMethod { param($Uri,[switch]$NoProxy,$TimeoutSec) [pscustomobject]@{status='running'} }
-foreach ($taskCase in @('All','Core','Components','FailCore','FailAllCore','FailComponents','FailComponentsOffline')) {
+foreach ($taskCase in @('All','Core','Components','FailCore','FailAllCore','FailComponents','FailComponentsOffline','FailProxy')) {
     $taskTestState.Sandbox = New-TestRoot "deploy-$taskCase"
     $taskTestState.Trace = [Collections.Generic.List[string]]::new()
     $taskTestState.Processes = @{}
-    $taskTestState.Failure = if ($taskCase -in @('FailCore','FailAllCore')) {'Core'} elseif ($taskCase.StartsWith('FailComponents')) {'Components'} else {''}
-    $taskTarget = if ($taskCase -eq 'FailComponentsOffline') {'Components'} elseif ($taskCase -eq 'FailAllCore') {'All'} else {$taskCase.Replace('Fail','')}
+    $taskTestState.Failure = if ($taskCase -in @('FailCore','FailAllCore')) {'Core'} elseif ($taskCase.StartsWith('FailComponents')) {'Components'} elseif ($taskCase -eq 'FailProxy') {'Proxy'} else {''}
+    $taskTarget = if ($taskCase -in @('FailComponentsOffline','FailProxy')) {'Components'} elseif ($taskCase -eq 'FailAllCore') {'All'} else {$taskCase.Replace('Fail','')}
     $taskTestState.Core = New-TestProcess 101 (Join-Path $taskTestState.Sandbox '.local/base/Daemon/CodexPool.Daemon.exe') ($taskCase -eq 'FailComponentsOffline')
     foreach ($taskId in @(201,202)) {
         $taskKind = if ($taskId -eq 201) {'Widget'} else {'Floating'}
@@ -119,6 +119,7 @@ foreach ($taskCase in @('All','Core','Components','FailCore','FailAllCore','Fail
         New-TestFile (Join-Path $taskTestState.Sandbox ".local/desktop/$taskKind/source-build.txt") (Join-Path $taskTestState.Sandbox '.local/base')
     }
     $null = New-TestProcess 203 (Join-Path $taskTestState.Sandbox '.local/desktop/Proxy/CodexPool.Floating.exe')
+    New-TestFile (Join-Path $taskTestState.Sandbox '.local/desktop/Proxy/source-build.txt') (Join-Path $taskTestState.Sandbox '.local/base')
     $taskStatusStub = @'
 function Get-PoolStatus([string]$Path) {
     [pscustomobject]@{boundaryProbe=$true;accounts=@();nativeLoginAttempts=@();settings=[pscustomobject]@{autoSwitch=$false;fiveHourThreshold=95;weeklyThreshold=95;windowThreshold=$null}}
@@ -132,11 +133,11 @@ function Get-PoolStatus([string]$Path) {
     [IO.File]::WriteAllText($taskSourcePath,$taskSource)
     New-TestFile (Join-Path $taskTestState.Sandbox 'scripts/desktop-client.ps1') @'
 function Start-PoolDesktopClient {
-    param($BuildDirectory,[switch]$Tray,[switch]$PassThru,[switch]$NoDaemonStart,[switch]$InstallOnly)
+    param($BuildDirectory,[switch]$Tray,[switch]$PassThru,[switch]$NoDaemonStart,[switch]$InstallOnly,[switch]$ProxyTray)
     if ($InstallOnly) { $taskTestState.Trace.Add('restore:files'); return }
-    $taskTestState.Trace.Add("start:ui:$NoDaemonStart")
+    $taskTestState.Trace.Add("start:$(if ($ProxyTray) {'proxy'} else {'ui'}):$NoDaemonStart")
     if ($BuildDirectory -match '[\\/]base$') { $taskTestState.Trace.Add('restore:ui') }
-    $taskStarted = New-TestProcess $(if ($Tray) {401} else {402}) (Join-Path $BuildDirectory 'Widget/CodexPool.Floating.exe') ($taskTestState.Failure -eq 'Components' -and $BuildDirectory -notmatch '[\\/]base$')
+    $taskStarted = New-TestProcess $(if ($ProxyTray) {403} elseif ($Tray) {401} else {402}) (Join-Path $BuildDirectory 'Widget/CodexPool.Floating.exe') (($taskTestState.Failure -eq 'Components' -or ($ProxyTray -and $taskTestState.Failure -eq 'Proxy')) -and $BuildDirectory -notmatch '[\\/]base$')
     if ($PassThru) { return $taskStarted }
 }
 '@
@@ -144,23 +145,25 @@ function Start-PoolDesktopClient {
     try { & $taskSourcePath -Target $taskTarget }
     catch { $taskFailed = $true; $taskFailureMessage = $_.Exception.Message }
     Assert-Test ($taskFailed -eq $taskCase.StartsWith('Fail')) "Unexpected result for ${taskCase}: $taskFailureMessage"
-    Assert-Test (-not $taskTestState.Processes[203].HasExited -and $taskTestState.Trace -notcontains 'stop:203') 'Independent proxy tray was stopped by account panel deployment.'
+    Assert-Test ($taskTestState.Processes[203].HasExited -eq ($taskTarget -ne 'Core')) 'Desktop deployment must update both tray clients; core-only deployment must preserve both.'
     $taskPointer = Get-Content -LiteralPath (Join-Path $taskTestState.Sandbox '.local/current-build.json') -Raw | ConvertFrom-Json
     if ($taskTarget -eq 'Core') {
-        Assert-Test (-not ($taskTestState.Trace | Where-Object {$_ -match 'ui|stop:20'})) 'Core deployment touched UI.'
+        Assert-Test (-not ($taskTestState.Trace | Where-Object {$_ -match 'ui|proxy|stop:20'})) 'Core deployment touched UI.'
     } elseif ($taskTarget -eq 'Components') {
         Assert-Test (-not ($taskTestState.Trace | Where-Object {$_ -match 'start:core|stop:101'})) 'Component deployment touched core.'
         Assert-Test (-not ($taskTestState.Trace | Where-Object {$_ -eq 'start:ui:False'})) 'Component UI may start the core.'
+        Assert-Test (-not ($taskTestState.Trace | Where-Object {$_ -eq 'start:proxy:False'})) 'Proxy tray may start the core.'
     }
     if ($taskFailed) {
         Assert-Test ($taskPointer.path -eq (Join-Path $taskTestState.Sandbox '.local/base')) 'Failure published the new pointer.'
         if ($taskTarget -eq 'Core') { Assert-Test ($taskTestState.Trace.Count -eq 3 -and $taskTestState.Core.Path -match '[\\/]base[\\/]') 'Old core was not restored.' }
-        elseif ($taskCase -eq 'FailAllCore') { Assert-Test ($taskTestState.Core.Path -match '[\\/]base[\\/]' -and @($taskTestState.Trace | Where-Object { $_ -eq 'restore:ui' }).Count -eq 2) 'Early core failure must restore both legacy UI clients as well as the core.' }
+        elseif ($taskCase -eq 'FailAllCore') { Assert-Test ($taskTestState.Core.Path -match '[\\/]base[\\/]' -and @($taskTestState.Trace | Where-Object { $_ -eq 'restore:ui' }).Count -eq 3) 'Early core failure must restore all tray clients as well as the core.' }
         elseif ($taskCase -eq 'FailComponentsOffline') { Assert-Test ($taskTestState.Trace -contains 'restore:files' -and $taskTestState.Trace -notcontains 'restore:ui') 'Offline core was restarted by old UI rollback.' }
-        else { Assert-Test ($taskTestState.Trace -contains 'restore:ui') 'Old UI was not restored.' }
+        else { Assert-Test (@($taskTestState.Trace | Where-Object { $_ -eq 'restore:ui' }).Count -eq 3) 'Both tray clients and the legacy UI must be restored.' }
     } else {
         Assert-Test ($taskPointer.path -ne (Join-Path $taskTestState.Sandbox '.local/base')) 'Success did not publish a new pointer.'
         if ($taskTarget -ne 'Core') { Assert-Test (@($taskTestState.Trace | Where-Object { $_ -match '^start:ui:' }).Count -eq 1) 'Unified tray panel must start only one UI.' }
+        if ($taskTarget -ne 'Core') { Assert-Test (@($taskTestState.Trace | Where-Object { $_ -eq 'start:proxy:True' }).Count -eq 1) 'Existing proxy tray must update from the same build without starting core.' }
     }
     Write-Output "PASS deployment isolation and recovery: $taskCase"
 }
@@ -180,7 +183,7 @@ Write-Output 'PASS invalid CMD target cannot deploy All'
 $taskBatchBytes = [IO.File]::ReadAllBytes((Join-Path $taskRepository 'deploy.cmd'))
 Assert-Test (@($taskBatchBytes | Where-Object { $_ -gt 127 }).Count -eq 0) 'Batch wrapper must remain ASCII.'
 Assert-Test ([IO.File]::ReadAllText((Join-Path $taskRepository 'deploy.cmd')) -notmatch '(?<!\r)\n') 'Batch wrapper must use CRLF.'
-Write-Output '17/17 deployment target checks passed; simulated publishing/processes only'
+Write-Output '18/18 deployment target checks passed; simulated publishing/processes only'
 # The invalid-target CMD check deliberately leaves a nonzero native exit code.
 # Assertions above already checked that rejection; successful callers must receive success.
 $global:LASTEXITCODE = 0

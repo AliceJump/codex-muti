@@ -17,7 +17,7 @@ internal sealed class ProxyTrayController : IDisposable
     internal static readonly Guid Identity = new("814c1565-8e11-4a4e-94e4-a36d9b7b019f");
     private const string Endpoint = "http://127.0.0.1:3210";
     private readonly Dispatcher dispatcher;
-    private readonly HttpClient http = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(30) };
+    private readonly LocalControlClient http;
     private readonly CancellationTokenSource lifetime = new();
     private readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromSeconds(3) };
     private readonly StableTrayIcon tray;
@@ -30,6 +30,7 @@ internal sealed class ProxyTrayController : IDisposable
     internal ProxyTrayController(Dispatcher dispatcher)
     {
         this.dispatcher = dispatcher;
+        http = new LocalControlClient(directory);
         using var source = Application.GetResourceStream(new Uri("pack://application:,,,/CodexPool.Floating;component/Assets/codex-pool.ico"))!.Stream;
         tray = new StableTrayIcon(new System.Drawing.Icon(source), "Codex Pool · 代理状态", identity: Identity);
         tray.ContextMenuRequested += (_, _) => dispatcher.Invoke(ShowMenu);
@@ -39,11 +40,10 @@ internal sealed class ProxyTrayController : IDisposable
         _ = RefreshAsync();
     }
 
-    private void Authorize() => http.DefaultRequestHeaders.Authorization = new("Bearer", Vault.ReadLocalKey(directory));
     private async Task<JsonElement> ReadStatusAsync()
     {
-        Authorize();
-        using var response = await http.GetAsync(Endpoint + "/status", lifetime.Token);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token); timeout.CancelAfter(TimeSpan.FromSeconds(5));
+        using var response = await http.GetAsync(Endpoint + "/status", timeout.Token);
         response.EnsureSuccessStatusCode();
         using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(lifetime.Token));
         return json.RootElement.Clone();
@@ -97,7 +97,7 @@ internal sealed class ProxyTrayController : IDisposable
         var identity = ProxyDaemonProcess.Capture(root);
         var requests = current.GetProperty("inFlightRequests").EnumerateArray().Sum(x => x.GetProperty("value").GetInt32());
         if (requests > 0 && MessageBox.Show($"代理正在处理 {requests} 个请求。关闭会停止新请求，进行中的请求可能中断。确定关闭代理？", "关闭 Codex Pool 代理", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
-        using var response = await http.PostAsJsonAsync(Endpoint + "/control/shutdown", new { }, lifetime.Token);
+        using var response = await http.PostAsync(Endpoint + "/control/shutdown", new { }, lifetime.Token);
         if (response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.MethodNotAllowed)
         {
             // A legacy proxy can only be force-stopped with explicit UI confirmation.

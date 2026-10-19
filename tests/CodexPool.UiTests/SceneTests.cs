@@ -182,7 +182,11 @@ internal static class SceneTests
                 window.HandleTrayPress();
                 window.HandleTrayClick(point); Check(window.IsVisible);
                 window.Hide(); window.ShowActivated = false; window.Show();
-                window.DismissOnDeactivation(trayPress: true); Pump(80);
+                window.DismissOnDeactivation(trayPress: true);
+                // This test synthesizes deactivation rather than moving real OS focus.
+                // Supply the released/inactive state to the same timer handler so an
+                // unrelated foreground window cannot make the assertion intermittent.
+                window.CompleteTrayPress(leftPressed: false, active: false);
                 Check(!window.IsVisible); // A canceled tray drag has no selection: release still dismisses.
                 window.HandleTrayPress(); window.HandleTrayClick(point); Check(window.IsVisible);
             }

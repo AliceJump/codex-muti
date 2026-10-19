@@ -7,6 +7,8 @@ public partial class App : System.Windows.Application
     private Mutex? owner;
     private EventWaitHandle? showSignal;
     private RegisteredWaitHandle? showListener;
+    private EventWaitHandle? dashboardSignal;
+    private RegisteredWaitHandle? dashboardListener;
     private ProxyTrayController? proxyTray;
     private readonly bool startClients;
     public App() : this(true) { }
@@ -38,10 +40,13 @@ public partial class App : System.Windows.Application
         // Hold the event before claiming ownership so a concurrent launcher can
         // queue its wake-up even while the first window is being constructed.
         showSignal = new EventWaitHandle(false, EventResetMode.AutoReset, signalName);
+        if (!proxyMode) dashboardSignal = new EventWaitHandle(false, EventResetMode.AutoReset, "Local\\" + instance + "Dashboard-" + Environment.UserName);
         owner = new Mutex(true, "Local\\" + instance + "-" + Environment.UserName, out var first);
         if (!first)
         {
-            showSignal.Set();
+            // Background startup is idempotent: it must not pop an existing menu/card.
+            if (ShouldShow(e.Args)) showSignal.Set();
+            if (ShouldOpenDashboard(e.Args)) dashboardSignal?.Set();
             owner.Dispose(); owner = null; Shutdown(); return;
         }
         if (proxyMode)
@@ -53,22 +58,24 @@ public partial class App : System.Windows.Application
         var window = new FloatingWindow() { ShowInTaskbar = e.Args.Contains("--review", StringComparer.Ordinal) };
         showListener = ThreadPool.RegisterWaitForSingleObject(showSignal, (_, _) => window.Dispatcher.BeginInvoke(window.ShowFromLauncher), null, Timeout.Infinite, false);
         MainWindow = window;
-        // Initialize the HWND, tray and event subscription without flashing a desktop card.
-        window.ShowActivated = false;
-        window.Opacity = 0;
-        window.Show(); window.Hide(); window.Opacity = 1; window.ShowActivated = true;
-        if (window.Pinned || e.Args.Contains("--show", StringComparer.Ordinal) || !e.Args.Any(x => x is "--tray" or "--widget")) window.ShowFromLauncher();
+        dashboardListener = ThreadPool.RegisterWaitForSingleObject(dashboardSignal!, (_, _) => window.Dispatcher.BeginInvoke(window.OpenDashboardOnStartup), null, Timeout.Infinite, false);
+        window.InitializeHidden();
+        if (ShouldShow(e.Args)) window.ShowFromLauncher();
+        if (ShouldOpenDashboard(e.Args)) window.OpenDashboardOnStartup();
         if (portable && !e.Args.Contains("--account-only", StringComparer.Ordinal)) OpenPortableProxyTray();
     }
+    internal static bool ShouldShow(string[] args) => args.Any(x => x is "--show" or "--review");
+    internal static bool ShouldOpenDashboard(string[] args) => !args.Any(x => x is "--proxy-tray" or "--tray" or "--widget" or "--show" or "--review" or "--account-only");
     private async void OpenPortableProxyTray()
     {
-        try { await DesktopClientLauncher.OpenAsync(accountPanel: false, CancellationToken.None); }
+        try { await DesktopClientLauncher.OpenAsync(accountPanel: false, CancellationToken.None, show: false); }
         catch { System.Windows.MessageBox.Show("账户面板已打开，代理控制图标尚未启动，可从账户菜单再次打开。", "Codex Pool"); }
     }
     protected override void OnExit(System.Windows.ExitEventArgs e)
     {
         proxyTray?.Dispose();
         showListener?.Unregister(null); showSignal?.Dispose();
+        dashboardListener?.Unregister(null); dashboardSignal?.Dispose();
         if (owner is not null) { owner.ReleaseMutex(); owner.Dispose(); }
         base.OnExit(e);
     }

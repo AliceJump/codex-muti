@@ -1,4 +1,4 @@
-param([switch]$Dashboard, [string]$BuildDirectory)
+param([switch]$Dashboard = $true, [string]$BuildDirectory)
 $ErrorActionPreference = 'Stop'
 $taskRoot = [IO.Path]::GetFullPath((Split-Path $PSScriptRoot -Parent))
 $taskPointer = Join-Path $taskRoot '.local\current-build.json'

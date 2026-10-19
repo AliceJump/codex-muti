@@ -21,7 +21,7 @@ public partial class FloatingWindow : Window
     private readonly string directory = Environment.GetEnvironmentVariable("CODEX_POOL_DATA_DIR")
         ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodexPool");
     private readonly CancellationTokenSource lifetime = new();
-    private readonly HttpClient http = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = Timeout.InfiniteTimeSpan };
+    private readonly LocalControlClient http;
     private readonly StableTrayIcon? tray;
     private GlassTrayMenu? glassMenu;
     private readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromSeconds(20) };
@@ -41,9 +41,10 @@ public partial class FloatingWindow : Window
     private nint handle;
     internal bool Pinned => preferences.Pinned;
     public FloatingWindow() : this(true) { }
-    internal FloatingWindow(bool startServices)
+    internal FloatingWindow(bool startServices, HttpMessageHandler? handler = null, Func<string>? readKey = null)
     {
         this.startServices = startServices;
+        http = new LocalControlClient(directory, handler, readKey);
         InitializeComponent();
         if (startServices)
             try { preferences = JsonSerializer.Deserialize<WindowPreferences>(File.ReadAllText(Path.Combine(directory, PreferencesFile))) ?? preferences; } catch { }
@@ -95,12 +96,7 @@ public partial class FloatingWindow : Window
             if (Pinned) RestorePosition(); _ = WatchAsync(); timer.Start();
         };
         Deactivated += (_, _) => DismissOnDeactivation(IsTrayPress());
-        trayDismissTimer.Tick += (_, _) =>
-        {
-            if ((GetAsyncKeyState(1) & 0x8000) != 0) return;
-            trayDismissTimer.Stop();
-            if (!Pinned && !IsActive) { SavePosition(); Hide(); }
-        };
+        trayDismissTimer.Tick += (_, _) => CompleteTrayPress((GetAsyncKeyState(1) & 0x8000) != 0, IsActive);
         timer.Tick += (_, _) => { SavePosition(); if (snapshot is { } state) Render(state); };
         Closing += OnClosing;
         SystemEvents.UserPreferenceChanged += PreferenceChanged;
@@ -125,24 +121,30 @@ public partial class FloatingWindow : Window
         { SetNotice("代理启动未完成 · 正在重新连接"); }
         while (!lifetime.IsCancellationRequested)
         {
-            try
-            {
-                http.DefaultRequestHeaders.Authorization = new("Bearer", Vault.ReadLocalKey(directory));
-                using var request = new HttpRequestMessage(HttpMethod.Get, "http://127.0.0.1:3210/events");
-                using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, lifetime.Token); response.EnsureSuccessStatusCode();
-                using var reader = new StreamReader(await response.Content.ReadAsStreamAsync(lifetime.Token));
-                while (await reader.ReadLineAsync(lifetime.Token) is { } line)
-                {
-                    if (!line.StartsWith("data: ", StringComparison.Ordinal)) continue;
-                    using var document = JsonDocument.Parse(line[6..]); var state = document.RootElement.Clone();
-                    await Dispatcher.InvokeAsync(() => { connected = true; Render(state); });
-                }
-                if (!lifetime.IsCancellationRequested) await Dispatcher.InvokeAsync(SetOffline);
-            }
-            catch (Exception ex) when (ex is HttpRequestException or IOException or UnauthorizedAccessException or System.Security.Cryptography.CryptographicException or JsonException or OperationCanceledException)
-            { if (!lifetime.IsCancellationRequested) await Dispatcher.InvokeAsync(SetOffline); }
-            if (!lifetime.IsCancellationRequested) try { await Task.Delay(1500, lifetime.Token); } catch (OperationCanceledException) { }
+            await RefreshStatusAsync();
+            if (!lifetime.IsCancellationRequested) try { await Task.Delay(TimeSpan.FromSeconds(3), lifetime.Token); } catch (OperationCanceledException) { }
         }
+    }
+    internal async Task RefreshStatusAsync()
+    {
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+            timeout.CancelAfter(TimeSpan.FromSeconds(5));
+            using var response = await http.GetAsync("/status", timeout.Token); response.EnsureSuccessStatusCode();
+            using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(timeout.Token));
+            if (!lifetime.IsCancellationRequested) { connected = true; Render(document.RootElement.Clone()); }
+        }
+        catch (Exception ex) when (LocalControlClient.IsUnavailable(ex))
+        { if (!lifetime.IsCancellationRequested) SetOffline(); }
+    }
+    internal void InitializeHidden() => _ = new WindowInteropHelper(this).EnsureHandle();
+    internal async void OpenDashboardOnStartup()
+    {
+        // Initial status polling also waits for daemon startup; it never shows the card.
+        for (var i = 0; i < 50 && !connected && !lifetime.IsCancellationRequested; i++)
+            try { await Task.Delay(200, lifetime.Token); } catch (OperationCanceledException) { return; }
+        if (!lifetime.IsCancellationRequested) await DashboardAsync();
     }
     private void SetOffline()
     {
@@ -230,16 +232,16 @@ public partial class FloatingWindow : Window
         try
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token); timeout.CancelAfter(TimeSpan.FromSeconds(10));
-            using var response = await http.PostAsJsonAsync("http://127.0.0.1:3210/accounts/" + id + "/activate", new { }, timeout.Token);
-            if (!response.IsSuccessStatusCode) { SetNotice("账户切换未完成。请在 Dashboard 检查账户状态。"); }
+            using var response = await http.PostAsync("/accounts/" + id + "/activate", new { }, timeout.Token);
+            if (!response.IsSuccessStatusCode) { OperationNotice("账户切换未完成。请在 Dashboard 检查账户状态。"); }
             else { Scene.SetNotice(""); }
             using var status = await http.GetAsync("http://127.0.0.1:3210/status", timeout.Token); status.EnsureSuccessStatusCode();
             using var json = JsonDocument.Parse(await status.Content.ReadAsStringAsync(timeout.Token)); Render(json.RootElement.Clone());
         }
-        catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or JsonException) { SetNotice("服务暂时不可用。账户选择尚未确认。"); if (snapshot is { } state) Render(state); }
+        catch (Exception ex) when (LocalControlClient.IsUnavailable(ex)) { OperationNotice("服务暂时不可用。账户选择尚未确认。"); if (snapshot is { } state) Render(state); }
         finally { busy = false; Scene.SetBusy(false); }
     }
-    private async Task RefreshQuotaAsync(bool notify)
+    internal async Task RefreshQuotaAsync(bool notify)
     {
         if (busy) return;
         busy = true; Scene.SetBusy(true);
@@ -248,17 +250,21 @@ public partial class FloatingWindow : Window
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token); timeout.CancelAfter(TimeSpan.FromSeconds(30));
             using var usage = await http.GetAsync("http://127.0.0.1:3210/usage", timeout.Token); usage.EnsureSuccessStatusCode();
             using var status = await http.GetAsync("http://127.0.0.1:3210/status", timeout.Token); status.EnsureSuccessStatusCode();
-            using var json = JsonDocument.Parse(await status.Content.ReadAsStringAsync(timeout.Token)); Render(json.RootElement.Clone());
+            using var json = JsonDocument.Parse(await status.Content.ReadAsStringAsync(timeout.Token)); connected = true; Render(json.RootElement.Clone());
             if (notify)
             {
-                SetNotice("额度已更新");
-                NotifyTray("额度更新", "额度已更新");
+                var message = QuotaRefreshNotice(json.RootElement);
+                SetNotice(message);
+                NotifyTray("额度更新", message);
             }
         }
-        catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or JsonException)
-        { SetNotice("额度刷新失败。请检查本地服务。"); }
+        catch (Exception ex) when (LocalControlClient.IsUnavailable(ex))
+        { OperationNotice("额度刷新失败。请检查本地服务或在 Dashboard 查看状态。"); }
         finally { busy = false; Scene.SetBusy(false); }
     }
+    internal static string QuotaRefreshNotice(JsonElement state) => state.TryGetProperty("quotaRefreshErrors", out var errors)
+        && errors.ValueKind == JsonValueKind.Array && errors.GetArrayLength() > 0
+        ? $"{errors.GetArrayLength()} 个账户额度更新失败，保留上次数据。请在 Dashboard 查看状态。" : "额度已更新";
     private void NotifyTray(string title, string text)
     {
         if (tray is null) return;
@@ -272,13 +278,13 @@ public partial class FloatingWindow : Window
     {
         try
         {
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-            using var response = await http.PostAsync("http://127.0.0.1:3210/dashboard/session", null, timeout.Token); response.EnsureSuccessStatusCode();
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token); timeout.CancelAfter(TimeSpan.FromSeconds(10));
+            using var response = await http.PostAsync("/dashboard/session", null, timeout.Token); response.EnsureSuccessStatusCode();
             using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(timeout.Token)); var url = json.RootElement.GetProperty("url").GetString()!;
             if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || uri.Host != "127.0.0.1" || uri.Port != 3210 || uri.Scheme != "http" || !uri.AbsolutePath.StartsWith("/dashboard/open/", StringComparison.Ordinal)) return;
             Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
         }
-        catch { SetNotice("无法打开 Dashboard，请先启动 Proxy。"); }
+        catch { OperationNotice("无法打开 Dashboard，请检查本地服务。"); }
     }
     private async Task ToggleSwitchAsync()
     {
@@ -290,11 +296,11 @@ public partial class FloatingWindow : Window
             using var status = await http.GetAsync("http://127.0.0.1:3210/status", timeout.Token); status.EnsureSuccessStatusCode();
             using var current = JsonDocument.Parse(await status.Content.ReadAsStringAsync(timeout.Token));
             var settings = AccountTrayMenu.ToggleSettings(current.RootElement);
-            using var response = await http.PostAsJsonAsync("http://127.0.0.1:3210/settings", settings, timeout.Token); response.EnsureSuccessStatusCode();
+            using var response = await http.PostAsync("/settings", settings, timeout.Token); response.EnsureSuccessStatusCode();
             SetNotice(settings.AutoSwitch ? "自动切换已开启" : "自动切换已关闭");
         }
-        catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or JsonException)
-        { SetNotice("自动切换设置未确认，请在账户管理页检查。"); }
+        catch (Exception ex) when (LocalControlClient.IsUnavailable(ex))
+        { OperationNotice("自动切换设置未确认，请在账户管理页检查。"); }
         finally { busy = false; Scene.SetBusy(false); }
     }
     private async Task OpenProxyAsync()
@@ -310,10 +316,16 @@ public partial class FloatingWindow : Window
         }
         catch (Exception ex) when (ex is HttpRequestException or IOException or OperationCanceledException or JsonException
             or System.ComponentModel.Win32Exception or InvalidOperationException)
-        { SetNotice("请检查代理状态及本地构建；代理启动与控制图标可能有一项尚未就绪。"); }
+        { OperationNotice("请检查代理状态及本地构建；代理启动与控制图标可能有一项尚未就绪。"); }
         finally { busy = false; Scene.SetBusy(false); }
     }
     private void SetNotice(string value) => Scene.SetNotice(value);
+    private void OperationNotice(string value)
+    {
+        if (lifetime.IsCancellationRequested) return;
+        SetNotice(value);
+        if (!IsVisible) NotifyTray("Codex Pool", value);
+    }
     private void CycleMode(object sender, RoutedEventArgs e)
     {
         preferences = preferences with { Mode = (preferences.Mode + 1) % 3 };
@@ -341,8 +353,8 @@ public partial class FloatingWindow : Window
         {
             new(IsVisible ? "隐藏账户面板" : "显示账户面板", () => ToggleVisibility()),
             new(Pinned ? "取消固定面板" : "固定面板", () => { if (!IsVisible) ShowFromLauncher(); TogglePinned(); }),
-            new("打开账户管理与用量", () => _ = DashboardAsync(), Enabled: connected && !busy),
-            new("刷新额度", () => _ = RefreshQuotaAsync(notify: true), Enabled: connected && !busy),
+            new("打开账户管理与用量", () => _ = DashboardAsync(), Enabled: !busy),
+            new("刷新额度", () => _ = RefreshQuotaAsync(notify: true), Enabled: !busy),
             new(connected ? "打开代理控制" : "启动代理", () => _ = OpenProxyAsync(), Enabled: !busy),
             new("任务栏图标显示设置", () =>
             {
@@ -379,6 +391,12 @@ public partial class FloatingWindow : Window
         trayDismissTimer.Stop(); SavePosition(); Hide();
     }
     internal void HandleTrayPress() => trayClickCloses = IsVisible;
+    internal void CompleteTrayPress(bool leftPressed, bool active)
+    {
+        if (leftPressed) return;
+        trayDismissTimer.Stop();
+        if (!Pinned && !active) { SavePosition(); Hide(); }
+    }
     internal void HandleTrayClick(System.Drawing.Point point, bool keyboard = false)
     {
         trayDismissTimer.Stop(); glassMenu?.Close();
