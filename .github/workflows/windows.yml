@@ -97,4 +97,8 @@ jobs:
           args=(--verify-tag --draft --title "Codex Pool $RELEASE_TAG" --notes-file RELEASE-NOTES.md)
           if [[ "$RELEASE_TAG" == *-* ]]; then args+=(--prerelease); fi
           gh release create "$RELEASE_TAG" ./*.zip SHA256SUMS.txt "${args[@]}"
-          gh release edit "$RELEASE_TAG" --draft=false
+          if [[ "$RELEASE_TAG" == *-* ]]; then
+            gh release edit "$RELEASE_TAG" --draft=false --prerelease
+          else
+            gh release edit "$RELEASE_TAG" --draft=false --prerelease=false --latest
+          fi

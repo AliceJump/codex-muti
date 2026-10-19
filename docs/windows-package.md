@@ -1,4 +1,4 @@
-# Codex Pool Windows 测试版
+# Codex Pool Windows 0.1.0
 
 将整个 ZIP 解压到固定文件夹，双击 **CodexPool.exe**。软件会显示账户浮窗和独立的代理控制图标，不需要安装 .NET、PowerShell 7 或以管理员身份运行。支持 Windows 11 x64。
 
@@ -12,6 +12,6 @@
 
 升级前先结束请求，通过代理菜单关闭服务，并分别退出两个托盘客户端；随后将新版本完整解压到原来的程序位置，不要只复制 EXE。不要在运行时覆盖文件。重新启动后沿用账户、阈值和历史记录。备份数据应先正常退出代理。
 
-此版本未签名，Windows 可能显示未知发布者；下载请使用本项目 GitHub Releases，并核对同页 SHA256SUMS.txt。没有完整跨账户长会话及全部桌面场景的发布验收，本版作为预发布提供；界面与真实账户限制见项目文档。
+此版本未签名，Windows 可能显示未知发布者；下载请使用本项目 GitHub Releases，并核对同页 SHA256SUMS.txt。完整跨账户长会话及全部桌面场景尚未完成验收，界面与真实账户限制见项目文档。
 
 [项目与版本下载](https://github.com/AliceJump/codex-muti/releases)
