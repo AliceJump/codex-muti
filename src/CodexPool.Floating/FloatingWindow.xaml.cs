@@ -150,13 +150,9 @@ public partial class FloatingWindow : Window
         if (snapshot is { } state) Render(state);
         else { UpdateTrayQuota(null); Scene.SetState([], preferences.Mode, false, false, IsVisible); }
     }
-    internal async void ShowFromLauncher()
+    internal void ShowFromLauncher()
     {
         if (Pinned) ShowPinned(); else ShowFlyout();
-        if (!startServices) return;
-        try { await ProxyStartup.EnsureRunningAsync(lifetime.Token); }
-        catch (Exception ex) when (ex is HttpRequestException or IOException or System.ComponentModel.Win32Exception or OperationCanceledException)
-        { SetNotice("代理未能启动，请检查本地服务。"); }
     }
     private void Render(JsonElement state)
     {
@@ -284,6 +280,39 @@ public partial class FloatingWindow : Window
         }
         catch { SetNotice("无法打开 Dashboard，请先启动 Proxy。"); }
     }
+    private async Task ToggleSwitchAsync()
+    {
+        if (!startServices || busy || !connected) return;
+        busy = true; Scene.SetBusy(true);
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token); timeout.CancelAfter(TimeSpan.FromSeconds(30));
+            using var status = await http.GetAsync("http://127.0.0.1:3210/status", timeout.Token); status.EnsureSuccessStatusCode();
+            using var current = JsonDocument.Parse(await status.Content.ReadAsStringAsync(timeout.Token));
+            var settings = AccountTrayMenu.ToggleSettings(current.RootElement);
+            using var response = await http.PostAsJsonAsync("http://127.0.0.1:3210/settings", settings, timeout.Token); response.EnsureSuccessStatusCode();
+            SetNotice(settings.AutoSwitch ? "自动切换已开启" : "自动切换已关闭");
+        }
+        catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or JsonException)
+        { SetNotice("自动切换设置未确认，请在账户管理页检查。"); }
+        finally { busy = false; Scene.SetBusy(false); }
+    }
+    private async Task OpenProxyAsync()
+    {
+        if (!startServices || busy) return;
+        busy = true; Scene.SetBusy(true);
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token); timeout.CancelAfter(TimeSpan.FromSeconds(30));
+            await ProxyStartup.EnsureRunningAsync(timeout.Token, explicitStart: true);
+            SetNotice("代理已就绪");
+            await DesktopClientLauncher.OpenAsync(accountPanel: false, timeout.Token);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or IOException or OperationCanceledException or JsonException
+            or System.ComponentModel.Win32Exception or InvalidOperationException)
+        { SetNotice("请检查代理状态及本地构建；代理启动与控制图标可能有一项尚未就绪。"); }
+        finally { busy = false; Scene.SetBusy(false); }
+    }
     private void SetNotice(string value) => Scene.SetNotice(value);
     private void CycleMode(object sender, RoutedEventArgs e)
     {
@@ -302,24 +331,33 @@ public partial class FloatingWindow : Window
         System.Drawing.Rectangle? bounds = null;
         if (tray?.TryGetBounds(out var rect) == true) bounds = rect;
         var cursor = Forms.Cursor.Position;
-        var items = new (string, Action)[]
+        glassMenu = new GlassTrayMenu(BuildTrayMenu(), () => glassMenu = null, preferences.Theme) { Title = "Codex Pool · 账户与浮窗" };
+        glassMenu.ShowNear(cursor, bounds);
+    }
+
+    internal IReadOnlyList<GlassMenuItem> BuildTrayMenu()
+    {
+        var items = new List<GlassMenuItem>
         {
-            ("显示账户面板", () => ToggleVisibility()),
-            (Pinned ? "取消固定面板" : "固定面板", () => { if (!IsVisible) ShowFromLauncher(); TogglePinned(); }),
-            ("打开 Dashboard", () => _ = DashboardAsync()),
-            ("刷新额度", () => _ = RefreshQuotaAsync(notify: true)),
-            ("任务栏图标显示设置", () =>
+            new(IsVisible ? "隐藏账户面板" : "显示账户面板", () => ToggleVisibility()),
+            new(Pinned ? "取消固定面板" : "固定面板", () => { if (!IsVisible) ShowFromLauncher(); TogglePinned(); }),
+            new("打开账户管理与用量", () => _ = DashboardAsync(), Enabled: connected && !busy),
+            new("刷新额度", () => _ = RefreshQuotaAsync(notify: true), Enabled: connected && !busy),
+            new(connected ? "打开代理控制" : "启动代理", () => _ = OpenProxyAsync(), Enabled: !busy),
+            new("任务栏图标显示设置", () =>
             {
                 try { Process.Start(new ProcessStartInfo("ms-settings:taskbar") { UseShellExecute = true }); }
                 catch { SetNotice("请打开 Windows 设置 → 个性化 → 任务栏 → 其他系统托盘图标。"); }
             }),
-            ("退出托盘面板", () => { exiting = true; Close(); }),
+            new("退出账户面板（代理继续运行）", () => { exiting = true; Close(); }),
         };
-        var menuItems = items.Select(x => new GlassMenuItem(x.Item1, x.Item2)).ToList();
-        if (connected && snapshot is { } state)
-            menuItems.Insert(0, ProxyTrayController.AccountMenu(state, id => { if (startServices && !busy) _ = ActivateAsync(id); }));
-        glassMenu = new GlassTrayMenu(menuItems, () => glassMenu = null, preferences.Theme);
-        glassMenu.ShowNear(cursor, bounds);
+        if (snapshot is { } state)
+        {
+            items.Insert(0, AccountTrayMenu.Accounts(state, id => { if (startServices && !busy && connected) _ = ActivateAsync(id); }, connected && !busy));
+            items.Insert(1, new(state.GetProperty("automaticSwitching").GetBoolean() ? "关闭自动切换" : "开启自动切换",
+                () => _ = ToggleSwitchAsync(), Enabled: connected && !busy));
+        }
+        return items;
     }
 
     internal void TogglePinned()

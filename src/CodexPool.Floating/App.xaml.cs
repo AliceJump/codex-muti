@@ -40,7 +40,7 @@ public partial class App : System.Windows.Application
         window.ShowActivated = false;
         window.Opacity = 0;
         window.Show(); window.Hide(); window.Opacity = 1; window.ShowActivated = true;
-        if (window.Pinned || !e.Args.Any(x => x is "--tray" or "--widget")) window.ShowFromLauncher();
+        if (window.Pinned || e.Args.Contains("--show", StringComparer.Ordinal) || !e.Args.Any(x => x is "--tray" or "--widget")) window.ShowFromLauncher();
     }
     protected override void OnExit(System.Windows.ExitEventArgs e)
     {

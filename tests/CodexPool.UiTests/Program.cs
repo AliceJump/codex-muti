@@ -47,14 +47,59 @@ internal static class Program
             tray.Dispose();
             Check(calls.Count > 0 && calls.All(x => x.Guid == ProxyTrayController.Identity));
         });
-        Run("Proxy switch toggle preserves unified and legacy non-default thresholds", () =>
+        Run("Account switch toggle preserves unified and legacy non-default thresholds", () =>
         {
             var state = JsonSerializer.SerializeToElement(new { settings = new { autoSwitch = true, fiveHourThreshold = 98, weeklyThreshold = 92, windowThreshold = (double?)null } });
-            var settings = ProxyTrayController.ToggleSettings(state);
+            var settings = AccountTrayMenu.ToggleSettings(state);
             Check(!settings.AutoSwitch && settings.FiveHourThreshold == 98 && settings.WeeklyThreshold == 92 && settings.WindowThreshold is null);
             state = JsonSerializer.SerializeToElement(new { settings = new { autoSwitch = false, fiveHourThreshold = 98, weeklyThreshold = 92, windowThreshold = 87d } });
-            settings = ProxyTrayController.ToggleSettings(state);
+            settings = AccountTrayMenu.ToggleSettings(state);
             Check(settings.AutoSwitch && settings.WindowThreshold == 87);
+        });
+        Run("Tray menus separate account controls and proxy lifecycle while linking both clients", () =>
+        {
+            var starts = 0; var stops = 0; var opens = 0; var exits = 0;
+            IReadOnlyList<GlassMenuItem> Proxy(bool online, bool busy = false) => ProxyTrayController.BuildMenu(online, busy,
+                () => starts++, () => stops++, () => opens++, () => exits++);
+            var offline = Proxy(false); offline.Single(x => x.Label == "打开账户浮窗").Invoke!();
+            offline.Single(x => x.Label == "启动代理").Invoke!();
+            var online = Proxy(true); online.Single(x => x.Label == "关闭代理").Invoke!();
+            online.Single(x => x.Label.StartsWith("退出代理托盘")).Invoke!();
+            Check(starts == 1 && stops == 1 && opens == 1 && exits == 1);
+            Check(online.All(x => x.Children is null && !x.Label.Contains("自动切换") && !x.Label.Contains("额度") && !x.Label.Contains("用量")));
+            Check(Proxy(true, true).Where(x => !x.Label.StartsWith("退出")).All(x => !x.Enabled));
+            var state = JsonSerializer.SerializeToElement(new { activeAccountId = (string?)null, automaticSwitching = true,
+                accounts = Array.Empty<object>(), usage = Array.Empty<object>(), inFlightRequests = Array.Empty<object>() });
+            var window = new FloatingWindow(false);
+            try
+            {
+                var initial = window.BuildTrayMenu();
+                Check(initial.Single(x => x.Label == "启动代理").Enabled);
+                window.Preview(state, 0);
+                var account = window.BuildTrayMenu();
+                Check(account.Single(x => x.Label == "关闭自动切换").Enabled);
+                Check(account.Single(x => x.Label == "打开账户管理与用量").Enabled);
+                Check(account.Single(x => x.Label == "打开代理控制").Enabled);
+                Check(account.All(x => x.Label != "关闭代理" && !x.Label.StartsWith("退出代理托盘")));
+                window.Preview(state, 0, online: false);
+                var disconnected = window.BuildTrayMenu();
+                Check(disconnected.Single(x => x.Label == "启动代理").Enabled);
+                Check(disconnected.Where(x => x.Label is "关闭自动切换" or "刷新额度" or "打开账户管理与用量").All(x => !x.Enabled));
+            }
+            finally { window.Close(); }
+        });
+        Run("Linked client launch uses isolated arguments and never starts the daemon when opening the account panel", () =>
+        {
+            var root = System.IO.Path.Combine(Environment.CurrentDirectory, ".research", "linked clients " + Guid.NewGuid().ToString("N"));
+            System.IO.Directory.CreateDirectory(System.IO.Path.Combine(root, "scripts"));
+            foreach (var script in new[] { "open-widget.ps1", "start-proxy-tray.ps1" })
+                System.IO.File.WriteAllText(System.IO.Path.Combine(root, "scripts", script), "# fixture");
+            var account = DesktopClientLauncher.StartInfo(root, accountPanel: true);
+            Check(!account.UseShellExecute && account.CreateNoWindow && account.WindowStyle == System.Diagnostics.ProcessWindowStyle.Hidden);
+            Check(account.ArgumentList.SequenceEqual(new[] { "-NoProfile", "-File", System.IO.Path.Combine(root, "scripts", "open-widget.ps1"), "-Show", "-NoDaemonStart", "-SkipProxyTray" }));
+            var proxy = DesktopClientLauncher.StartInfo(root, accountPanel: false);
+            Check(proxy.ArgumentList.SequenceEqual(new[] { "-NoProfile", "-File", System.IO.Path.Combine(root, "scripts", "start-proxy-tray.ps1") }));
+            Check(proxy.WorkingDirectory == root);
         });
         Run("Proxy process control excludes Codex, foreign roots and path traversal", () =>
         {
@@ -157,7 +202,7 @@ internal static class Program
                 new { id=b, name="备用账户", enabled=true, paused=false, drain=false },
                 new { id=c, name="暂停账户", enabled=true, paused=true, drain=false } } });
             string? activated = null;
-            var item = ProxyTrayController.AccountMenu(state, id => activated = id);
+            var item = AccountTrayMenu.Accounts(state, id => activated = id);
             Check(item.Label == "当前账户：当前账户" && item.Invoke is null && item.Children?.Count == 3);
             Check(item.Children![0].IsChecked && !item.Children[0].Enabled && item.Children[0].Invoke is null);
             Check(!item.Children[2].Enabled && item.Children[2].Invoke is null);
@@ -178,7 +223,7 @@ internal static class Program
                 new("当前账户：主账户", Children: new GlassMenuItem[] {
                     new("主账户", Enabled:false, IsChecked:true),
                     new("备用账户", () => { Check(closed && child is not null && !child.IsVisible); invoked=true; }) }),
-                new("打开账户管理", () => { }), new("关闭自动切换", () => { }), new("更新额度", () => { }), new("关闭代理", () => { }), new("退出代理托盘", () => { }) }, () => closed=true);
+                new("打开账户管理与用量", () => { }), new("关闭自动切换", () => { }), new("刷新额度", () => { }), new("显示账户面板", () => { }), new("退出账户面板", () => { }) }, () => closed=true);
             try
             {
                 var work = System.Windows.Forms.Screen.PrimaryScreen!.WorkingArea;

@@ -19,7 +19,7 @@ SIWC token **不会**发往私有 Codex 端点。
 
 原生用量读取固定官方源码中的 endpoint 与字段（`chatgpt.com/backend-api/wham/usage`）。窗口时长区分 5h、weekly 等；缺失保持未知。每账户快照独立缓存，过期后界面可见陈旧，不伪装成 0%。该私有接口版本敏感，不是公开 API 承诺。
 
-ChatGPT Desktop 经本机池发送时的用量改写（按**模型路由许可**返回 `rate_limit.allowed`）见 [wham-usage-rewrite.md](wham-usage-rewrite.md)（已合入的 [PR #7](https://github.com/AliceJump/codex-muti/pull/7)）。那是 Desktop UI 放行逻辑，**不是**上游真实额度源。
+客户端用量改写与本地 ChatGPT 后端入口已经移除。客户端使用官方后端读取用量和登录状态，代理继续独立读取各池账户的真实额度。历史 Token 与请求记录见 [用量统计](usage-statistics.md)。
 
 ## 验收指针
 

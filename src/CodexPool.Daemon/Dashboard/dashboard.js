@@ -1,7 +1,9 @@
 'use strict';
 const $ = id => document.getElementById(id);
 let csrf = '', state = null, busy = false, lastActiveId = null, switchReady = false;
-let statisticsPeriod = 'today';
+let statisticsPeriod = 'allTime', historyKey = '', historyRevision = 0, nextBefore = null, historyLoading = false;
+let historyItems = [], historyStats = null, historyPage = null;
+let filterFrom = '', filterTo = '', presetDay = '';
 const number = value => Number(value).toLocaleString('zh-CN');
 const tokenValue = (totals, field) => !totals || (totals.requests > 0 && totals.reportedRequests === 0) ? '—' : number(totals[field]);
 const detailValue = (totals, field, coverage) => !totals || (totals.requests > 0 && totals[coverage] === 0) ? '—' : number(totals[field]);
@@ -32,9 +34,9 @@ function notifySwitch(s){
 function renderStatistics(stats, names) {
   for (const button of $('statistics-periods').querySelectorAll('button')) button.setAttribute('aria-pressed', String(button.dataset.period===statisticsPeriod));
   if(!stats){$('statistics-note').textContent='当前代理版本尚未提供 Token 统计。';return;}
-  const period=stats[statisticsPeriod], totals=period.totals;
+  const period=stats.selected, totals=period.totals;
   const persistence=stats.persistence==='unavailable'?' · 历史文件无法读取，当前统计仅在内存中':stats.persistence==='pending'?' · 等待保存':'';
-  $('statistics-note').textContent=`从 ${new Date(stats.startedAt).toLocaleString()} 开始记录 · ${stats.timeZone} · 保留 ${stats.retainedDays} 天日汇总${persistence}`;
+  $('statistics-note').textContent=`从 ${new Date(stats.startedAt).toLocaleString()} 开始记录 · ${stats.timeZone} · 历史长期保存 · 日期按代理时区筛选${stats.earliestDailyDay?' · 最早日汇总 '+stats.earliestDailyDay:''}${persistence}`;
   const cards=[['总 Token',tokenValue(totals,'totalTokens'),`${number(totals.reportedRequests)} / ${number(totals.requests)} 个请求已报告`],
     ['输入',tokenValue(totals,'inputTokens'),'包含缓存 Token'],['输出',tokenValue(totals,'outputTokens'),'包含推理 Token'],
     ['缓存输入',detailValue(totals,'cachedInputTokens','cachedReportedRequests'),`${number(totals.cachedReportedRequests)} 个请求有明细`],
@@ -45,18 +47,21 @@ function renderStatistics(stats, names) {
   const empty=()=>{const tr=document.createElement('tr'),cell=text('td','暂无请求');cell.colSpan=5;tr.append(cell);return tr;};
   $('token-accounts').replaceChildren(...(period.accounts.length?rows(period.accounts,x=>names.get(x.accountId)||'已移除账户'): [empty()]));
   $('token-models').replaceChildren(...(period.models.length?rows(period.models,x=>x.model): [empty()]));
-  const maximum=Math.max(1,...stats.daily.map(x=>Number(x.totals.totalTokens)));
+  const maximum=stats.daily.reduce((max,x)=>Math.max(max,Number(x.totals.totalTokens)),1);
   $('token-daily').replaceChildren(...stats.daily.map(day=>{const row=text('div','','token-day'),value=tokenValue(day.totals,'totalTokens');
     const bar=document.createElement('progress');bar.max=maximum;bar.value=day.totals.totalTokens;bar.setAttribute('aria-label',`${day.day} 已报告 ${value} Token`);
     row.title=`${day.day} · ${value} Token · ${day.totals.reportedRequests} / ${day.totals.requests} 个请求已报告`;
-    row.append(text('small',day.day.slice(5)),bar,text('span',value));return row;}));
+    row.append(text('small',day.day),bar,text('span',value));return row;}));
 }
 function render(s) {
   state=s; notifySwitch(s); const names=new Map(s.accounts.map(a=>[a.id,a.name])); $('active').textContent=names.get(s.activeAccountId)||'未选择';$('automatic').textContent=s.automaticSwitching?'已开启':'已关闭';$('total').textContent=s.accounts.length;$('inflight').textContent=s.inFlightRequests.reduce((n,a)=>n+a.value,0);
+  if(s.tokenStatistics?.currentDay!==presetDay){presetDay=s.tokenStatistics?.currentDay;if(!['custom','allTime'].includes(statisticsPeriod))setPresetRange();}
   $('gate').textContent=s.boundaryProbe?'当前为迁移验收模式。':'自动切换的真实账户验收尚未完成。';
   const form=$('settings'); if(!form.contains(document.activeElement)){form.elements.autoSwitch.checked=s.settings.autoSwitch;form.elements.windowThreshold.value=s.settings.windowThreshold??Math.min(s.settings.fiveHourThreshold,s.settings.weeklyThreshold);}
   form.elements.autoSwitch.disabled=!s.boundaryProbe;
-  renderStatistics(s.tokenStatistics,names);
+  if(historyStats)renderStatistics(historyStats,names);
+  if(historyPage)renderRequests(historyPage);
+  refreshHistory();
   $('accounts').replaceChildren(...s.accounts.map(a=>{
     const card=text('article','','card'+(a.active?' selected':'')),head=text('div','','account-head');
     const canActivate=a.enabled&&!a.paused&&!a.drain&&a.state!=='cooldown'&&a.auth!=='reauth_required'&&a.auth!=='refresh_pending';
@@ -79,12 +84,56 @@ function render(s) {
     const del=text('button','删除','danger'); del.onclick=()=>{ if(!confirm(`确定永久删除账户「${a.name}」？\n凭据与控制状态将从本机 Vault 移除，且不可恢复。`)) return; action(`/accounts/${a.id}/delete`); }; controls.append(del);
     card.append(controls);return card;}));
   $('switches').replaceChildren(...s.recentSwitches.slice().reverse().map(x=>text('div',`${new Date(x.at).toLocaleTimeString()} · ${names.get(x.from)||'—'} → ${names.get(x.to)||'—'} · ${reasons[x.reason]||x.reason}`,'switch')));if(!s.recentSwitches.length)$('switches').append(text('p','暂无切换记录'));
-  $('requests').replaceChildren(...s.recentRequests.slice().reverse().map(x=>{const tr=document.createElement('tr'),u=x.tokenUsage;for(const value of [new Date(x.timestamp).toLocaleTimeString(),names.get(x.account)||'—',x.model,`${x.durationMs} ms`,`${x.status} · ${x.outcome}`,x.attempts,u?`${number(u.inputTokens)} / ${number(u.outputTokens)}`:'未报告',u?`${u.cachedInputTokens==null?'—':number(u.cachedInputTokens)} / ${u.reasoningOutputTokens==null?'—':number(u.reasoningOutputTokens)}`:'—'])tr.append(text('td',value));return tr;}));
   $('logins').replaceChildren(...s.nativeLoginAttempts.map(x=>text('p',x.state==='completed'?'账户已添加':x.state==='waiting_for_browser'?'等待浏览器授权…':x.state)));
 }
 $('settings').onsubmit=e=>{e.preventDefault();const f=e.target;action('/settings',{autoSwitch:f.elements.autoSwitch.checked,windowThreshold:Number(f.elements.windowThreshold.value)});};
 $('login').onsubmit=e=>{e.preventDefault();action('/accounts/native-login',{name:e.target.elements.name.value});};
 $('refresh').onclick=async()=>{try{await api('/usage');const s=await api('/status');render(s);const failed=s.quotaRefreshErrors?.length||0;notice(failed?`${failed} 个账户额度更新失败，保留上次数据`:'额度已更新');}catch(e){notice(e.message);}};
-for(const button of $('statistics-periods').querySelectorAll('button'))button.onclick=()=>{statisticsPeriod=button.dataset.period;if(state)renderStatistics(state.tokenStatistics,new Map(state.accounts.map(a=>[a.id,a.name])));};
+const dateText = date => [date.getUTCFullYear(),String(date.getUTCMonth()+1).padStart(2,'0'),String(date.getUTCDate()).padStart(2,'0')].join('-');
+function historyQuery() {
+  const query=new URLSearchParams();
+  if(filterFrom)query.set('from',filterFrom);
+  if(filterTo)query.set('to',filterTo);
+  return query;
+}
+function historyNames(){return new Map((state?.accounts||[]).map(a=>[a.id,a.name]));}
+function renderRequests(page) {
+  const names=historyNames();
+  $('requests').replaceChildren(...historyItems.map(x=>{const tr=document.createElement('tr'),u=x.tokenUsage;for(const value of [new Date(x.timestamp).toLocaleString(),names.get(x.account)||'已移除账户',x.model,`${x.durationMs} ms`,`${x.status} · ${x.outcome}`,x.attempts,u?`${number(u.inputTokens)} / ${number(u.outputTokens)}`:'未报告',u?`${u.cachedInputTokens==null?'—':number(u.cachedInputTokens)} / ${u.reasoningOutputTokens==null?'—':number(u.reasoningOutputTokens)}`:'—'])tr.append(text('td',value));return tr;}));
+  if(!historyItems.length){const row=document.createElement('tr'),cell=text('td','该时间范围暂无请求记录');cell.colSpan=8;row.append(cell);$('requests').append(row);}
+  $('requests-note').textContent=`已显示 ${number(historyItems.length)} 条 · 请求明细从 ${new Date(page.startedAt).toLocaleString()} 开始记录${page.persistence==='pending'?' · 部分记录等待保存':page.persistence==='unavailable'?' · 历史存储不可用':''}`;
+  $('requests-more').hidden=nextBefore===null;
+}
+async function refreshHistory(force=false, more=false) {
+  if(!state?.tokenStatistics)return;
+  const query=historyQuery(), key=JSON.stringify([query.toString(),state.tokenStatistics.updatedAt,state.tokenStatistics.persistence,state.tokenStatistics.currentDay,state.tokenStatistics.allTime.totals.requests]);
+  if(!force&&key===historyKey)return;
+  const revision=++historyRevision; historyKey=key; historyLoading=true;
+  $('requests-more').disabled=true;
+  if(!more){historyItems=[];nextBefore=null;historyStats=null;historyPage=null;$('requests').replaceChildren();$('requests-note').textContent='正在读取历史…';$('requests-more').hidden=true;$('statistics-note').textContent='正在读取历史…';for(const id of ['token-summary','token-accounts','token-models','token-daily'])$(id).replaceChildren();}
+  if(more&&nextBefore!==null)query.set('before',nextBefore);
+  try {
+    const [stats,page]=await Promise.all([more?Promise.resolve(historyStats):api('/statistics?'+historyQuery()),api('/requests?'+query)]);
+    if(revision!==historyRevision)return;
+    historyStats=stats;historyPage=page;historyItems=more?historyItems.concat(page.items):page.items;nextBefore=page.nextBefore;
+    renderStatistics(stats,historyNames());renderRequests(page);
+  } catch(e){if(revision===historyRevision){historyKey='';$('requests-note').textContent='历史读取失败：'+e.message;$('statistics-note').textContent='历史读取失败，请刷新重试。';}}
+  finally{if(revision===historyRevision){historyLoading=false;$('requests-more').disabled=false;}}
+}
+function setPresetRange(){
+  // Use the calendar day reported by the proxy, even if the browser is in another time zone.
+  const today=new Date((state?.tokenStatistics.currentDay||dateText(new Date()))+'T00:00:00Z');
+  $('history-from').value=statisticsPeriod==='allTime'?'':dateText(new Date(today.getTime()-(statisticsPeriod==='last7Days'?6:statisticsPeriod==='last30Days'?29:0)*86400000));
+  $('history-to').value=statisticsPeriod==='allTime'?'':dateText(today);
+  filterFrom=$('history-from').value;filterTo=$('history-to').value;
+}
+for(const button of $('statistics-periods').querySelectorAll('button'))button.onclick=()=>{
+  statisticsPeriod=button.dataset.period;
+  setPresetRange();
+  refreshHistory(true);
+};
+$('history-range').onsubmit=e=>{e.preventDefault();if($('history-from').value&&$('history-to').value&&$('history-from').value>$('history-to').value){notice('开始日期不能晚于结束日期。');return;}filterFrom=$('history-from').value;filterTo=$('history-to').value;statisticsPeriod='custom';refreshHistory(true);};
+$('history-refresh').onclick=()=>refreshHistory(true);
+$('requests-more').onclick=()=>{if(!historyLoading&&nextBefore!==null)refreshHistory(true,true);};
 async function start(){try{csrf=(await api('/browser-session')).csrf;$('workspace').hidden=false;render(await api('/status'));const events=new EventSource('/events');events.addEventListener('status',e=>{render(JSON.parse(e.data));$('connection').textContent='服务在线';});events.onerror=()=>{$('connection').textContent='正在重新连接';};}catch{$('locked').hidden=false;$('connection').textContent='等待安全会话';}}
 start();setInterval(()=>{if(state)render(state);},30000);

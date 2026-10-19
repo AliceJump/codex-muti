@@ -32,7 +32,7 @@ public static class LocalCommands
     {
         if (command == "help")
         {
-            Console.WriteLine("serve [--live-boundary-probe [--experimental-compact-bridge]] | login/native-login <label> | dashboard | status | usage | statistics | models | settings [on/off threshold] | rename <account-id> <name> | activate/pause/resume/drain/undrain/enable/disable/refresh/delete <account-id> | codex [official arguments]"); return 0;
+            Console.WriteLine("serve [--live-boundary-probe] | login/native-login <label> | dashboard | status | usage | statistics/requests [yyyy-MM-dd [yyyy-MM-dd]] | models | settings [on/off threshold] | rename <account-id> <name> | activate/pause/resume/drain/undrain/enable/disable/refresh/delete <account-id> | codex [official arguments]"); return 0;
         }
         var key = Vault.ReadLocalKey(directory);
         if (command == "model-credential")
@@ -71,9 +71,21 @@ public static class LocalCommands
                 || !uri.AbsolutePath.StartsWith("/dashboard/open/", StringComparison.Ordinal)) throw new InvalidOperationException();
             Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); Console.WriteLine("Dashboard opened in your system browser."); return 0;
         }
-        if (command is "status" or "models" or "usage" or "statistics")
+        if (command is "status" or "models" or "usage" or "statistics" or "requests")
         {
-            using var response = await client.GetAsync("http://127.0.0.1:3210/" + command); response.EnsureSuccessStatusCode();
+            if (args.Length > 2 || args.Length > 0 && command is not ("statistics" or "requests")) return 2;
+            var query = "";
+            if (args.Length > 0)
+            {
+                if (!DateOnly.TryParseExact(args[0], "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var from)) return 2;
+                query = "?from=" + from.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+                if (args.Length == 2)
+                {
+                    if (!DateOnly.TryParseExact(args[1], "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var to) || to < from) return 2;
+                    query += "&to=" + to.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+                }
+            }
+            using var response = await client.GetAsync("http://127.0.0.1:3210/" + command + query); response.EnsureSuccessStatusCode();
             Console.WriteLine(await response.Content.ReadAsStringAsync()); return 0;
         }
         if (command == "rename" && args.Length == 2 && Guid.TryParseExact(args[0], "N", out _))

@@ -30,10 +30,9 @@ function Stop-OwnedProcess($ProcessInfo) {
     Stop-Process -InputObject $taskProcess -Force
     if (-not $taskProcess.WaitForExit(10000)) { throw '进程尚未退出，停止部署。' }
 }
-function Start-PoolDaemon([string]$Path, [bool]$BoundaryProbe, [bool]$CompactBridge = $false) {
+function Start-PoolDaemon([string]$Path, [bool]$BoundaryProbe) {
     $taskArgs = @('serve')
     if ($BoundaryProbe) { $taskArgs += '--live-boundary-probe' }
-    if ($CompactBridge) { $taskArgs += '--experimental-compact-bridge' }
     Start-Process -FilePath $Path -ArgumentList $taskArgs -WorkingDirectory (Split-Path $Path -Parent) -WindowStyle Hidden -PassThru
 }
 function Get-PoolStatus([string]$Path) {
@@ -97,11 +96,10 @@ try {
     $taskListeners = if ($taskDeployCore) { @(Get-NetTCPConnection -LocalPort 3210 -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique) } else { @() }
     if ($taskListeners.Count -gt 1) { throw '3210 有多个监听进程，拒绝猜测。' }
     $taskBoundary = $true
-    $taskCompaction = $false
     if ($taskListeners.Count -eq 1) {
         $taskProcess = Get-Process -Id $taskListeners[0]
         if ($taskProcess.ProcessName -ne 'CodexPool.Daemon' -or -not (Test-PoolPath $taskProcess.Path)) { throw '3210 不属于本仓库发布的 Codex Pool，未停止任何进程。' }
-        $taskOld = [pscustomobject]@{Id=$taskProcess.Id;Path=$taskProcess.Path;StartTicks=$taskProcess.StartTime.ToUniversalTime().Ticks;Boundary=$false;Compaction=$false}
+        $taskOld = [pscustomobject]@{Id=$taskProcess.Id;Path=$taskProcess.Path;StartTicks=$taskProcess.StartTime.ToUniversalTime().Ticks;Boundary=$false}
         # A successful signed control request also proves that the launch environment uses the same local vault.
         $taskStatus = Get-PoolStatus $taskNewExe
         if (@($taskStatus.nativeLoginAttempts | Where-Object state -EQ 'waiting_for_browser').Count) { throw '账户正在登录，请完成或取消登录后再部署。' }
@@ -115,7 +113,6 @@ try {
         if ($taskRefreshGuard.Unknown.Count) { throw '旧代理未提供可确认的刷新状态，无法安全停止；请先处理账户授权状态。' }
         if ($taskRefreshGuard.Reauthorize.Count) { Write-Host '检测到持久 refresh_pending：这些账户需要重新授权；部署会保留其状态，不重用旧刷新令牌。' }
         $taskBoundary = [bool]$taskStatus.boundaryProbe; $taskOld.Boundary = $taskBoundary
-        $taskCompaction = [bool]$taskStatus.compaction.enabled; $taskOld.Compaction = $taskCompaction
     }
     if ($taskDeployUi) { $taskOldUi = @(Get-CimInstance Win32_Process -Filter "Name='CodexPool.Floating.exe'" | Where-Object { (Test-PoolPath $_.ExecutablePath) -and $_.CommandLine -notmatch '(?:^|\s)--proxy-tray(?:\s|$)' } | ForEach-Object {
         $taskUiProcess = Get-Process -Id $_.ProcessId
@@ -132,10 +129,9 @@ try {
     Write-Host '3/4 启动所选版本并验证状态…'
     if ($taskDeployCore) {
         if (Get-NetTCPConnection -LocalPort 3210 -State Listen -ErrorAction SilentlyContinue) { throw '3210 仍被占用。' }
-        $taskNew = Start-PoolDaemon $taskNewExe $taskBoundary $taskCompaction
+        $taskNew = Start-PoolDaemon $taskNewExe $taskBoundary
         $taskNewStatus = Wait-PoolDaemon $taskNew $taskNewExe
         if ($taskOld -and (Get-PoolSettingsSnapshot $taskNewStatus.settings) -ne (Get-PoolSettingsSnapshot $taskStatus.settings)) { throw '账户池设置校验失败。' }
-        if ($taskOld -and [bool]$taskNewStatus.compaction.enabled -ne $taskCompaction) { throw '压缩桥接模式校验失败。' }
     }
     if ($taskDeployUi) {
         $taskClient = Start-PoolDesktopClient -BuildDirectory $taskBuild -Tray -PassThru -NoDaemonStart:($Target -eq 'Components')
@@ -158,7 +154,7 @@ try {
         if (-not $taskNew.HasExited) { Stop-Process -InputObject $taskNew -Force; [void]$taskNew.WaitForExit(10000) }
     }
     if ($taskStopped -and $taskOld) {
-        try { $taskRestored = Start-PoolDaemon $taskOld.Path $taskOld.Boundary $taskOld.Compaction; $null = Wait-PoolDaemon $taskRestored $taskOld.Path; Write-Warning '部署失败，已启动旧版本。' }
+        try { $taskRestored = Start-PoolDaemon $taskOld.Path $taskOld.Boundary; $null = Wait-PoolDaemon $taskRestored $taskOld.Path; Write-Warning '部署失败，已启动旧版本。' }
         catch { Write-Warning ('旧版本自动恢复失败，请手动运行：' + $taskOld.Path + ' serve') }
     }
     foreach ($taskUi in $taskUiStopped) {

@@ -6,10 +6,6 @@ using CodexPool.Core;
 
 var tests = new (string Name, Func<Task> Run)[]
 {
-    ("Compaction reservation pins A across soft threshold, switches once and rejects stale results", CompactionRoutingTests.Lifecycle),
-    ("Compaction completion respects manual selection, expiry, hard admission and unknown outcomes", CompactionRoutingTests.Invalidations),
-    ("Compaction advice requires fresh quota, standby, prewarning and one attempt per epoch", CompactionRoutingTests.Eligibility),
-    ("Weekly compaction warns two points before threshold while other windows keep five", CompactionRoutingTests.WarningWindows),
     ("Definite quota rejection fails over once", () => Scenario(429, "usage_limit_reached", 2)),
     ("Definite auth rejection fails over once", () => Scenario(401, "invalid_token", 2)),
     ("Ordinary 429 never fails over", () => Scenario(429, "rate_limit_exceeded", 1)),
