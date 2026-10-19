@@ -27,6 +27,7 @@ namespace CodexPool.Floating;
 // tooltips and automation, but never lay out the text or scale the native HWND.
 public sealed class PoolScene : Canvas
 {
+    private const double TokenSectionHeight = 52;
     private static readonly ConcurrentDictionary<string, SolidColorBrush> brushes = new();
     private static readonly ConcurrentDictionary<(string, double), Pen> pens = new();
     private static readonly LinearGradientBrush lightBackground = Gradient("#F0F6FAFF", "#E7E3ECF8");
@@ -158,7 +159,7 @@ public sealed class PoolScene : Canvas
             else
             {
                 x = 16; cardY = y; w = width - 32;
-                h = mode == 0 ? 62 + model.Windows.Length * 42 + (ShowQuotaState(model) ? 23 : 0) + (model.Tokens.Length > 0 ? 21 : 0) + 22
+                h = mode == 0 ? 62 + model.Windows.Length * 42 + (ShowQuotaState(model) ? 23 : 0) + (model.Tokens.Length > 0 ? TokenSectionHeight : 0) + 22
                     : Math.Max(58, Math.Max(1, model.Windows.Length) * 36 + 16) + (ShowQuotaState(model) && model.Windows.Length > 0 ? 20 : 0);
                 y += h + 12;
             }
@@ -356,7 +357,12 @@ public sealed class PoolScene : Canvas
                 dc.Pop(); rowY += 36 + s[4] * 6;
             }
             if (ShowQuotaState(a)) { Text(dc, a.QuotaState, new(quotaX, r.Y + rowY), 10, muted, s[3], r.Right - 12 - quotaX); rowY += 23; }
-            Text(dc, a.Tokens, new(r.X + 12, r.Y + rowY), 10, muted, s[4], r.Width - 24); if (a.Tokens.Length > 0) rowY += 21;
+            if (a.Tokens.Length > 0)
+            {
+                Text(dc, a.Tokens, new(r.X + 12, r.Y + rowY), 10, muted, s[4], r.Width - 24);
+                if (a.TokenCache is { } cache) TokenBar(dc, cache, new(r.X + 12, r.Y + rowY + 20, r.Width - 24, 6), s[4]);
+                rowY += TokenSectionHeight;
+            }
             Text(dc, a.Updated, new(r.X + 12, r.Y + rowY), 10, muted, s[4], r.Width - 24);
             dc.Pop(); dc.Pop();
         }
@@ -372,6 +378,26 @@ public sealed class PoolScene : Canvas
             new(root.X + 16, root.Bottom - 86), 10, muted, s[3], root.Width - 32);
         Text(dc, automatic ? "自动切换 · 开启" : "自动切换 · 关闭", new(root.X + 16, root.Bottom - 65), 10, muted, s[3], root.Width - 32);
         if (notice.Length > 0) Text(dc, notice, new(root.X + 16, root.Bottom - 21), 9, muted, s[3], root.Width - 32);
+        dc.Pop();
+    }
+    private void TokenBar(DrawingContext dc, TokenCacheSplit cache, Rect rect, double opacity)
+    {
+        if (opacity < .005 || rect.Width <= 0) return;
+        var cached = highContrast ? SystemColors.HighlightBrush : B(light ? "#238B71" : "#7FD4B4");
+        var uncached = highContrast ? SystemColors.WindowTextBrush : B(light ? "#477DC0" : "#82B9FF");
+        dc.PushOpacity(Math.Clamp(opacity, 0, 1));
+        dc.DrawRoundedRectangle(B("#337C9ABB"), null, rect, 3, 3);
+        if (cache.CachedPercent is { } percent)
+        {
+            var left = rect.Width * percent / 100;
+            dc.PushClip(new RectangleGeometry(rect, 3, 3));
+            if (left > 0) dc.DrawRectangle(cached, null, new(rect.X, rect.Y, left, rect.Height));
+            if (left < rect.Width) dc.DrawRectangle(uncached, null, new(rect.X + left, rect.Y, rect.Width - left, rect.Height));
+            dc.Pop();
+        }
+        var half = rect.Width / 2;
+        Text(dc, cache.CachedLabel, new(rect.X, rect.Bottom + 7), 9, cache.Cached is null ? Muted : cached, maxWidth: half - 4);
+        Text(dc, cache.UncachedLabel, new(rect.X + half, rect.Bottom + 7), 9, cache.Uncached is null ? Muted : uncached, maxWidth: half);
         dc.Pop();
     }
     private static void MiniBar(DrawingContext dc, double? value, Rect rect, double opacity, MediaBrush color)

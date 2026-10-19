@@ -2,10 +2,23 @@ using System.Text.Json;
 
 namespace CodexPool.Floating;
 
+internal sealed record TokenCacheSplit(decimal? Cached, decimal? Uncached)
+{
+    internal double? CachedPercent => Cached is { } cached && Uncached is { } uncached && cached + uncached > 0
+        ? (double)(cached / (cached + uncached) * 100) : null;
+    internal string CachedLabel => "缓存输入 " + Amount(Cached) + " · " + Percent(CachedPercent);
+    internal string UncachedLabel => "未缓存输入 " + Amount(Uncached) + " · " + Percent(CachedPercent is { } percent ? 100 - percent : null);
+    private static string Percent(double? value) => value?.ToString("0.0") + (value is null ? "—" : "%");
+    private static string Amount(decimal? value) => value is not { } amount ? "待确认"
+        : amount >= 100_000_000 ? (amount / 100_000_000).ToString("0.##") + "亿"
+        : amount >= 10_000 ? (amount / 10_000).ToString("0.##") + "万" : amount.ToString("N0");
+}
+
 internal sealed record PoolAccountView(string Id, string Name, bool Active, bool Enabled, bool Selectable,
     string Status, string Plan, DisplayQuotaWindow[] Windows, string QuotaState, string Tokens, string Updated)
 {
     internal string TokenDetails { get; init; } = "";
+    internal TokenCacheSplit? TokenCache { get; init; }
     internal string Description => Name + " · " + Plan + " · " + Status + "\n"
         + string.Join("\n", Windows.Select(w => w.Label + " " + QuotaDisplay.Percent(w) + " · " + PoolPresentation.Reset(w)))
         + "\n" + QuotaState + "\n" + Tokens + (TokenDetails.Length > 0 ? "\n" + TokenDetails : "") + "\n" + Updated;
@@ -27,7 +40,7 @@ internal static class PoolPresentation
                 : status switch { "active" => "使用中", "standby" => "待命", "paused" => "已暂停", "draining" => "排空中", "disabled" => "已禁用", "cooldown" => "冷却中", _ => "待确认" };
             var updated = quota.ValueKind == JsonValueKind.Object && quota.TryGetProperty("updatedAt", out var at) && at.TryGetDateTimeOffset(out var timestamp)
                 ? "更新 " + timestamp.ToLocalTime().ToString("HH:mm:ss") + (QuotaDisplay.Fresh(quota) ? "" : " · 已过期") : "更新时间未知";
-            var tokens = ""; var tokenDetails = "";
+            var tokens = ""; var tokenDetails = ""; TokenCacheSplit? tokenCache = null;
             if (state.TryGetProperty("tokenStatistics", out var statistics) && statistics.TryGetProperty("today", out var today) && today.TryGetProperty("accounts", out var amounts))
             {
                 var match = amounts.EnumerateArray().FirstOrDefault(x => String(x, "accountId") == id);
@@ -35,7 +48,8 @@ internal static class PoolPresentation
                 var requests = totals.ValueKind == JsonValueKind.Object ? totals.GetProperty("requests").GetInt64() : 0;
                 var reported = totals.ValueKind == JsonValueKind.Object ? totals.GetProperty("reportedRequests").GetInt64() : 0;
                 var amount = requests > 0 && reported == 0 ? "未报告" : totals.ValueKind == JsonValueKind.Object ? totals.GetProperty("totalTokens").GetDecimal().ToString("N0") : "0";
-                tokens = "今日处理 " + amount + " Token（含缓存）";
+                tokens = "今日 Token 用量 " + amount;
+                tokenCache = requests == 0 ? new(0, 0) : new(null, null);
                 tokenDetails = requests + " 个请求（已报告 " + reported + "）";
                 if (totals.ValueKind == JsonValueKind.Object)
                 {
@@ -46,13 +60,20 @@ internal static class PoolPresentation
                     var cached = Count(totals, "cachedInputTokens");
                     var cachedReports = Count(totals, "cachedReportedRequests");
                     var known = reported > 0 || requests == 0;
+                    // Each card uses only this account's reported input. Missing
+                    // cache detail must not be relabeled as uncached consumption.
+                    if (known && input is >= 0 && cached is >= 0 && cached <= input && cachedReports == reported)
+                        tokenCache = new(cached, input - cached);
                     tokenDetails += "\n输入 " + Display(known ? input : null) + " · 输出 " + Display(known ? output : null)
                         + "\n缓存输入 " + (cachedReports is > 0 ? Display(cached) : "未报告") + "（已包含在输入中）";
                 }
+                tokenDetails += "\n未缓存输入 " + (tokenCache.Uncached?.ToString("N0") ?? "待确认")
+                    + " · 缓存占比 " + (tokenCache.CachedPercent is { } ratio ? ratio.ToString("0.0") + "%" : "—")
+                    + "\n横条仅划分本账户输入，输出包含在上方今日总用量中。";
                 tokenDetails += "\n累计每次请求的上下文与输出，不代表套餐额度扣减或费用。";
             }
             return new PoolAccountView(id, String(a, "name") ?? "账户", active, enabled, selectable && connected,
-                label, String(a, "plan") ?? "Plan 待确认", QuotaDisplay.Windows(quota), QuotaDisplay.State(quota), tokens, updated) { TokenDetails = tokenDetails };
+                label, String(a, "plan") ?? "Plan 待确认", QuotaDisplay.Windows(quota), QuotaDisplay.State(quota), tokens, updated) { TokenDetails = tokenDetails, TokenCache = tokenCache };
         }).ToArray();
     }
     internal static string? String(JsonElement element, string field) => element.ValueKind == JsonValueKind.Object

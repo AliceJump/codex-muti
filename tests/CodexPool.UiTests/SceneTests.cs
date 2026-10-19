@@ -24,7 +24,10 @@ internal static class SceneTests
             windows = new[] { new { kind = "primary_window", windowSeconds = 25200, limitId = "codex", remainingPercent = 66d, resetAt = reset ? DateTimeOffset.UtcNow.AddSeconds(-1) : DateTimeOffset.UtcNow.AddHours(2) },
                 new { kind = "secondary_window", windowSeconds = 604800, limitId = "codex", remainingPercent = 90d, resetAt = DateTimeOffset.UtcNow.AddDays(2) },
                 new { kind = "primary_window", windowSeconds = 3600, limitId = "additional_0", remainingPercent = 40d, resetAt = DateTimeOffset.UtcNow.AddHours(1) } } }).ToArray(),
-        tokenStatistics = new { today = new { accounts = new[] { new { accountId = "a0", totals = new { requests = 2, reportedRequests = reported ? 2 : 0, totalTokens = 1200 } } } } }
+        tokenStatistics = new { today = new { accounts = Enumerable.Range(0, count).Select(i => new { accountId = "a" + i,
+            totals = new { requests = 2, reportedRequests = reported ? 2 : 0, totalTokens = i == 0 ? 1200 : 3000,
+                inputTokens = i == 0 ? 1000 : 2000, outputTokens = i == 0 ? 200 : 1000,
+                cachedInputTokens = i == 0 ? 800 : 500, cachedReportedRequests = reported ? 2 : 0 } }).ToArray() } }
     });
     internal static void Run(Action<string, Action> run)
     {
@@ -46,6 +49,24 @@ internal static class SceneTests
             Check(PoolPresentation.Accounts(State(stale: true), true)[0].Windows.All(w => w.Remaining is null));
             Check(PoolPresentation.Accounts(State(reset: true), true)[0].Windows[0].Remaining is null);
             Check(PoolPresentation.Accounts(State(), false).All(a => !a.Selectable && a.Status == "离线"));
+        });
+        run("Token cache bars use each account independently and keep missing cache coverage unknown", () =>
+        {
+            var accounts = PoolPresentation.Accounts(State(), true);
+            Check(accounts[0].TokenCache is { Cached: 800, Uncached: 200, CachedPercent: 80 });
+            Check(accounts[1].TokenCache is { Cached: 500, Uncached: 1500, CachedPercent: 25 });
+            Check(accounts[0].Tokens.Contains("1,200") && accounts[1].Tokens.Contains("3,000"));
+            Check(accounts[0].Description.Contains("80.0%") && accounts[1].Description.Contains("25.0%"));
+            var state = System.Text.Json.Nodes.JsonNode.Parse(State().GetRawText())!;
+            var totals = state["tokenStatistics"]!["today"]!["accounts"]![0]!["totals"]!;
+            totals["cachedReportedRequests"] = 1;
+            var partial = PoolPresentation.Accounts(JsonSerializer.SerializeToElement(state), true)[0].TokenCache!;
+            Check(partial.Cached is null && partial.Uncached is null && partial.CachedPercent is null);
+            totals["requests"] = 0; totals["reportedRequests"] = 0; totals["inputTokens"] = 0;
+            totals["cachedInputTokens"] = 0; totals["cachedReportedRequests"] = 0;
+            var empty = PoolPresentation.Accounts(JsonSerializer.SerializeToElement(state), true)[0].TokenCache!;
+            Check(empty.Cached == 0 && empty.Uncached == 0 && empty.CachedPercent is null);
+            Check(new TokenCacheSplit(100, 0).CachedPercent == 100 && new TokenCacheSplit(0, 100).CachedPercent == 0);
         });
         run("Native host remains fixed while all six transitions retarget and account hit targets stay accessible", () =>
         {
