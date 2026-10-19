@@ -1,0 +1,98 @@
+name: Windows build and release
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Validate release version
+        id: version
+        shell: pwsh
+        run: |
+          $taskVersion = (Get-Content VERSION -Raw).Trim()
+          if ($taskVersion -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$') { throw 'Invalid VERSION' }
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            if ($env:GITHUB_REF_NAME -cne "v$taskVersion") { throw 'Tag must match VERSION' }
+            git merge-base --is-ancestor HEAD origin/master
+            if ($LASTEXITCODE -ne 0) { throw 'Release tags must reference a commit merged into master' }
+          }
+          "version=$taskVersion" >> $env:GITHUB_OUTPUT
+      - name: Build
+        run: dotnet build CodexPool.slnx -c Release --nologo
+      - name: Core and security checks
+        shell: pwsh
+        run: |
+          dotnet run --project tests/CodexPool.Tests -c Release --no-build
+          if ($LASTEXITCODE -ne 0) { throw 'Core tests failed' }
+          dotnet run --project tests/CodexPool.SecurityTests -c Release --no-build
+          if ($LASTEXITCODE -ne 0) { throw 'Security tests failed' }
+      - name: Client packaging and menu checks
+        shell: pwsh
+        run: |
+          foreach ($taskFilter in @('Portable package', 'Tray menus separate', 'Linked client launch', 'Account switch toggle')) {
+            dotnet run --project tests/CodexPool.UiTests -c Release --no-build -- --filter $taskFilter
+            if ($LASTEXITCODE -ne 0) { throw "Client check failed: $taskFilter" }
+          }
+          ./scripts/tests/linked-clients.ps1
+          ./scripts/tests/deployment-targets.ps1
+      - name: Build self-contained Windows package
+        shell: pwsh
+        run: ./scripts/package-windows.ps1 -OutputDirectory "$env:RUNNER_TEMP/package"
+      - name: Test extracted package without installed runtimes
+        shell: pwsh
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.version }}
+        run: ./scripts/test-package.ps1 -Archive "$env:RUNNER_TEMP/package/CodexPool-$env:PACKAGE_VERSION-win-x64.zip" -ExpectedVersion $env:PACKAGE_VERSION
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-package
+          path: ${{ runner.temp }}/package/*
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-package
+          path: package
+      - name: Publish tested assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd package
+          sha256sum --check SHA256SUMS.txt
+          args=(--verify-tag --draft --title "Codex Pool $RELEASE_TAG" --notes-file RELEASE-NOTES.md)
+          if [[ "$RELEASE_TAG" == *-* ]]; then args+=(--prerelease); fi
+          gh release create "$RELEASE_TAG" ./*.zip SHA256SUMS.txt "${args[@]}"
+          gh release edit "$RELEASE_TAG" --draft=false
