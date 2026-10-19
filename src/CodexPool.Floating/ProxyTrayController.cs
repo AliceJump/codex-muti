@@ -113,7 +113,8 @@ internal sealed class ProxyTrayController : IDisposable
         if (state is not null) return;
         string path;
         var pointer = Path.Combine(root, ".local", "current-build.json");
-        if (File.Exists(pointer))
+        if (PortableInstallation.Exists(root)) path = PortableInstallation.Daemon(root);
+        else if (File.Exists(pointer))
         {
             using var json = JsonDocument.Parse(File.ReadAllText(pointer));
             path = Path.Combine(json.RootElement.GetProperty("path").GetString()!, "Daemon", "CodexPool.Daemon.exe");

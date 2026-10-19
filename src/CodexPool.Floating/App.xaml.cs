@@ -15,7 +15,24 @@ public partial class App : System.Windows.Application
     {
         base.OnStartup(e);
         if (!startClients) return; // Isolated UI tests load the actual styles without starting clients.
+        if (e.Args.Length == 2 && e.Args[0] == "--package-check")
+        {
+            // Offline smoke check: no tray, daemon, account state, browser, or official CLI is opened.
+            try
+            {
+                PortableInstallation.Validate(AppContext.BaseDirectory);
+                System.IO.File.WriteAllText(e.Args[1], "{\"package\":\"ok\",\"clientsStarted\":false}"); Shutdown(0);
+            }
+            catch { Shutdown(1); }
+            return;
+        }
         var proxyMode = e.Args.Contains("--proxy-tray", StringComparer.Ordinal);
+        var portable = PortableInstallation.Exists(AppContext.BaseDirectory);
+        if (portable)
+        {
+            try { PortableInstallation.Configure(AppContext.BaseDirectory, proxyMode); }
+            catch { System.Windows.MessageBox.Show("发行包不完整，请重新解压完整的软件包。", "Codex Pool"); Shutdown(1); return; }
+        }
         var instance = proxyMode ? "CodexPoolProxyTray" : "CodexPoolWidget";
         var signalName = "Local\\" + instance + "Show-" + Environment.UserName;
         // Hold the event before claiming ownership so a concurrent launcher can
@@ -41,6 +58,12 @@ public partial class App : System.Windows.Application
         window.Opacity = 0;
         window.Show(); window.Hide(); window.Opacity = 1; window.ShowActivated = true;
         if (window.Pinned || e.Args.Contains("--show", StringComparer.Ordinal) || !e.Args.Any(x => x is "--tray" or "--widget")) window.ShowFromLauncher();
+        if (portable && !e.Args.Contains("--account-only", StringComparer.Ordinal)) OpenPortableProxyTray();
+    }
+    private async void OpenPortableProxyTray()
+    {
+        try { await DesktopClientLauncher.OpenAsync(accountPanel: false, CancellationToken.None); }
+        catch { System.Windows.MessageBox.Show("账户面板已打开，代理控制图标尚未启动，可从账户菜单再次打开。", "Codex Pool"); }
     }
     protected override void OnExit(System.Windows.ExitEventArgs e)
     {
