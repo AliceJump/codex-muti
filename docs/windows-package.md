@@ -14,4 +14,4 @@
 
 此版本未签名，Windows 可能显示未知发布者；下载请使用本项目 GitHub Releases，并核对同页 SHA256SUMS.txt。没有完整跨账户长会话及全部桌面场景的发布验收，本版作为预发布提供；界面与真实账户限制见项目文档。
 
-项目与版本下载：https://github.com/AliceJump/codex-muti/releases
+[项目与版本下载](https://github.com/AliceJump/codex-muti/releases)
