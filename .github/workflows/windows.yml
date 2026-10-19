@@ -51,12 +51,20 @@ jobs:
       - name: Client packaging and menu checks
         shell: pwsh
         run: |
-          foreach ($taskFilter in @('Portable package', 'Tray menus separate', 'Linked client launch', 'Account switch toggle')) {
+          foreach ($taskFilter in @('Portable package', 'Tray menus separate', 'Linked client launch', 'Account switch toggle', 'Background startup', 'Control authentication', 'Tray status recovers', 'Quota action works', 'Quota refresh reports', 'Token cache bars')) {
             dotnet run --project tests/CodexPool.UiTests -c Release --no-build -- --filter $taskFilter
             if ($LASTEXITCODE -ne 0) { throw "Client check failed: $taskFilter" }
           }
           ./scripts/tests/linked-clients.ps1
           ./scripts/tests/deployment-targets.ps1
+      - name: Dashboard incremental updates
+        shell: pwsh
+        run: |
+          npm install --prefix .research/dashboard-dom --no-audit --no-fund jsdom@26.1.0
+          if ($LASTEXITCODE -ne 0) { throw 'Dashboard test dependencies failed' }
+          $env:NODE_PATH = Join-Path $PWD '.research/dashboard-dom/node_modules'
+          node --test scripts/tests/dashboard-updates.test.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Dashboard update checks failed' }
       - name: Build self-contained Windows package
         shell: pwsh
         run: ./scripts/package-windows.ps1 -OutputDirectory "$env:RUNNER_TEMP/package"
