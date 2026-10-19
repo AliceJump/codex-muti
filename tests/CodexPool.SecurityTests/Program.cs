@@ -19,8 +19,6 @@ using Microsoft.Extensions.Logging;
 var root = Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, ".research", "security-" + Guid.NewGuid().ToString("N")));
 var tests = new (string Name, Func<Task> Run)[]
 {
-    ("Experimental compaction holds one serving account without failover and respects explicit rejection", CompactionRouting),
-    ("Compaction control API rejects guests, model bearer and browser cookies; conditional switch is idempotent", CompactionApi),
     ("Daemon shutdown accepts only local bearer and acknowledges before requesting host shutdown", DaemonShutdown),
     ("DPAPI storage never contains plaintext canaries; public views redact", Storage),
     ("OIDC rejects wrong signature, issuer, audience, nonce and expiry", IdToken),
@@ -53,10 +51,6 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Concurrent token accounting is exact and failed writes retry without losing history", UsageConcurrency),
     ("Quota preserves arbitrary, absent, optional and scoped windows plus credit metadata", DynamicQuotaParser),
     ("Generic routing honors credits, explicit denial, budgets, model scope and stale snapshots", DynamicQuotaRouting),
-    ("WHAM rewrite preserves official identity and usage details while permission follows pool routing", WhamUsageRewrite),
-    ("WHAM forwarding uses the caller identity once and preserves upstream failures without inventing usage", WhamUsageForwardTests.RunAsync),
-    ("ChatGPT backend preserves Desktop account bootstrap and caller identity without leaking local credentials or retrying", ChatGptBackendTests.RunAsync),
-    ("Backend HTTPS validates certificate identity, isolates controls and completes trusted TLS without changing OS trust", BackendHttpsTests.RunAsync),
     ("Caller cancellation cannot abandon an accepted refresh rotation", RefreshCancellation),
     ("Refresh timeouts distinguish discovery, exchange and identity validation", RefreshTimeoutStages),
     ("Malformed native rotations fail closed without reusing credentials", NativeMalformedRefresh),
@@ -676,26 +670,6 @@ Task PoolRouting()
     try { production.UpdateSettings(new(true)); Check(false); } catch (AuthFailure) { }
     return Task.CompletedTask;
 }
-Task CompactionRouting()
-{
-    var vault = Store("compaction-routing"); vault.Add(Account("A")); vault.Add(Account("B"));
-    vault.SaveSettings(new(true)); var now = DateTimeOffset.UtcNow;
-    vault.SaveQuota(new("A", "fixture", "plus", now, [new("5h", 18000, 92, 8, now.AddHours(1))]));
-    using var issuer = new FakeIssuer(); using var http = new HttpClient(issuer); var auth = new OAuth(http, vault);
-    var quota = new Quota(http, auth, vault);
-    Check(!new PoolRuntime(vault, auth, quota, true).CompactionEnabled);
-    Check(new PoolRuntime(vault, auth, quota, false, true).CompactionAdvice("model") is null);
-    var pool = new PoolRuntime(vault, auth, quota, true, true);
-    var advice = pool.CompactionAdvice("model")!; var hold = pool.BeginCompaction(advice);
-    using (var request = pool.ReserveModelRequest("model"))
-        Check(request.CandidateIds.SequenceEqual(["A"]) && !request.AutoSwitch && request.Selection.AccountId == "A");
-    Check(pool.FinishCompaction(hold.Id, true) && pool.Active == "B");
-    Check(!pool.FinishCompaction(hold.Id, true));
-    pool.Activate("A"); hold = pool.BeginCompaction(pool.CompactionAdvice("model")!);
-    pool.RecordFailure("A", ModelError.Quota() with { FailoverReason = "quota_rejected" });
-    Check(pool.Select().AccountId == "B" && !pool.FinishCompaction(hold.Id, true));
-    return Task.CompletedTask;
-}
 async Task DaemonShutdown()
 {
     var builder = WebApplication.CreateBuilder([]); builder.Logging.ClearProviders();
@@ -719,39 +693,6 @@ async Task DaemonShutdown()
     using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
     Check(document.RootElement.GetProperty("state").GetString() == "stopping");
     await stopped.Task.WaitAsync(TimeSpan.FromSeconds(3));
-    await app.StopAsync();
-}
-async Task CompactionApi()
-{
-    var vault = Store("compaction-api"); var a = Guid.NewGuid().ToString("N"); var b = Guid.NewGuid().ToString("N");
-    vault.Add(Account(a)); vault.Add(Account(b)); vault.SaveSettings(new(true)); var now = DateTimeOffset.UtcNow;
-    vault.SaveQuota(new(a, "fixture", "plus", now, [new("5h", 18000, 92, 8, now.AddHours(1))]));
-    using var issuer = new FakeIssuer(); using var upstream = new HttpClient(issuer); var auth = new OAuth(upstream, vault);
-    var pool = new PoolRuntime(vault, auth, new Quota(upstream, auth, vault), true, true);
-    var builder = WebApplication.CreateBuilder([]); builder.Logging.ClearProviders();
-    builder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, 0));
-    await using var app = builder.Build(); CompactionEndpoints.Map(app, pool, vault.LocalKey); await app.StartAsync();
-    using var http = new HttpClient(new SocketsHttpHandler { UseProxy = false })
-        { BaseAddress = new(app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single()) };
-    using (var guest = await http.GetAsync("/compaction/advice?model=model")) Check(guest.StatusCode == HttpStatusCode.Unauthorized);
-    http.DefaultRequestHeaders.Authorization = new("Bearer", "model-only-canary");
-    using (var model = await http.PostAsJsonAsync("/compaction/reserve", new { })) Check(model.StatusCode == HttpStatusCode.Unauthorized);
-    http.DefaultRequestHeaders.Authorization = null; http.DefaultRequestHeaders.Add("Cookie", "pool_session=browser-canary");
-    using (var browser = await http.GetAsync("/compaction/advice?model=model")) Check(browser.StatusCode == HttpStatusCode.Unauthorized);
-    http.DefaultRequestHeaders.Authorization = new("Bearer", vault.LocalKey);
-    using var adviceResponse = await http.GetAsync("/compaction/advice?model=model"); adviceResponse.EnsureSuccessStatusCode();
-    var body = await adviceResponse.Content.ReadAsStringAsync(); Check(!body.Contains(vault.LocalKey));
-    using var document = JsonDocument.Parse(body);
-    var advice = document.RootElement.GetProperty("advice").Deserialize<CompactionAdvice>(new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
-    using (var invalid = await http.PostAsJsonAsync("/compaction/reserve", advice with { Model = "bad model" })) Check(invalid.StatusCode == HttpStatusCode.BadRequest);
-    using var reserved = await http.PostAsJsonAsync("/compaction/reserve", advice); reserved.EnsureSuccessStatusCode();
-    var hold = (await reserved.Content.ReadFromJsonAsync<CompactionHold>())!;
-    using (var duplicate = await http.PostAsJsonAsync("/compaction/reserve", advice)) Check(duplicate.StatusCode == HttpStatusCode.Conflict);
-    using (var invalid = await http.PostAsJsonAsync("/compaction/" + hold.Id + "/finish", new { outcome = "invented" })) Check(invalid.StatusCode == HttpStatusCode.BadRequest);
-    using (var finished = await http.PostAsJsonAsync("/compaction/" + hold.Id + "/finish", new { outcome = "completed" })) finished.EnsureSuccessStatusCode();
-    Check(pool.Active == b);
-    using var late = await http.PostAsJsonAsync("/compaction/" + hold.Id + "/finish", new { outcome = "completed" });
-    using var lateBody = JsonDocument.Parse(await late.Content.ReadAsStringAsync()); Check(!lateBody.RootElement.GetProperty("switched").GetBoolean());
     await app.StopAsync();
 }
 Task DynamicQuotaParser()
@@ -799,33 +740,6 @@ Task DynamicQuotaRouting()
     Check(PoolAvailability.Aggregate([new("A", "quota_threshold")]).Code == "account_pool_threshold_reached");
     return Task.CompletedTask;
 }
-Task WhamUsageRewrite()
-{
-    WhamUsageForwardTests.Rewrite();
-    var vault = Store("wham-routing");
-    using var issuer = new FakeIssuer(); using var http = new HttpClient(issuer);
-    var auth = new OAuth(http, vault);
-    var pool = new PoolRuntime(vault, auth, new Quota(http, auth, vault), true);
-    Check(!pool.CanRouteModelRequest());
-    vault.Add(Account("A")); vault.Add(Account("B"));
-    pool = new(vault, auth, new Quota(http, auth, vault), true);
-    Check(pool.CanRouteModelRequest());
-    Check(vault.Control("A", "pause"));
-    Check(pool.Availability().Any(x => x.Available) && !pool.CanRouteModelRequest());
-    pool.UpdateSettings(new(true));
-    Check(pool.CanRouteModelRequest() && pool.Active == "A" && vault.ActiveId == "A" && pool.History.Length == 0);
-    using (var reservation = pool.ReserveModelRequest()) Check(reservation.Selection.AccountId == "B");
-    Check(vault.Control("B", "pause"));
-    Check(!pool.CanRouteModelRequest());
-    var mixed = Store("wham-provider-routing"); mixed.Add(Account("A"));
-    var native = Account("N"); native.ProviderKind = "native"; native.BackendAccountId = "backend-N"; mixed.Add(native);
-    mixed.SaveSettings(new(true)); Check(mixed.Control("A", "pause"));
-    var mixedAuth = new OAuth(http, mixed);
-    var mixedPool = new PoolRuntime(mixed, mixedAuth, new Quota(http, mixedAuth, mixed), true);
-    Check(mixedPool.Availability().Any(x => x.Available) && !mixedPool.CanRouteModelRequest());
-    Check(!new PoolRuntime(vault, auth, new Quota(http, auth, vault), false).CanRouteModelRequest());
-    return Task.CompletedTask;
-}
 async Task LocalApi()
 {
     var vault = Store("http-api");
@@ -854,7 +768,6 @@ async Task LocalApi()
         Check(codexUsage.StatusCode == HttpStatusCode.Unauthorized);
         using var unauthorized = await http.GetAsync("http://127.0.0.1:3210/status"); Check(unauthorized.StatusCode == HttpStatusCode.Unauthorized);
         using var unauthorizedStatistics = await http.GetAsync("http://127.0.0.1:3210/statistics"); Check(unauthorizedStatistics.StatusCode == HttpStatusCode.Unauthorized);
-        using var unauthorizedCompaction = await http.GetAsync("http://127.0.0.1:3210/compaction/advice?model=model"); Check(unauthorizedCompaction.StatusCode == HttpStatusCode.Unauthorized);
         using var official = new HttpClient(new SocketsHttpHandler { UseProxy = false });
         official.DefaultRequestHeaders.Authorization = new("Bearer", "OFFICIAL-HTTP-CANARY");
         using var officialModel = await official.PostAsJsonAsync("http://127.0.0.1:3210/v1/responses", new { });
@@ -863,8 +776,6 @@ async Task LocalApi()
         Check(officialWs.StatusCode == HttpStatusCode.UpgradeRequired);
         using var officialControl = await official.PostAsJsonAsync("http://127.0.0.1:3210/settings", new { });
         Check(officialControl.StatusCode == HttpStatusCode.Unauthorized);
-        using var officialCompaction = await official.PostAsJsonAsync("http://127.0.0.1:3210/compaction/reserve", new { });
-        Check(officialCompaction.StatusCode == HttpStatusCode.Unauthorized);
         using var officialStatus = await official.GetAsync("http://127.0.0.1:3210/status");
         Check(officialStatus.StatusCode == HttpStatusCode.Unauthorized);
         using var officialStatistics = await official.GetAsync("http://127.0.0.1:3210/statistics"); Check(officialStatistics.StatusCode == HttpStatusCode.Unauthorized);
@@ -890,7 +801,6 @@ async Task LocalApi()
         using var redeemed = await browser.GetAsync(ticketUrl); Check(redeemed.StatusCode == HttpStatusCode.Redirect);
         using var replay = await browser.GetAsync(ticketUrl); Check(replay.StatusCode == HttpStatusCode.Unauthorized);
         using var browserStatus = await browser.GetAsync("http://127.0.0.1:3210/status"); Check(browserStatus.IsSuccessStatusCode);
-        using var browserCompaction = await browser.GetAsync("http://127.0.0.1:3210/compaction/advice?model=model"); Check(browserCompaction.StatusCode == HttpStatusCode.Unauthorized);
         using var browserStatistics = await browser.GetAsync("http://127.0.0.1:3210/statistics"); Check(browserStatistics.IsSuccessStatusCode);
         using var noCsrf = await browser.PostAsJsonAsync("http://127.0.0.1:3210/settings", new { autoSwitch = false, fiveHourThreshold = 90, weeklyThreshold = 90 });
         Check(noCsrf.StatusCode == HttpStatusCode.Forbidden);

@@ -27,12 +27,9 @@ try
     var builder = WebApplication.CreateBuilder([]);
     builder.Logging.ClearProviders();
     builder.Services.Configure<HostOptions>(options => options.ShutdownTimeout = TimeSpan.FromSeconds(30));
-    using var backendCertificate = BackendHttps.LoadCertificate(directory);
     builder.WebHost.ConfigureKestrel(options =>
     {
         options.Listen(System.Net.IPAddress.Loopback, 3210);
-        if (backendCertificate is not null)
-            options.Listen(System.Net.IPAddress.Loopback, BackendHttps.Port, listener => listener.UseHttps(backendCertificate));
         options.Limits.MaxRequestBodySize = ModelRequestBody.MaximumBytes;
         options.Limits.RequestHeadersTimeout = TimeSpan.FromSeconds(15);
     });
@@ -44,17 +41,13 @@ try
         AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate })
         { Timeout = TimeSpan.FromMinutes(10) };
     var auth = new OAuth(http, vault); var relay = new ResponsesRelay(modelHttp);
-    using var chatGptHttp = ChatGptBackend.CreateClient();
-    var chatGptBackend = new ChatGptBackend(chatGptHttp, vault.LocalKey);
     var nativeLogin = new NativeLogin(vault, auth, directory);
     var quota = new Quota(http, auth, vault);
     var statistics = new UsageStatistics(directory);
     var recent = new ConcurrentQueue<object>();
     var inFlight = new ConcurrentDictionary<string, int>();
     var boundaryProbe = args.Contains("--live-boundary-probe", StringComparer.Ordinal);
-    var experimentalCompaction = args.Contains("--experimental-compact-bridge", StringComparer.Ordinal);
-    if (experimentalCompaction && !boundaryProbe) throw new AuthFailure("live_migration_gate_pending");
-    var pool = new PoolRuntime(vault, auth, quota, boundaryProbe, experimentalCompaction);
+    var pool = new PoolRuntime(vault, auth, quota, boundaryProbe);
     var browsers = new BrowserSessions(); var events = new StateEvents();
     var officialModelAuth = new OfficialModelAuth(Environment.GetEnvironmentVariable("CODEX_HOME")
         ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex"), vault);
@@ -62,26 +55,22 @@ try
     app.Use(async (context, next) =>
     {
         // No CORS. Only the exact local origin may use an authenticated browser session.
-        if (!BackendHttps.Allows(context.Request))
+        if (context.Request.Scheme != "http" || context.Request.Host.Host != "127.0.0.1" || context.Request.Host.Port != 3210
+            || context.Request.Headers.TryGetValue("Origin", out var origin) && origin != "http://127.0.0.1:3210")
         { context.Response.StatusCode = 403; return; }
         context.Response.Headers.CacheControl = "no-store";
         context.Response.Headers.XContentTypeOptions = "nosniff";
         context.Response.Headers.ContentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
         context.Response.Headers["Referrer-Policy"] = "no-referrer";
         var path = context.Request.Path.Value ?? "";
-        // Official backend validates the caller's bearer, including keyring-only Desktop logins.
-        // Run after Host/Origin checks, before the unrelated local control authentication.
-        if (ChatGptBackend.IsPassthroughPath(path))
-        { await chatGptBackend.ForwardAsync(context); return; }
         var publicPath = path is "/" or "/health" or "/auth/callback" or "/dashboard.js" or "/dashboard.css"
-            || path is "/backend-api/wham/usage" or "/api/codex/usage"
             || path.StartsWith("/dashboard/open/", StringComparison.Ordinal);
         var bearer = LocalCommands.EqualSecret(context.Request.Headers.Authorization.ToString(), "Bearer " + vault.LocalKey);
         var modelBearer = !bearer && await officialModelAuth.AcceptsAsync(context.Request.Method, path,
             context.Request.Headers.Authorization.ToString(), context.RequestAborted);
         var session = browsers.Find(context);
         var mutating = context.Request.Method is not ("GET" or "HEAD");
-        var bearerOnly = path.StartsWith("/v1/", StringComparison.Ordinal) || path.StartsWith("/compaction/", StringComparison.Ordinal) || path.StartsWith("/control/", StringComparison.Ordinal)
+        var bearerOnly = path.StartsWith("/v1/", StringComparison.Ordinal) || path.StartsWith("/control/", StringComparison.Ordinal)
             || path is "/accounts/login" or "/dashboard/session";
         if (!publicPath && !bearer && !modelBearer && (bearerOnly || session is null))
         { context.Response.StatusCode = 401; return; }
@@ -104,8 +93,6 @@ try
         { if (!context.Response.HasStarted) { var error = pool.Unavailable(model: context.Items["quotaModel"] as string); context.Response.StatusCode = error.Status; context.Response.ContentType = "application/json"; if (error.RetryAfter is not null) context.Response.Headers["Retry-After"] = error.RetryAfter; await context.Response.Body.WriteAsync(error.Body(), context.RequestAborted); } else context.Abort(); }
         catch (JsonException)
         { if (!context.Response.HasStarted) { context.Response.StatusCode = 400; await context.Response.WriteAsJsonAsync(new { error = new { code = "invalid_json" } }); } else context.Abort(); }
-        catch (CompactionRejectedException ex)
-        { if (!context.Response.HasStarted) { context.Response.StatusCode = 409; await context.Response.WriteAsJsonAsync(new { error = new { code = ex.Code } }); } else context.Abort(); }
         catch (RequestBodyFailure ex)
         { if (!context.Response.HasStarted) { context.Response.StatusCode = ex.Status; await context.Response.WriteAsJsonAsync(new { error = new { code = ex.Code } }); } else context.Abort(); }
         catch
@@ -115,7 +102,7 @@ try
     object Status() => new { activeAccountId = vault.ActiveId, stage = "acceptance", automaticSwitching = pool.Settings.AutoSwitch, settings = pool.Settings,
         boundaryProbe, distinctUsers = vault.DistinctUsers, nativeDistinctUsers = vault.NativeDistinctUsers, liveMigrationValidated = false, quotaSource = "per_registration", accounts = vault.Views(auth.Health), accountAvailability = pool.Availability(),
         nativeLoginAttempts = nativeLogin.PublicAttempts, usage = quota.Views, quotaRefreshErrors = quota.RefreshErrors, quotaSelectionError = pool.QuotaSelectionError,
-        compaction = pool.CompactionState, tokenStatistics = statistics.View(), inFlightRequests = inFlight.ToArray(), recentRequests = recent.ToArray(), recentSwitches = pool.History };
+        tokenStatistics = statistics.View(), inFlightRequests = inFlight.ToArray(), recentRequests = recent.ToArray(), recentSwitches = pool.History };
     app.MapGet("/status", () => Status());
     app.MapGet("/statistics", () => statistics.View());
     app.MapGet("/events", (HttpContext context) => events.StreamAsync(context, Status));
@@ -126,7 +113,6 @@ try
     foreach (var asset in new[] { (Path: "/", File: "index.html", Type: "text/html"), (Path: "/dashboard.js", File: "dashboard.js", Type: "text/javascript"), (Path: "/dashboard.css", File: "dashboard.css", Type: "text/css") })
         app.MapGet(asset.Path, () => Results.Stream(typeof(Vault).Assembly.GetManifestResourceStream("CodexPool.Daemon.Dashboard." + asset.File)!, asset.Type));
     app.MapGet("/settings", () => pool.Settings);
-    CompactionEndpoints.Map(app, pool, vault.LocalKey);
     DaemonControlEndpoints.Map(app, vault.LocalKey, app.Lifetime.StopApplication);
     app.MapPost("/settings", async (HttpContext context) =>
     {
@@ -142,16 +128,6 @@ try
         pool.SelectAfterQuotaRefresh();
         return quota.Views;
     });
-    // ChatGPT Desktop / Codex 在 chatgpt_base_url 或 CODEX_API_BASE_URL 指向本机时读取用量；按池可用性改写 allowed。
-    async Task WhamUsageEndpoint(HttpContext context)
-    {
-        var allowed = pool.CanRouteModelRequest();
-        await chatGptBackend.ForwardUsageAsync(context, allowed, model => pool.CanRouteModelRequest(model));
-        recent.Enqueue(new { at = DateTimeOffset.UtcNow, type = "wham_usage", status = context.Response.StatusCode, poolAllowed = allowed });
-        while (recent.Count > 100) recent.TryDequeue(out _);
-    }
-    app.MapGet("/backend-api/wham/usage", WhamUsageEndpoint);
-    app.MapGet("/api/codex/usage", WhamUsageEndpoint);
     app.MapPost("/accounts/native-login", async (HttpContext context) =>
     {
         var input = await context.Request.ReadFromJsonAsync<LoginInput>(context.RequestAborted) ?? throw new AuthFailure("invalid_login_request");
@@ -334,7 +310,6 @@ try
     });
     app.MapFallback(() => Results.NotFound(new { error = new { code = "endpoint_not_supported_in_phase0" } }));
     Console.WriteLine("Codex Pool listening at http://127.0.0.1:3210 (live migration acceptance gate applies).");
-    if (backendCertificate is not null) Console.WriteLine("ChatGPT backend listening at " + BackendHttps.Origin + ".");
     var eventTask = events.RunAsync(Status, app.Lifetime.ApplicationStopping);
     var statisticsTask = Task.Run(async () =>
     {

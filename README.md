@@ -24,7 +24,6 @@
 | PR | 主题 | 说明 |
 |----|------|------|
 | [#6](https://github.com/AliceJump/codex-muti/pull/6) | Responses 请求头与产品名 | 透传两种 session/thread 拼写，metadata 会话身份与缓存亲和性分开 |
-| [#7](https://github.com/AliceJump/codex-muti/pull/7) | Desktop WHAM usage | 按真实模型路由许可返回 allowed，未知套餐返回必填的 unknown |
 | [#8](https://github.com/AliceJump/codex-muti/pull/8) | 玻璃托盘菜单 | 修复关闭重入、DPI 坐标和主题继承 |
 
 合入源代码与本机实际运行的构建可能不同；真实多账户、Desktop 和完整桌面验收仍以验收报告为准。
@@ -33,7 +32,6 @@
 | 组件 | 作用 | 默认地址 / 入口 |
 |------|------|-----------------|
 | **Daemon** | 模型代理、账户、额度、本地 API、Dashboard 静态页 | `http://127.0.0.1:3210`（仅 loopback） |
-| **ChatGPT HTTPS 后端** | 可选用量改写与官方后端转发 | `https://127.0.0.1:3211/backend-api`（安装证书后启用，仅 loopback） |
 | **Dashboard** | 浏览器账户/额度/阈值控制台 | 同端口；`pool.ps1 dashboard` 建立短期安全会话 |
 | **Widget** | 可固定和拖动的托盘账户面板 | `pool.ps1 widget` / `Ctrl+Alt+W` |
 | **代理控制托盘** | 独立图标，启动／关闭代理、切换账户与自动切换 | `scripts/start-proxy-tray.ps1` |
@@ -99,37 +97,12 @@ openai_base_url = "http://127.0.0.1:3210/v1"
 | 键 | 作用 |
 |----|------|
 | `openai_base_url` | 模型请求转到本机池（`master` 已支持相关入口说明） |
-| `chatgpt_base_url` | 可选 ChatGPT 后端入口；新版 Codex 要求 HTTPS，不能配置为本地 HTTP 地址 |
-
-需要本地用量改写时，先执行 `pwsh -NoProfile -File scripts/setup-backend-https.ps1`，为当前 Windows 用户安装仅用于 `127.0.0.1` 的服务器证书，再部署新版 Daemon。脚本不修改 Codex 配置、不重启服务；私钥保留在 Windows 当前用户证书存储中且不可导出。随后增加配置并重启 Codex：
-
-```toml
-chatgpt_base_url = "https://127.0.0.1:3211/backend-api"
-```
-
-`chatgpt_base_url` 同时影响登录后的账号检查，并非用量专用配置。新版 workspace routing 拒绝 HTTP，包括 loopback；报错 `workspace backend must use an HTTPS origin without credentials` 时，只升级转发代码或把协议文字改成 HTTPS 都不够，需要真实 TLS 监听与受信任的证书。尚未部署时，临时移除 `chatgpt_base_url` 并重启客户端，保留 `openai_base_url`。旧版 Daemon 对非用量后端请求返回本地 401 的问题也已补上身份透传。
-
-官方工作区发现结果保持原样；若工作区要求特定区域后端，Codex 可能使用官方发现的地址，本地用量改写不保证生效。配置步骤、停用方法与验收限制见 [docs/wham-usage-rewrite.md](docs/wham-usage-rewrite.md)。
-
-用量改写会使用客户端原身份读取完整官方响应，保留账号、用户、套餐、窗口、重置时间和余额，再按池可路由状态调整发送许可。旧版仅返回简化 `allowed` 的实现会丢失用量详情。压缩桥接及其启动方式保持原有实现。
 
 模型入口可接受池内原生 access token，或只读核对 Daemon `CODEX_HOME/auth.json` 中的当前 ChatGPT 登录；代理不导入、复制、刷新或写入该文件。实际上游账户仍由 sticky 调度决定。
 
 原生 WebSocket 探测返回 426，使 Codex 回落 HTTP/SSE。`/v1/models` 返回原生目录；带 `client_version` 时优先原样转发。支持原生 zstd（入口及解压后的请求体上限均为 128 MiB，解码窗口上限保持 32 MiB）。错误汇总见 [docs/model-errors.md](docs/model-errors.md)；provider 验收见 [docs/local-provider-acceptance.md](docs/local-provider-acceptance.md)。
 
 ## 本地组合部署
-
-### 实验：额度预警触发真实压缩
-
-已实现可选 App Server stdio 桥接、提前额度预警和条件账户预留。默认关闭，仅支持已核对的 CLI `0.162.1`。2026-10-14 已在用户真实环境观察到压缩完成、切换账户及新账户成功继续请求；完整故障矩阵与长会话验收仍待完成。
-
-已有本地构建时，双击仓库根目录 **`start-codex.cmd`**，即可按需启动实验代理、账户托盘和带桥接的 Codex Desktop。也可以安装桌面快捷方式：
-
-```powershell
-pwsh -NoProfile -File scripts/install-codex-shortcut.ps1
-```
-
-以后双击桌面的 **Codex Pool**。保留已有账户、自动切换设置与阈值，重复点击复用已有桥接实例。普通 Desktop 正在运行或旧代理没有开启压缩能力时，入口会提示退出对应旧实例，不会自动中断工作。构建、检查与回滚见 [docs/compaction-bridge.md](docs/compaction-bridge.md)。
 
 双击 `deploy.cmd` 可选择全部、仅核心或仅桌面组件。核心包含代理和 Dashboard；桌面组件为支持固定的托盘面板。
 
@@ -220,7 +193,6 @@ node scripts/phase0-live.mjs
 - [docs/phase0-results.md](docs/phase0-results.md) — Phase 0 已通过 / 待验证
 - [docs/native-acceptance-results.md](docs/native-acceptance-results.md) — 原生多账户验收范围
 - [docs/native-auth-adapter.md](docs/native-auth-adapter.md) — 原生登录与额度适配
-- [docs/wham-usage-rewrite.md](docs/wham-usage-rewrite.md) — Desktop WHAM 改写（PR #7 已合入）
 - [docs/desktop-widget.md](docs/desktop-widget.md) — Widget / Mac
 - [docs/model-errors.md](docs/model-errors.md) — 错误与账户池汇总
 - [docs/local-provider-acceptance.md](docs/local-provider-acceptance.md) — 本地 provider 验收

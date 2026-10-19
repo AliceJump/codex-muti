@@ -28,7 +28,6 @@ internal sealed class ProxyTrayController : IDisposable
     private GlassTrayMenu? menu;
     private JsonElement? state;
     private bool busy, refreshing, disposed;
-    private bool compaction = Environment.GetEnvironmentVariable("CODEX_POOL_DAEMON_COMPACT_BRIDGE") == "1";
 
     internal ProxyTrayController(Dispatcher dispatcher)
     {
@@ -58,7 +57,6 @@ internal sealed class ProxyTrayController : IDisposable
         try
         {
             state = await ReadStatusAsync();
-            compaction = state.Value.TryGetProperty("compaction", out var value) && value.GetProperty("enabled").GetBoolean();
         }
         catch { state = null; }
         finally { refreshing = false; UpdateTip(); }
@@ -171,7 +169,6 @@ internal sealed class ProxyTrayController : IDisposable
         if (!File.Exists(path) || !ProxyDaemonProcess.OwnedPath(path, root)) throw new InvalidOperationException();
         var start = new ProcessStartInfo(path) { UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden, WorkingDirectory = Path.GetDirectoryName(path)! };
         start.ArgumentList.Add("serve"); start.ArgumentList.Add("--live-boundary-probe");
-        if (compaction) start.ArgumentList.Add("--experimental-compact-bridge");
         using var child = Process.Start(start) ?? throw new InvalidOperationException();
         for (var i = 0; i < 30; i++)
         {

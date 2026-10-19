@@ -1,7 +1,7 @@
 # Shared launcher: preserve Windows notification-area identity across versioned builds.
 # This file is dot-sourced. It never stops a UI or daemon process.
 function Start-PoolDesktopClient {
-    param([Parameter(Mandatory)][string]$BuildDirectory, [switch]$Tray = $true, [switch]$PassThru, [switch]$NoDaemonStart, [switch]$InstallOnly, [switch]$ProxyTray, [string]$DaemonPath, [switch]$CompactBridge)
+    param([Parameter(Mandatory)][string]$BuildDirectory, [switch]$Tray = $true, [switch]$PassThru, [switch]$NoDaemonStart, [switch]$InstallOnly, [switch]$ProxyTray, [string]$DaemonPath)
     $taskClientRoot = [IO.Path]::GetFullPath((Split-Path $PSScriptRoot -Parent))
     $taskSourceBuild = [IO.Path]::GetFullPath($BuildDirectory)
     $taskLocalRoot = Join-Path $taskClientRoot '.local'
@@ -52,13 +52,11 @@ function Start-PoolDesktopClient {
         $taskPreviousDaemon = [Environment]::GetEnvironmentVariable('CODEX_POOL_DAEMON')
         $taskPreviousAutoStart = [Environment]::GetEnvironmentVariable('CODEX_POOL_DAEMON_AUTOSTART')
         $taskPreviousRoot = [Environment]::GetEnvironmentVariable('CODEX_POOL_ROOT')
-        $taskPreviousCompact = [Environment]::GetEnvironmentVariable('CODEX_POOL_DAEMON_COMPACT_BRIDGE')
         try {
             # The proxy remains versioned and independent; only the tray UI needs a fixed path.
             [Environment]::SetEnvironmentVariable('CODEX_POOL_DAEMON', $(if ($DaemonPath) { $DaemonPath } else { Join-Path $taskSourceBuild 'Daemon\CodexPool.Daemon.exe' }))
             if ($ProxyTray) {
                 [Environment]::SetEnvironmentVariable('CODEX_POOL_ROOT', $taskClientRoot)
-                if ($CompactBridge) { [Environment]::SetEnvironmentVariable('CODEX_POOL_DAEMON_COMPACT_BRIDGE', '1') }
             }
             if ($NoDaemonStart) { [Environment]::SetEnvironmentVariable('CODEX_POOL_DAEMON_AUTOSTART', '0') }
             if ($ProxyTray) { $taskStartedClient = Start-Process -FilePath $taskExecutable -ArgumentList '--proxy-tray' -WorkingDirectory $taskStable -WindowStyle Hidden -PassThru }
@@ -66,7 +64,7 @@ function Start-PoolDesktopClient {
             else { $taskStartedClient = Start-Process -FilePath $taskExecutable -WorkingDirectory $taskStable -WindowStyle Normal -PassThru }
             if ($PassThru) { return $taskStartedClient }
         } finally {
-            $taskRestoreValues = @{CODEX_POOL_DAEMON=$taskPreviousDaemon;CODEX_POOL_DAEMON_AUTOSTART=$taskPreviousAutoStart;CODEX_POOL_ROOT=$taskPreviousRoot;CODEX_POOL_DAEMON_COMPACT_BRIDGE=$taskPreviousCompact}
+            $taskRestoreValues = @{CODEX_POOL_DAEMON=$taskPreviousDaemon;CODEX_POOL_DAEMON_AUTOSTART=$taskPreviousAutoStart;CODEX_POOL_ROOT=$taskPreviousRoot}
             foreach ($taskName in $taskRestoreValues.Keys) {
                 $taskRestoreValue = if ($null -eq $taskRestoreValues[$taskName]) { [NullString]::Value } else { $taskRestoreValues[$taskName] }
                 [Environment]::SetEnvironmentVariable($taskName,$taskRestoreValue,'Process')
