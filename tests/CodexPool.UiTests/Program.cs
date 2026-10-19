@@ -14,6 +14,7 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        var filter = args.Length == 2 && args[0] == "--filter" ? args[1] : null;
         if (args.Length == 1 && args[0] == "--proxy-icon-check")
         {
             foreach (var guid in new[] { StableTrayIcon.Identity, ProxyTrayController.Identity })
@@ -34,6 +35,7 @@ internal static class Program
         var failed = 0; var total = 0;
         void Run(string name, Action test)
         {
+            if (filter is not null && !name.Contains(filter, StringComparison.OrdinalIgnoreCase)) return;
             total++;
             try { test(); Console.WriteLine("PASS " + name); }
             catch (Exception ex) { failed++; Console.WriteLine("FAIL " + name + " " + ex.GetType().Name + ": " + ex.Message); Console.WriteLine(ex.StackTrace); }
@@ -100,6 +102,26 @@ internal static class Program
             var proxy = DesktopClientLauncher.StartInfo(root, accountPanel: false);
             Check(proxy.ArgumentList.SequenceEqual(new[] { "-NoProfile", "-File", System.IO.Path.Combine(root, "scripts", "start-proxy-tray.ps1") }));
             Check(proxy.WorkingDirectory == root);
+        });
+        Run("Portable package launches native clients without scripts and limits daemon control to its own installation", () =>
+        {
+            var root = System.IO.Path.Combine(Environment.CurrentDirectory, ".research", "portable package " + Guid.NewGuid().ToString("N"));
+            System.IO.Directory.CreateDirectory(System.IO.Path.Combine(root, "Daemon"));
+            System.IO.File.WriteAllText(System.IO.Path.Combine(root, PortableInstallation.Manifest), "{\"format\":1,\"version\":\"0.1.0-beta.1\"}");
+            System.IO.File.WriteAllText(System.IO.Path.Combine(root, "CodexPool.exe"), "fixture-not-executable");
+            System.IO.File.WriteAllText(PortableInstallation.Daemon(root), "fixture-not-executable");
+            var account = DesktopClientLauncher.StartInfo(root, accountPanel: true);
+            Check(account.FileName == System.IO.Path.Combine(root, "CodexPool.exe") && !account.UseShellExecute && account.CreateNoWindow);
+            Check(account.ArgumentList.SequenceEqual(new[] { "--show", "--account-only" }));
+            Check(account.Environment["CODEX_POOL_DAEMON_AUTOSTART"] == "0" && account.Environment["CODEX_POOL_DAEMON"] == PortableInstallation.Daemon(root));
+            var proxy = DesktopClientLauncher.StartInfo(root, accountPanel: false);
+            Check(proxy.ArgumentList.SequenceEqual(new[] { "--proxy-tray" }));
+            Check(ProxyDaemonProcess.OwnedPath(PortableInstallation.Daemon(root), root));
+            Check(!ProxyDaemonProcess.OwnedPath(System.IO.Path.Combine(root, "Other", "CodexPool.Daemon.exe"), root));
+            Check(!ProxyDaemonProcess.OwnedPath(System.IO.Path.Combine(root, "Daemon", "..", "Foreign", "CodexPool.Daemon.exe"), root));
+            System.IO.File.Delete(PortableInstallation.Daemon(root));
+            var rejected = false; try { _ = DesktopClientLauncher.StartInfo(root, accountPanel: true); } catch (System.IO.IOException) { rejected = true; }
+            Check(rejected);
         });
         Run("Proxy process control excludes Codex, foreign roots and path traversal", () =>
         {
@@ -309,7 +331,7 @@ internal static class Program
         SceneTests.Run(Run);
         Console.WriteLine($"{total - failed}/{total} UI tests passed; isolated native windows, no credentials or proxy processes");
         application.Shutdown();
-        return failed == 0 ? 0 : 1;
+        return failed == 0 && total > 0 ? 0 : 1;
     }
     private static void Check(bool value) { if (!value) throw new InvalidOperationException(); }
     [StructLayout(LayoutKind.Sequential)] private struct PublishedIconIdentifier { public uint Size; public nint Window; public uint Id; public Guid Guid; }

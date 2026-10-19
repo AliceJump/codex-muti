@@ -181,3 +181,6 @@ $taskBatchBytes = [IO.File]::ReadAllBytes((Join-Path $taskRepository 'deploy.cmd
 Assert-Test (@($taskBatchBytes | Where-Object { $_ -gt 127 }).Count -eq 0) 'Batch wrapper must remain ASCII.'
 Assert-Test ([IO.File]::ReadAllText((Join-Path $taskRepository 'deploy.cmd')) -notmatch '(?<!\r)\n') 'Batch wrapper must use CRLF.'
 Write-Output '17/17 deployment target checks passed; simulated publishing/processes only'
+# The invalid-target CMD check deliberately leaves a nonzero native exit code.
+# Assertions above already checked that rejection; successful callers must receive success.
+$global:LASTEXITCODE = 0

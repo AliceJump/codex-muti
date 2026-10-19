@@ -12,7 +12,8 @@ internal static class ProxyDaemonProcess
         && !string.IsNullOrWhiteSpace(path) && System.IO.Path.IsPathFullyQualified(path)
         &&
         System.IO.Path.GetFileName(path).Equals("CodexPool.Daemon.exe", StringComparison.OrdinalIgnoreCase)
-        && System.IO.Path.GetFullPath(path).StartsWith(System.IO.Path.GetFullPath(System.IO.Path.Combine(root, ".local")) + "\\", StringComparison.OrdinalIgnoreCase);
+        && (System.IO.Path.GetFullPath(path).StartsWith(System.IO.Path.GetFullPath(System.IO.Path.Combine(root, ".local")) + "\\", StringComparison.OrdinalIgnoreCase)
+            || PortableInstallation.Exists(root) && System.IO.Path.GetFullPath(path).Equals(PortableInstallation.Daemon(System.IO.Path.GetFullPath(root)), StringComparison.OrdinalIgnoreCase));
 
     internal static ProxyDaemonIdentity Capture(string root)
     {

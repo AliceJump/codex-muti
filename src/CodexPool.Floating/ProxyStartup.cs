@@ -42,7 +42,7 @@ internal static class ProxyStartup
         }
         var candidates = new[]
         {
-            current ?? "",
+            PortableInstallation.Exists(root) ? PortableInstallation.Daemon(root) : current ?? "",
             Environment.GetEnvironmentVariable("CODEX_POOL_DAEMON") ?? "",
             Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "Daemon", "CodexPool.Daemon.exe")),
             Path.Combine(AppContext.BaseDirectory, "CodexPool.Daemon.exe")
