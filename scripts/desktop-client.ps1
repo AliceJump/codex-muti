@@ -1,7 +1,7 @@
 # Shared launcher: preserve Windows notification-area identity across versioned builds.
 # This file is dot-sourced. It never stops a UI or daemon process.
 function Start-PoolDesktopClient {
-    param([Parameter(Mandatory)][string]$BuildDirectory, [switch]$Tray = $true, [switch]$PassThru, [switch]$NoDaemonStart, [switch]$InstallOnly, [switch]$ProxyTray, [string]$DaemonPath)
+    param([Parameter(Mandatory)][string]$BuildDirectory, [switch]$Tray = $true, [switch]$PassThru, [switch]$NoDaemonStart, [switch]$InstallOnly, [switch]$ProxyTray, [string]$DaemonPath, [switch]$Show)
     $taskClientRoot = [IO.Path]::GetFullPath((Split-Path $PSScriptRoot -Parent))
     $taskSourceBuild = [IO.Path]::GetFullPath($BuildDirectory)
     $taskLocalRoot = Join-Path $taskClientRoot '.local'
@@ -55,12 +55,10 @@ function Start-PoolDesktopClient {
         try {
             # The proxy remains versioned and independent; only the tray UI needs a fixed path.
             [Environment]::SetEnvironmentVariable('CODEX_POOL_DAEMON', $(if ($DaemonPath) { $DaemonPath } else { Join-Path $taskSourceBuild 'Daemon\CodexPool.Daemon.exe' }))
-            if ($ProxyTray) {
-                [Environment]::SetEnvironmentVariable('CODEX_POOL_ROOT', $taskClientRoot)
-            }
+            [Environment]::SetEnvironmentVariable('CODEX_POOL_ROOT', $taskClientRoot)
             if ($NoDaemonStart) { [Environment]::SetEnvironmentVariable('CODEX_POOL_DAEMON_AUTOSTART', '0') }
             if ($ProxyTray) { $taskStartedClient = Start-Process -FilePath $taskExecutable -ArgumentList '--proxy-tray' -WorkingDirectory $taskStable -WindowStyle Hidden -PassThru }
-            elseif ($Tray) { $taskStartedClient = Start-Process -FilePath $taskExecutable -ArgumentList '--tray' -WorkingDirectory $taskStable -WindowStyle Hidden -PassThru }
+            elseif ($Tray) { $taskClientArgs = @('--tray'); if ($Show) { $taskClientArgs += '--show' }; $taskStartedClient = Start-Process -FilePath $taskExecutable -ArgumentList $taskClientArgs -WorkingDirectory $taskStable -WindowStyle Hidden -PassThru }
             else { $taskStartedClient = Start-Process -FilePath $taskExecutable -WorkingDirectory $taskStable -WindowStyle Normal -PassThru }
             if ($PassThru) { return $taskStartedClient }
         } finally {

@@ -6,7 +6,6 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Threading;
-using CodexPool.Core;
 using CodexPool.Daemon;
 using Application = System.Windows.Application;
 using MessageBox = System.Windows.MessageBox;
@@ -17,7 +16,6 @@ internal sealed class ProxyTrayController : IDisposable
 {
     internal static readonly Guid Identity = new("814c1565-8e11-4a4e-94e4-a36d9b7b019f");
     private const string Endpoint = "http://127.0.0.1:3210";
-    private static readonly JsonSerializerOptions WebJson = new(JsonSerializerDefaults.Web);
     private readonly Dispatcher dispatcher;
     private readonly HttpClient http = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(30) };
     private readonly CancellationTokenSource lifetime = new();
@@ -64,47 +62,25 @@ internal sealed class ProxyTrayController : IDisposable
     private void UpdateTip()
     {
         if (disposed) return;
-        var name = state is { } value ? ActiveName(value) : "";
-        tray.Text = busy ? "Codex Pool · 代理操作中" : state is null ? "Codex Pool · 代理离线" : "Codex Pool · 代理在线 · " + name;
+        tray.Text = busy ? "Codex Pool · 代理操作中" : state is null ? "Codex Pool · 代理离线" : "Codex Pool · 代理在线";
     }
-    private static string ActiveName(JsonElement value) => value.GetProperty("accounts").EnumerateArray()
-        .FirstOrDefault(x => x.GetProperty("id").GetString() == value.GetProperty("activeAccountId").GetString())
-        is { ValueKind: JsonValueKind.Object } account ? account.GetProperty("name").GetString() ?? "未选择" : "未选择";
 
     internal void ShowMenu()
     {
         if (disposed) return;
         menu?.Close();
-        var items = new List<GlassMenuItem>();
-        if (busy) items.Add(new("正在操作代理…", Enabled: false));
-        else if (state is { } snapshot)
-        {
-            items.Add(AccountMenu(snapshot, id => Run(() => PostAsync("/accounts/" + id + "/activate"))));
-            items.Add(new("打开账户管理", () => Run(DashboardAsync)));
-            items.Add(new(snapshot.GetProperty("automaticSwitching").GetBoolean() ? "关闭自动切换" : "开启自动切换", () => Run(ToggleSwitchAsync)));
-            items.Add(new("更新额度", () => Run(async () => { Authorize(); using var response = await http.GetAsync(Endpoint + "/usage", lifetime.Token); response.EnsureSuccessStatusCode(); })));
-            items.Add(new("关闭代理", () => Run(StopAsync)));
-        }
-        else items.Add(new("启动代理", () => Run(StartAsync)));
-        items.Add(new("退出代理托盘（代理继续运行）", () => Application.Current.Shutdown()));
+        var items = BuildMenu(state is not null, busy, () => Run(StartAsync), () => Run(StopAsync),
+            () => Run(() => DesktopClientLauncher.OpenAsync(accountPanel: true, lifetime.Token)), () => Application.Current.Shutdown());
         menu = new GlassTrayMenu(items, () => menu = null) { Title = "Codex Pool · 代理控制" };
         var cursor = System.Windows.Forms.Cursor.Position;
         menu.ShowNear(cursor, tray.TryGetBounds(out var bounds) ? bounds : null);
     }
 
-    internal static GlassMenuItem AccountMenu(JsonElement snapshot, Action<string> activate)
-    {
-        var active = snapshot.GetProperty("activeAccountId").GetString();
-        var accounts = snapshot.GetProperty("accounts").EnumerateArray().Select(account =>
-        {
-            var id = account.GetProperty("id").GetString();
-            var current = id == active;
-            var enabled = !current && id is not null && Guid.TryParseExact(id, "N", out _) && account.GetProperty("enabled").GetBoolean()
-                && !account.GetProperty("paused").GetBoolean() && !account.GetProperty("drain").GetBoolean();
-            return new GlassMenuItem(account.GetProperty("name").GetString() ?? "未命名账户", enabled ? () => activate(id!) : null, Enabled: enabled, IsChecked: current);
-        }).ToArray();
-        return new("当前账户：" + ActiveName(snapshot), Children: accounts, Enabled: accounts.Length > 0);
-    }
+    internal static IReadOnlyList<GlassMenuItem> BuildMenu(bool online, bool busy, Action start, Action stop, Action openPanel, Action exit) =>
+        [new(busy ? "正在操作代理…" : online ? "代理在线 · 127.0.0.1:3210" : "代理离线", Enabled: false),
+         new("打开账户浮窗", openPanel, Enabled: !busy),
+         new(online ? "关闭代理" : "启动代理", busy ? null : online ? stop : start, Enabled: !busy),
+         new("退出代理托盘（代理继续运行）", exit)];
 
     private async void Run(Func<Task> action)
     {
@@ -112,31 +88,8 @@ internal sealed class ProxyTrayController : IDisposable
         busy = true; UpdateTip();
         try { await action(); }
         catch (OperationCanceledException) when (disposed) { }
-        catch { if (!disposed) tray.ShowBalloon("代理操作未完成", "请检查代理状态或在账户管理页处理；没有停止 Codex。操作未自动重试。"); }
+        catch { if (!disposed) tray.ShowBalloon("代理操作未完成", "请检查代理状态，账户与用量操作请从数字额度图标打开；操作未自动重试。"); }
         finally { busy = false; await RefreshAsync(); }
-    }
-    private async Task PostAsync(string path)
-    {
-        Authorize(); using var response = await http.PostAsJsonAsync(Endpoint + path, new { }, lifetime.Token); response.EnsureSuccessStatusCode();
-    }
-    private async Task ToggleSwitchAsync()
-    {
-        var current = await ReadStatusAsync();
-        using var response = await http.PostAsJsonAsync(Endpoint + "/settings", ToggleSettings(current), lifetime.Token);
-        response.EnsureSuccessStatusCode();
-    }
-    internal static PoolSettings ToggleSettings(JsonElement state)
-    {
-        var settings = state.GetProperty("settings").Deserialize<PoolSettings>(WebJson)!;
-        return settings with { AutoSwitch = !settings.AutoSwitch };
-    }
-    private async Task DashboardAsync()
-    {
-        Authorize(); using var response = await http.PostAsJsonAsync(Endpoint + "/dashboard/session", new { }, lifetime.Token); response.EnsureSuccessStatusCode();
-        using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(lifetime.Token));
-        if (!Uri.TryCreate(json.RootElement.GetProperty("url").GetString(), UriKind.Absolute, out var uri) || uri.Scheme != "http"
-            || uri.Host != "127.0.0.1" || uri.Port != 3210 || !uri.AbsolutePath.StartsWith("/dashboard/open/", StringComparison.Ordinal)) throw new InvalidOperationException();
-        Process.Start(new ProcessStartInfo(uri.AbsoluteUri) { UseShellExecute = true });
     }
     private async Task StopAsync()
     {

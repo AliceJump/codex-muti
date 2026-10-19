@@ -34,7 +34,7 @@
 | **Daemon** | 模型代理、账户、额度、本地 API、Dashboard 静态页 | `http://127.0.0.1:3210`（仅 loopback） |
 | **Dashboard** | 浏览器账户/额度/阈值控制台 | 同端口；`pool.ps1 dashboard` 建立短期安全会话 |
 | **Widget** | 可固定和拖动的托盘账户面板 | `pool.ps1 widget` / `Ctrl+Alt+W` |
-| **代理控制托盘** | 独立图标，启动／关闭代理、切换账户与自动切换 | `scripts/start-proxy-tray.ps1` |
+| **代理控制托盘** | 独立图标，启动／关闭代理、打开账户浮窗 | `scripts/start-proxy-tray.ps1` |
 
 Daemon 本身不依赖 Node。协议基准为官方 Codex CLI `0.157.1`（Node 22 仅用于验证脚本/MCP 夹具）。
 
@@ -144,7 +144,7 @@ pwsh -NoProfile -File .\scripts\deploy-local.ps1 -Target Core -Dashboard
 
 详见 [docs/desktop-widget.md](docs/desktop-widget.md)。
 
-独立代理控制图标见 [docs/proxy-tray.md](docs/proxy-tray.md)。原有面板退出只关界面；代理图标的“关闭代理”才停止服务，图标保留以便重新启动。
+独立代理控制图标见 [docs/proxy-tray.md](docs/proxy-tray.md)。代理图标负责服务状态与启停，数字额度图标负责账户、自动切换、额度、历史用量及浮窗。两者可以互相打开，已有客户端复用原实例；退出任一界面都保留代理服务，代理图标的“关闭代理”才停止服务。
 
 ### macOS 原型
 

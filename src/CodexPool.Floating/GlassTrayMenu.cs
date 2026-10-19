@@ -20,7 +20,7 @@ namespace CodexPool.Floating;
 internal sealed record GlassMenuItem(string Label, Action? Invoke = null, IReadOnlyList<GlassMenuItem>? Children = null, bool Enabled = true, bool IsChecked = false);
 
 /// <summary>
-/// 托盘右键菜单：WPF 玻璃弹出层，视觉与 FloatingWindow 一致；保留原有 6 项语义。
+/// 托盘右键菜单：WPF 玻璃弹出层，视觉与 FloatingWindow 一致。
 /// </summary>
 internal sealed class GlassTrayMenu : Window
 {
