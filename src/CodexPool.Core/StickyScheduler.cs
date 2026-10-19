@@ -16,7 +16,7 @@ public sealed class NoEligibleAccountException : Exception
 { public NoEligibleAccountException() : base("no_eligible_account") { } }
 
 /// <summary>One global sticky owner. Selection and activation are atomic; no session/agent state.</summary>
-public sealed class StickyScheduler(string? activeId, Action<string>? persistSelection = null)
+public sealed class StickyScheduler(string? activeId, Action<string>? persistSelection = null, Action<AccountSwitch>? recordSwitch = null)
 {
     private readonly object gate = new();
     private string? active = activeId;
@@ -32,7 +32,8 @@ public sealed class StickyScheduler(string? activeId, Action<string>? persistSel
             active = replacement; epoch++;
             if (replacement is not null)
             {
-                history.Enqueue(new(now, id, replacement, "account_deleted", epoch));
+                var change = new AccountSwitch(now, id, replacement, "account_deleted", epoch);
+                history.Enqueue(change); recordSwitch?.Invoke(change);
                 while (history.Count > 100) history.Dequeue();
             }
         }
@@ -102,6 +103,7 @@ public sealed class StickyScheduler(string? activeId, Action<string>? persistSel
         persistSelection?.Invoke(replacement);
         var old = active; active = replacement; epoch++;
         if (old == replacement) return;
-        history.Enqueue(new(now, old, replacement, reason, epoch)); while (history.Count > 100) history.Dequeue();
+        var change = new AccountSwitch(now, old, replacement, reason, epoch);
+        history.Enqueue(change); recordSwitch?.Invoke(change); while (history.Count > 100) history.Dequeue();
     }
 }

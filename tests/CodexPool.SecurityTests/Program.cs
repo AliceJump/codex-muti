@@ -48,6 +48,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Catalog client_version prefers Codex query and keeps visibility=list Sol slugs", CatalogClientVersion),
     ("Token statistics survive encrypted atomic persistence without touching credentials", UsagePersistence),
     ("Token statistics aggregate local days, accounts, models and unknown detail coverage", UsagePeriods),
+    ("Request history migrates legacy totals once, retains old days, paginates and recovers failed writes", () => HistoryTests.MigrationAndRetry(root)),
+    ("History endpoints filter inclusive local dates and reject malformed range and pagination", () => HistoryTests.Endpoints(root)),
     ("Concurrent token accounting is exact and failed writes retry without losing history", UsageConcurrency),
     ("Quota preserves arbitrary, absent, optional and scoped windows plus credit metadata", DynamicQuotaParser),
     ("Generic routing honors credits, explicit denial, budgets, model scope and stale snapshots", DynamicQuotaRouting),
@@ -122,22 +124,7 @@ async Task OfficialIngress()
     }
     Check(vault.Find(b.Id)?.RefreshToken == b.RefreshToken && vault.Find(a.Id)?.RefreshToken == "A-REFRESH-ROTATED");
 }
-Task UsagePersistence()
-{
-    var directory = Path.Combine(root, "usage-persistence"); var vault = Store("usage-persistence"); vault.Add(Account("A"));
-    var credentials = File.ReadAllBytes(Path.Combine(directory, "vault.dpapi"));
-    var usage = new UsageStatistics(directory); usage.Record("A", "gpt-6-luna", new(120, 30, 150, 80, 20)); usage.Flush();
-    var saved = File.ReadAllBytes(Path.Combine(directory, "usage.dpapi"));
-    Check(!Encoding.UTF8.GetString(saved).Contains("gpt-6-luna") && credentials.SequenceEqual(File.ReadAllBytes(Path.Combine(directory, "vault.dpapi"))));
-    var restored = new UsageStatistics(directory).View();
-    Check(restored.Persistence == "ready" && restored.AllTime.Totals == new TokenTotals(1, 1, 120, 30, 150, 80, 20, 1, 1));
-    Check(restored.AllTime.Accounts.Single().AccountId == "A" && restored.AllTime.Models.Single().Model == "gpt-6-luna");
-    saved[^1] ^= 255; File.WriteAllBytes(Path.Combine(directory, "usage.dpapi"), saved);
-    var damaged = new UsageStatistics(directory); Check(damaged.View().Persistence == "unavailable");
-    damaged.Record("A", "gpt-6-luna", new(120, 30, 150, null, null)); damaged.Flush();
-    Check(saved.SequenceEqual(File.ReadAllBytes(Path.Combine(directory, "usage.dpapi"))) && !Directory.EnumerateFiles(directory, "*.tmp").Any());
-    return Task.CompletedTask;
-}
+Task UsagePersistence() => HistoryTests.Persistence(root);
 Task UsagePeriods()
 {
     var directory = Path.Combine(root, "usage-periods"); Directory.CreateDirectory(directory);
@@ -155,7 +142,7 @@ Task UsagePeriods()
     view = stats.View(); Check(view.Last7Days.Totals.Requests == 1 && view.AllTime.Totals.Requests == 4);
     stats.Flush();
     var restored = new UsageStatistics(directory, zone, () => now).View();
-    Check(restored.AllTime.Totals == view.AllTime.Totals && restored.Daily.Sum(x => x.Totals.Requests) == 1);
+    Check(restored.AllTime.Totals == view.AllTime.Totals && restored.Daily.Sum(x => x.Totals.Requests) == 4 && restored.RetainedDays is null);
     return Task.CompletedTask;
 }
 Task UsageConcurrency()
@@ -165,10 +152,6 @@ Task UsageConcurrency()
     Parallel.For(0, 1000, i => stats.Record(i % 2 == 0 ? "A" : "B", "gpt-6-luna", i % 4 == 0 ? null : new(120, 30, 150, 80, 20)));
     var totals = stats.View().AllTime.Totals;
     Check(totals.Requests == 1000 && totals.ReportedRequests == 750 && totals.TotalTokens == 112500 && totals.CachedInputTokens == 60000);
-    // A failed atomic replacement retains pending memory and cleans the temporary file; the next flush can recover.
-    Directory.CreateDirectory(Path.Combine(directory, "usage.dpapi")); stats.Flush();
-    Check(stats.View().Persistence == "pending" && !Directory.EnumerateFiles(directory, "*.tmp").Any());
-    Directory.Delete(Path.Combine(directory, "usage.dpapi")); stats.Flush();
     Check(stats.View().Persistence == "ready" && new UsageStatistics(directory).View().AllTime.Totals == totals);
     return Task.CompletedTask;
 }
@@ -767,6 +750,7 @@ async Task LocalApi()
         using var codexUsage = await http.GetAsync("http://127.0.0.1:3210/api/codex/usage");
         Check(codexUsage.StatusCode == HttpStatusCode.Unauthorized);
         using var unauthorized = await http.GetAsync("http://127.0.0.1:3210/status"); Check(unauthorized.StatusCode == HttpStatusCode.Unauthorized);
+        using var unauthorizedRequests = await http.GetAsync("http://127.0.0.1:3210/requests"); Check(unauthorizedRequests.StatusCode == HttpStatusCode.Unauthorized);
         using var unauthorizedStatistics = await http.GetAsync("http://127.0.0.1:3210/statistics"); Check(unauthorizedStatistics.StatusCode == HttpStatusCode.Unauthorized);
         using var official = new HttpClient(new SocketsHttpHandler { UseProxy = false });
         official.DefaultRequestHeaders.Authorization = new("Bearer", "OFFICIAL-HTTP-CANARY");
@@ -778,11 +762,12 @@ async Task LocalApi()
         Check(officialControl.StatusCode == HttpStatusCode.Unauthorized);
         using var officialStatus = await official.GetAsync("http://127.0.0.1:3210/status");
         Check(officialStatus.StatusCode == HttpStatusCode.Unauthorized);
+        using var officialRequests = await official.GetAsync("http://127.0.0.1:3210/requests"); Check(officialRequests.StatusCode == HttpStatusCode.Unauthorized);
         using var officialStatistics = await official.GetAsync("http://127.0.0.1:3210/statistics"); Check(officialStatistics.StatusCode == HttpStatusCode.Unauthorized);
         http.DefaultRequestHeaders.Authorization = new("Bearer", vault.LocalKey);
         // Exercise the production backend dispatch without sending any credential upstream.
         using var backendControl = await http.GetAsync("http://127.0.0.1:3210/backend-api/wham/accounts/check");
-        Check(backendControl.StatusCode == HttpStatusCode.Forbidden);
+        Check(backendControl.StatusCode == HttpStatusCode.NotFound);
         using var backendOriginRequest = new HttpRequestMessage(HttpMethod.Get, "http://127.0.0.1:3210/backend-api/wham/accounts/check");
         backendOriginRequest.Headers.Add("Origin", "https://untrusted.invalid");
         using var backendOrigin = await http.SendAsync(backendOriginRequest); Check(backendOrigin.StatusCode == HttpStatusCode.Forbidden);
@@ -801,6 +786,7 @@ async Task LocalApi()
         using var redeemed = await browser.GetAsync(ticketUrl); Check(redeemed.StatusCode == HttpStatusCode.Redirect);
         using var replay = await browser.GetAsync(ticketUrl); Check(replay.StatusCode == HttpStatusCode.Unauthorized);
         using var browserStatus = await browser.GetAsync("http://127.0.0.1:3210/status"); Check(browserStatus.IsSuccessStatusCode);
+        using var browserRequests = await browser.GetAsync("http://127.0.0.1:3210/requests"); Check(browserRequests.IsSuccessStatusCode);
         using var browserStatistics = await browser.GetAsync("http://127.0.0.1:3210/statistics"); Check(browserStatistics.IsSuccessStatusCode);
         using var noCsrf = await browser.PostAsJsonAsync("http://127.0.0.1:3210/settings", new { autoSwitch = false, fiveHourThreshold = 90, weeklyThreshold = 90 });
         Check(noCsrf.StatusCode == HttpStatusCode.Forbidden);

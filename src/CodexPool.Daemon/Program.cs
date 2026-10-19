@@ -43,11 +43,10 @@ try
     var auth = new OAuth(http, vault); var relay = new ResponsesRelay(modelHttp);
     var nativeLogin = new NativeLogin(vault, auth, directory);
     var quota = new Quota(http, auth, vault);
-    var statistics = new UsageStatistics(directory);
-    var recent = new ConcurrentQueue<object>();
+    using var statistics = new UsageStatistics(directory);
     var inFlight = new ConcurrentDictionary<string, int>();
     var boundaryProbe = args.Contains("--live-boundary-probe", StringComparer.Ordinal);
-    var pool = new PoolRuntime(vault, auth, quota, boundaryProbe);
+    var pool = new PoolRuntime(vault, auth, quota, boundaryProbe, statistics.RecordSwitch);
     var browsers = new BrowserSessions(); var events = new StateEvents();
     var officialModelAuth = new OfficialModelAuth(Environment.GetEnvironmentVariable("CODEX_HOME")
         ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex"), vault);
@@ -102,9 +101,9 @@ try
     object Status() => new { activeAccountId = vault.ActiveId, stage = "acceptance", automaticSwitching = pool.Settings.AutoSwitch, settings = pool.Settings,
         boundaryProbe, distinctUsers = vault.DistinctUsers, nativeDistinctUsers = vault.NativeDistinctUsers, liveMigrationValidated = false, quotaSource = "per_registration", accounts = vault.Views(auth.Health), accountAvailability = pool.Availability(),
         nativeLoginAttempts = nativeLogin.PublicAttempts, usage = quota.Views, quotaRefreshErrors = quota.RefreshErrors, quotaSelectionError = pool.QuotaSelectionError,
-        tokenStatistics = statistics.View(), inFlightRequests = inFlight.ToArray(), recentRequests = recent.ToArray(), recentSwitches = pool.History };
+        tokenStatistics = statistics.View() with { Daily = [] }, inFlightRequests = inFlight.ToArray(), recentRequests = statistics.RecentRequests, recentSwitches = statistics.RecentSwitches };
     app.MapGet("/status", () => Status());
-    app.MapGet("/statistics", () => statistics.View());
+    UsageEndpoints.Map(app, statistics);
     app.MapGet("/events", (HttpContext context) => events.StreamAsync(context, Status));
     app.MapGet("/browser-session", (HttpContext context) => browsers.Find(context) is { } session
         ? Results.Ok(new { csrf = session.Csrf }) : Results.Unauthorized());
@@ -268,17 +267,17 @@ try
         headers.Remove("ChatGPT-Account-Id"); // Backend account routing is supplied only by validated credentials.
         // Global sticky selection is unchanged. This only decides whether account-bound turn state still belongs here.
         ResponsesHeaders.BindTurnState(headers, sessionOwners, account.AccountId);
-        var started = Stopwatch.GetTimestamp(); var requestId = Guid.NewGuid().ToString("N");
+        var started = Stopwatch.GetTimestamp();
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted); lifetime.CancelAfter(TimeSpan.FromMinutes(10));
-        RelayResult result;
+        RelayResult result = new(account.AccountId, 500, 0, false, "transport_error");
         var sink = new WebSink(context); var attemptedAccount = account.AccountId; var attemptCount = 0;
         var upstreamCompleted = false;
         ResponseTokenUsage? tokenUsage = null;
-        var rejections = new List<object>(); string? failoverReason = null;
+        string? failoverReason = null;
         try
         {
             result = await relay.ForwardAsync(body, "application/json", candidates, headers, sink, lifetime.Token,
-                (lease, reason) => { failoverReason = reason; rejections.Add(new { account = lease.AccountId, reason }); },
+                (_, reason) => failoverReason = reason,
                 (lease, entering) =>
                 {
                     if (entering) { attemptedAccount = lease.AccountId; attemptCount++; }
@@ -293,17 +292,11 @@ try
         finally
         {
             // Account admission/control persistence errors must not erase observed consumption.
-            if (attemptCount > 0) statistics.Record(attemptedAccount, modelValue.GetString()!, tokenUsage);
+            if (attemptCount > 0) statistics.RecordRequest(new(DateTimeOffset.UtcNow, attemptedAccount, requestedModel,
+                (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds, result.StatusCode, result.Outcome, attemptCount, tokenUsage));
         }
         pool.Complete(selection, result, failoverReason, requestedModel);
         ResponsesHeaders.Remember(headers, sessionOwners, result.AccountId);
-        recent.Enqueue(new { timestamp = DateTimeOffset.UtcNow, requestId, account = result.AccountId, model = modelValue.GetString(),
-            durationMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds, status = result.StatusCode, result.Outcome, result.Attempts,
-            failover = result.Attempts > 1, failoverReason, rejections, tokenUsage,
-            inputItemCount = input.GetArrayLength(), encryptedItemCount = input.EnumerateArray().Count(x => x.TryGetProperty("encrypted_content", out _)),
-            toolResultCount = input.EnumerateArray().Count(x => x.TryGetProperty("type", out var type) && type.GetString() == "function_call_output"),
-            upstreamHeaderNames = result.UpstreamHeaderNames, upstreamContentType = result.UpstreamContentType, payloadKind = result.PayloadKind, prefixShape = result.PrefixShape });
-        while (recent.Count > 100) recent.TryDequeue(out _);
         if (context.RequestAborted.IsCancellationRequested) return;
         if (result.Committed && result.Outcome is "stream_interrupted" or "request_deadline") context.Abort();
         else if (!result.Committed) { context.Response.StatusCode = result.StatusCode; await context.Response.WriteAsJsonAsync(new { error = new { type = "proxy_transport_error", code = result.Outcome, message = "模型传输未能完成。" } }); }

@@ -3,7 +3,7 @@ using CodexPool.Core;
 namespace CodexPool.Daemon;
 
 // Coordinates durable active selection with the in-memory epoch. It never owns Codex state.
-public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool boundaryProbe)
+public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool boundaryProbe, Action<AccountSwitch>? recordSwitch = null)
 {
     private readonly object gate = new();
     private long requestsStarted;
@@ -18,7 +18,7 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
             && x.CooldownErrorCode is null && x.CooldownObservedAt is null)
         .ToDictionary(x => x.Id, x => x.CooldownUntil!.Value, StringComparer.Ordinal);
     private readonly StickyScheduler scheduler = new(vault.ActiveId, id =>
-    { if (!vault.ActivateForProbe(id)) throw new NoEligibleAccountException(); });
+    { if (!vault.ActivateForProbe(id)) throw new NoEligibleAccountException(); }, recordSwitch);
     public PoolSettings Settings => boundaryProbe ? vault.Settings : vault.Settings with { AutoSwitch = false };
     public AccountSwitch[] History => scheduler.History;
     public string? Active => scheduler.Active;

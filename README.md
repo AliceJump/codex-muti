@@ -196,3 +196,7 @@ node scripts/phase0-live.mjs
 - [docs/desktop-widget.md](docs/desktop-widget.md) — Widget / Mac
 - [docs/model-errors.md](docs/model-errors.md) — 错误与账户池汇总
 - [docs/local-provider-acceptance.md](docs/local-provider-acceptance.md) — 本地 provider 验收
+
+用量与请求历史长期保存在本地，重启代理后仍可查看，详见 [用量统计](docs/usage-statistics.md)。
+
+旧版本如配置过本地 `chatgpt_base_url`，升级时请移除此项并重启 Codex，恢复使用官方 ChatGPT 后端；模型入口继续使用 `openai_base_url`。本地用量改写、3211 HTTPS 后端及客户端压缩桥接已移除。一键入口 `start-codex.cmd` 现在启动代理、托盘及官方 Codex Desktop。
