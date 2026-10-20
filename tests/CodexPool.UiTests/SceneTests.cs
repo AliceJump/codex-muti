@@ -218,6 +218,37 @@ internal static class SceneTests
             }
             finally { window.Close(); }
         });
+        run("Tray and launcher entrances grow from a short panel even with warmed account state", () =>
+        {
+            var window = new FloatingWindow(false) { Opacity = 0, ShowActivated = false };
+            try
+            {
+                window.InitializeHidden();
+                var scene = (PoolScene)window.FindName("Scene");
+                foreach (var mode in new[] { 0, 1, 2 })
+                foreach (var fromTray in new[] { false, true })
+                {
+                    window.Preview(State(), mode);
+                    if (fromTray) { window.HandleTrayPress(); window.HandleTrayClick(System.Drawing.Point.Empty); }
+                    else window.ShowFromLauncher();
+                    var initial = scene.SurfaceBounds;
+                    if (initial.Height >= scene.TargetSurfaceBounds.Height)
+                        throw new InvalidOperationException($"Entrance mode {mode}, tray={fromTray} opened at its final height");
+                    var hwnd = new WindowInteropHelper(window).Handle;
+                    Check(GetWindowRect(hwnd, out var native));
+                    Pump(100); var middle = scene.SurfaceBounds;
+                    Check(middle.Height > initial.Height && middle.Height < scene.TargetSurfaceBounds.Height);
+                    Check(middle.Width == initial.Width && (scene.AtTop ? middle.Top == initial.Top : middle.Bottom == initial.Bottom));
+                    window.Preview(State(count: 3), mode);
+                    Check(scene.SurfaceBounds == middle); // Polling must preserve the unfolding frame.
+                    Pump(1400);
+                    Check(!scene.Animating && scene.SurfaceBounds == scene.TargetSurfaceBounds);
+                    Check(GetWindowRect(hwnd, out var after) && after.Equals(native));
+                    window.Hide();
+                }
+            }
+            finally { window.Close(); }
+        });
         run("Tray deactivation and selection form one toggle without dropping rapid consecutive clicks", () =>
         {
             var window = new FloatingWindow(false) { Opacity = 0, ShowActivated = false };

@@ -220,6 +220,10 @@ public sealed class PoolScene : Canvas
     internal void PrepareEntrance()
     {
         if (IsVisible || highContrast || !SystemParameters.ClientAreaAnimation) return;
+        // Hidden state updates already settled the layout. Restore a short starting
+        // height so every opening unfolds, including a warmed tray client.
+        Shape.Value[1] = Math.Min(140, Shape.Target[1] / 2);
+        Shape.Velocity[1] = 0;
         entrance.Aim(0); entrance.Snap(); entrance.Aim(1); Present();
     }
     internal void BeginEntrance()

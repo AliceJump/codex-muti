@@ -404,20 +404,22 @@ public partial class FloatingWindow : Window
     {
         trayDismissTimer.Stop(); glassMenu?.Close();
         var close = !keyboard && trayClickCloses; trayClickCloses = false;
-        if (close) { SavePosition(); Hide(); } else ToggleVisibility(point);
+        if (close || IsVisible) { SavePosition(); Hide(); }
+        else ShowFromLauncher();
     }
-    private void ToggleVisibility(System.Drawing.Point? clicked = null) { if (IsVisible) { SavePosition(); Hide(); } else if (Pinned) ShowPinned(); else ShowFlyout(clicked); }
+    private void ToggleVisibility() { if (IsVisible) { SavePosition(); Hide(); } else ShowFromLauncher(); }
     private void ShowPinned()
     {
         _ = new WindowInteropHelper(this).EnsureHandle();
         var reveal = PrepareNativeEntrance();
         Show(); ClampPosition(); BeginNativeEntrance(reveal); Activate();
     }
-    private void ShowFlyout(System.Drawing.Point? clicked = null)
+    private void ShowFlyout()
     {
         _ = new WindowInteropHelper(this).EnsureHandle();
-        if (tray?.TryGetBounds(out var iconBounds) == true && (clicked is null || iconBounds.Contains(clicked.Value))) flyoutAnchor = iconBounds;
-        else flyoutAnchor = new System.Drawing.Rectangle(clicked ?? Forms.Cursor.Position, System.Drawing.Size.Empty);
+        // All entry points use the same icon anchor, independent of Explorer's click coordinates.
+        if (tray?.TryGetBounds(out var iconBounds) == true) flyoutAnchor = iconBounds;
+        else flyoutAnchor = new System.Drawing.Rectangle(Forms.Cursor.Position, System.Drawing.Size.Empty);
         flyoutScreen = Forms.Screen.FromPoint(new System.Drawing.Point(flyoutAnchor.Value.Left + flyoutAnchor.Value.Width / 2, flyoutAnchor.Value.Top + flyoutAnchor.Value.Height / 2));
         ConfigureHost(); PositionFlyout();
         var reveal = PrepareNativeEntrance();
