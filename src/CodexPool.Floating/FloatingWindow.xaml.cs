@@ -38,6 +38,8 @@ public partial class FloatingWindow : Window
     private string? lastActiveAccountId;
     private bool switchNotifyReady;
     private bool trayClickCloses;
+    private EventHandler? entranceReveal;
+    private bool nativeEntranceEnabled;
     private nint handle;
     internal bool Pinned => preferences.Pinned;
     public FloatingWindow() : this(true) { }
@@ -96,6 +98,7 @@ public partial class FloatingWindow : Window
             if (Pinned) RestorePosition(); _ = WatchAsync(); timer.Start();
         };
         Deactivated += (_, _) => DismissOnDeactivation(IsTrayPress());
+        IsVisibleChanged += (_, _) => { if (!IsVisible) CancelEntranceReveal(); };
         trayDismissTimer.Tick += (_, _) => CompleteTrayPress((GetAsyncKeyState(1) & 0x8000) != 0, IsActive);
         timer.Tick += (_, _) => { SavePosition(); if (snapshot is { } state) Render(state); };
         Closing += OnClosing;
@@ -407,7 +410,8 @@ public partial class FloatingWindow : Window
     private void ShowPinned()
     {
         _ = new WindowInteropHelper(this).EnsureHandle();
-        Scene.PrepareEntrance(); Show(); ClampPosition(); Scene.BeginEntrance(); Activate();
+        var reveal = PrepareNativeEntrance();
+        Show(); ClampPosition(); BeginNativeEntrance(reveal); Activate();
     }
     private void ShowFlyout(System.Drawing.Point? clicked = null)
     {
@@ -415,8 +419,49 @@ public partial class FloatingWindow : Window
         if (tray?.TryGetBounds(out var iconBounds) == true && (clicked is null || iconBounds.Contains(clicked.Value))) flyoutAnchor = iconBounds;
         else flyoutAnchor = new System.Drawing.Rectangle(clicked ?? Forms.Cursor.Position, System.Drawing.Size.Empty);
         flyoutScreen = Forms.Screen.FromPoint(new System.Drawing.Point(flyoutAnchor.Value.Left + flyoutAnchor.Value.Width / 2, flyoutAnchor.Value.Top + flyoutAnchor.Value.Height / 2));
-        ConfigureHost(); PositionFlyout(); Scene.PrepareEntrance(); Show(); Scene.BeginEntrance(); Activate();
-        if (snapshot is { } state) Render(state);
+        ConfigureHost(); PositionFlyout();
+        var reveal = PrepareNativeEntrance();
+        Show(); BeginNativeEntrance(reveal); Activate();
+    }
+    private bool PrepareNativeEntrance()
+    {
+        var opening = !IsVisible;
+        Scene.PrepareEntrance();
+        // Showing a reused layered HWND can expose its previous bitmap before
+        // WPF submits the new (transparent) entrance frame.
+        // Scene-only preview tests deliberately keep the host invisible. Once an
+        // actual host has entered, remember that across an interrupted open.
+        if (opening && Opacity > 0) nativeEntranceEnabled = true;
+        var nativeHost = startServices || nativeEntranceEnabled;
+        var guard = opening && Scene.EntranceProgress == 0 && nativeHost;
+        if (guard) Opacity = 0;
+        else if (opening && nativeHost) Opacity = 1; // No fade under high contrast / reduced motion.
+        return guard;
+    }
+    private void BeginNativeEntrance(bool guard)
+    {
+        if (!guard) { Scene.BeginEntrance(); return; }
+        CancelEntranceReveal();
+        var frames = 0;
+        EventHandler? onFrame = null;
+        onFrame = (_, _) =>
+        {
+            if (!IsVisible) { CancelEntranceReveal(); return; }
+            // Rendering fires before each frame is submitted. Leave one complete
+            // transparent host frame in place before revealing the native window.
+            if (++frames < 2) return;
+            CancelEntranceReveal();
+            Opacity = 1;
+            Scene.BeginEntrance();
+        };
+        entranceReveal = onFrame;
+        CompositionTarget.Rendering += onFrame;
+    }
+    private void CancelEntranceReveal()
+    {
+        if (entranceReveal is not { } handler) return;
+        CompositionTarget.Rendering -= handler;
+        entranceReveal = null;
     }
     private void ConfigureHost()
     {
@@ -496,7 +541,7 @@ public partial class FloatingWindow : Window
     private void OnClosing(object? sender, CancelEventArgs e)
     {
         SavePosition(); if (startServices && !exiting) { e.Cancel = true; Hide(); return; }
-        Scene.Stop(); lifetime.Cancel(); timer.Stop(); trayDismissTimer.Stop(); SystemEvents.UserPreferenceChanged -= PreferenceChanged;
+        CancelEntranceReveal(); Scene.Stop(); lifetime.Cancel(); timer.Stop(); trayDismissTimer.Stop(); SystemEvents.UserPreferenceChanged -= PreferenceChanged;
         _ = UnregisterHotKey(handle, 1);
         tray?.Dispose();
         http.Dispose();

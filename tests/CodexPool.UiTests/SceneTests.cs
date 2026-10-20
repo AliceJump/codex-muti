@@ -181,6 +181,39 @@ internal static class SceneTests
             }
             finally { window.Close(); }
         });
+        run("Native flyout host stays transparent until the replacement entrance frame is ready", () =>
+        {
+            // Unlike the scene-only tests, exercise the real Window.Opacity path.
+            var window = new FloatingWindow(false) { ShowActivated = false, Topmost = false };
+            try
+            {
+                var scene = (PoolScene)window.FindName("Scene");
+                window.ShowFromLauncher();
+                Check(window.IsVisible && window.Opacity == 0 && scene.EntranceProgress == 0 && !scene.Animating);
+                Pump(180);
+                Check(window.Opacity == 1 && scene.Animating && scene.EntranceProgress > 0);
+                Pump(1200);
+                window.Hide();
+
+                // A quick hide before the first rendered frame must cancel the old
+                // reveal and never let it surface a stale frame on the next open.
+                window.ShowFromLauncher();
+                Check(window.Opacity == 0);
+                window.Hide();
+                Pump(80);
+                Check(!window.IsVisible && window.Opacity == 0);
+                window.ShowFromLauncher();
+                Check(window.Opacity == 0 && scene.EntranceProgress == 0);
+                Pump(180);
+                Check(window.Opacity == 1 && scene.EntranceProgress > 0);
+                window.Hide();
+
+                scene.SetTheme(true, true);
+                window.ShowFromLauncher();
+                Check(window.Opacity == 1 && scene.EntranceProgress == 1 && !scene.Animating);
+            }
+            finally { window.Close(); }
+        });
         run("Tray deactivation and selection form one toggle without dropping rapid consecutive clicks", () =>
         {
             var window = new FloatingWindow(false) { Opacity = 0, ShowActivated = false };
