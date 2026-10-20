@@ -8,15 +8,15 @@
 
 ```powershell
 ./scripts/package-windows.ps1
-./scripts/test-package.ps1 -Archive .local/packages/CodexPool-0.1.1-win-x64.zip -ExpectedVersion 0.1.1
+./scripts/test-package.ps1 -Archive .local/packages/CodexPool-0.1.2-win-x64.zip -ExpectedVersion 0.1.2
 ```
 
 修改 `VERSION` 和 `docs/release-notes.md`，提交 PR 并合入 master，然后给该合入提交打相同版本标签：
 
 ```powershell
 git fetch origin
-git tag v0.1.1 origin/master
-git push origin v0.1.1
+git tag v0.1.2 origin/master
+git push origin v0.1.2
 ```
 
 包含连字符的版本自动标记为预发布，其余为正式版并设为 Latest。工作流先上传测试过的 ZIP 和校验和到草稿 Release，全部成功后再公开。发布作业只授予 `contents: write`，构建作业保持只读；Actions 固定到已核对的提交 SHA。所有运行保留可下载的 `windows-package` artifact 14 天。
