@@ -40,6 +40,7 @@ public partial class FloatingWindow : Window
     private bool trayClickCloses;
     private EventHandler? entranceReveal;
     private bool nativeEntranceEnabled;
+    private bool entranceCloaked;
     private nint handle;
     internal bool Pinned => preferences.Pinned;
     public FloatingWindow() : this(true) { }
@@ -98,7 +99,7 @@ public partial class FloatingWindow : Window
             if (Pinned) RestorePosition(); _ = WatchAsync(); timer.Start();
         };
         Deactivated += (_, _) => DismissOnDeactivation(IsTrayPress());
-        IsVisibleChanged += (_, _) => { if (!IsVisible) CancelEntranceReveal(); };
+        IsVisibleChanged += (_, _) => { if (!IsVisible) { CancelEntranceReveal(); SetEntranceCloak(false); } };
         trayDismissTimer.Tick += (_, _) => CompleteTrayPress((GetAsyncKeyState(1) & 0x8000) != 0, IsActive);
         timer.Tick += (_, _) => { SavePosition(); if (snapshot is { } state) Render(state); };
         Closing += OnClosing;
@@ -157,6 +158,7 @@ public partial class FloatingWindow : Window
     }
     internal void ShowFromLauncher()
     {
+        if (IsVisible) { Activate(); return; }
         if (Pinned) ShowPinned(); else ShowFlyout();
     }
     private void Render(JsonElement state)
@@ -436,7 +438,13 @@ public partial class FloatingWindow : Window
         if (opening && Opacity > 0) nativeEntranceEnabled = true;
         var nativeHost = startServices || nativeEntranceEnabled;
         var guard = opening && Scene.EntranceProgress == 0 && nativeHost;
-        if (guard) Opacity = 0;
+        if (guard)
+        {
+            // Window.Opacity is submitted by WPF asynchronously. Cloak the HWND
+            // before Show so DWM cannot expose the previously cached bitmap.
+            SetEntranceCloak(true);
+            Opacity = 0;
+        }
         else if (opening && nativeHost) Opacity = 1; // No fade under high contrast / reduced motion.
         return guard;
     }
@@ -445,19 +453,31 @@ public partial class FloatingWindow : Window
         if (!guard) { if (entranceReveal is null) Scene.BeginEntrance(); return; }
         CancelEntranceReveal();
         var frames = 0;
+        TimeSpan? lastFrame = null;
         EventHandler? onFrame = null;
-        onFrame = (_, _) =>
+        onFrame = (_, args) =>
         {
             if (!IsVisible) { CancelEntranceReveal(); return; }
+            var frameTime = ((RenderingEventArgs)args).RenderingTime;
+            if (lastFrame == frameTime) return;
+            lastFrame = frameTime;
             // Rendering fires before each frame is submitted. Leave one complete
             // transparent host frame in place before revealing the native window.
             if (++frames < 2) return;
             CancelEntranceReveal();
             Opacity = 1;
             Scene.BeginEntrance();
+            SetEntranceCloak(false);
         };
         entranceReveal = onFrame;
         CompositionTarget.Rendering += onFrame;
+    }
+    private void SetEntranceCloak(bool value)
+    {
+        if (entranceCloaked == value || handle == 0) return;
+        var cloak = value ? 1 : 0;
+        if (DwmSetWindowAttribute(handle, 13 /* DWMWA_CLOAK */, ref cloak, sizeof(int)) == 0)
+            entranceCloaked = value;
     }
     private void CancelEntranceReveal()
     {
@@ -543,7 +563,7 @@ public partial class FloatingWindow : Window
     private void OnClosing(object? sender, CancelEventArgs e)
     {
         SavePosition(); if (startServices && !exiting) { e.Cancel = true; Hide(); return; }
-        CancelEntranceReveal(); Scene.Stop(); lifetime.Cancel(); timer.Stop(); trayDismissTimer.Stop(); SystemEvents.UserPreferenceChanged -= PreferenceChanged;
+        CancelEntranceReveal(); SetEntranceCloak(false); Scene.Stop(); lifetime.Cancel(); timer.Stop(); trayDismissTimer.Stop(); SystemEvents.UserPreferenceChanged -= PreferenceChanged;
         _ = UnregisterHotKey(handle, 1);
         tray?.Dispose();
         http.Dispose();
@@ -564,6 +584,7 @@ public partial class FloatingWindow : Window
         finally { _ = DestroyIcon(iconHandle); }
     }
     [StructLayout(LayoutKind.Sequential)] private struct Rect { public int Left, Top, Right, Bottom; }
+    [DllImport("dwmapi.dll")] private static extern int DwmSetWindowAttribute(nint hwnd, int attribute, ref int value, int size);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool RegisterHotKey(nint hwnd, int id, uint modifiers, uint key);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool UnregisterHotKey(nint hwnd, int id);
     [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int key);

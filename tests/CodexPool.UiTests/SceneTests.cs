@@ -188,16 +188,40 @@ internal static class SceneTests
             try
             {
                 var scene = (PoolScene)window.FindName("Scene");
-                var highContrast = SystemParameters.HighContrast;
+                var highContrast = SystemParameters.HighContrast || !SystemParameters.ClientAreaAnimation;
                 window.ShowFromLauncher();
                 Check(window.IsVisible && window.Opacity == (highContrast ? 1 : 0)
                     && scene.EntranceProgress == (highContrast ? 1 : 0) && !scene.Animating);
+                var hwnd = new WindowInteropHelper(window).Handle;
+                Check(IsAppCloaked(hwnd) == !highContrast);
                 Pump(180);
-                Check(window.Opacity == 1 && (highContrast
+                Check(!IsAppCloaked(hwnd) && window.Opacity == 1 && (highContrast
                     ? scene.EntranceProgress == 1 && !scene.Animating
                     : scene.EntranceProgress > 0 && scene.Animating));
                 Pump(1200);
                 window.Hide();
+
+                // Reopen a populated, previously rendered native host through the
+                // actual tray selection handler, where the stale bitmap was seen.
+                foreach (var fromTray in new[] { true, false, true })
+                {
+                    window.Preview(State(), 0);
+                    if (fromTray) { window.HandleTrayPress(); window.HandleTrayClick(System.Drawing.Point.Empty); }
+                    else window.ShowFromLauncher();
+                    Check(window.Opacity == (highContrast ? 1 : 0));
+                    Check(IsAppCloaked(hwnd) == !highContrast);
+                    var shortHeight = scene.SurfaceBounds.Height;
+                    Check(highContrast || shortHeight < scene.TargetSurfaceBounds.Height);
+                    window.Preview(State(count: 3), 0);
+                    Check(scene.EntranceProgress == (highContrast ? 1 : 0) && !scene.Animating);
+                    Check(scene.SurfaceBounds.Height == shortHeight);
+                    Pump(180);
+                    Check(window.IsVisible && !IsAppCloaked(hwnd) && window.Opacity == 1 && scene.EntranceProgress > 0);
+                    Check(highContrast || scene.SurfaceBounds.Height > shortHeight);
+                    Pump(1200);
+                    Check(!scene.Animating && scene.SurfaceBounds == scene.TargetSurfaceBounds);
+                    window.Hide();
+                }
 
                 // A quick hide before the first rendered frame must cancel the old
                 // reveal and never let it surface a stale frame on the next open.
@@ -205,7 +229,7 @@ internal static class SceneTests
                 Check(window.Opacity == (highContrast ? 1 : 0));
                 window.Hide();
                 Pump(80);
-                Check(!window.IsVisible && window.Opacity == (highContrast ? 1 : 0));
+                Check(!window.IsVisible && !IsAppCloaked(hwnd) && window.Opacity == (highContrast ? 1 : 0));
                 window.ShowFromLauncher();
                 Check(window.Opacity == (highContrast ? 1 : 0) && scene.EntranceProgress == (highContrast ? 1 : 0));
                 Pump(180);
@@ -370,12 +394,18 @@ internal static class SceneTests
         var dpi = VisualTreeHelper.GetDpi(scene); var root = scene.SurfaceBounds;
         return new(native.Left + root.Left * dpi.DpiScaleX, native.Top + root.Top * dpi.DpiScaleY, root.Width * dpi.DpiScaleX, root.Height * dpi.DpiScaleY);
     }
+    private static bool IsAppCloaked(nint hwnd)
+    {
+        Check(DwmGetWindowAttribute(hwnd, 14 /* DWMWA_CLOAKED */, out var cloak, sizeof(int)) == 0);
+        return (cloak & 1 /* DWM_CLOAKED_APP */) != 0;
+    }
     private static void Pump(int milliseconds)
     {
         var frame = new DispatcherFrame(); var timer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(milliseconds) };
         timer.Tick += (_, _) => { timer.Stop(); frame.Continue = false; }; timer.Start(); Dispatcher.PushFrame(frame);
     }
     [StructLayout(LayoutKind.Sequential)] private struct WindowRect { internal int Left, Top, Right, Bottom; }
+    [DllImport("dwmapi.dll")] private static extern int DwmGetWindowAttribute(nint hwnd, int attribute, out int value, int size);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetWindowRect(nint window, out WindowRect rect);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool SetWindowPos(nint hwnd, nint after, int x, int y, int width, int height, uint flags);
 }

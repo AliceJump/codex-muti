@@ -55,6 +55,7 @@ public sealed class PoolScene : Canvas
     private int mode;
     private bool busy;
     private bool settingPin;
+    private bool entrancePending;
     private string status = "连接中", notice = "";
     private bool automatic;
     private int runningRequests;
@@ -224,15 +225,17 @@ public sealed class PoolScene : Canvas
         // height so every opening unfolds, including a warmed tray client.
         Shape.Value[1] = Math.Min(140, Shape.Target[1] / 2);
         Shape.Velocity[1] = 0;
+        entrancePending = true;
         entrance.Aim(0); entrance.Snap(); entrance.Aim(1); Present();
     }
     internal void BeginEntrance()
     {
+        entrancePending = false;
         if (IsVisible && !entrance.Settled) Start();
     }
     private void SnapMotion()
-    { Shape.Snap(); scrollMotion.Snap(); hostOffset.Snap(); entrance.Snap(); foreach (var c in cards.Values) c.Pose.Snap(); }
-    private void Start() { if (Animating) return; Animating = true; watch.Restart(); last = -1; renderingTime = default; CompositionTarget.Rendering += Tick; }
+    { entrancePending = false; Shape.Snap(); scrollMotion.Snap(); hostOffset.Snap(); entrance.Snap(); foreach (var c in cards.Values) c.Pose.Snap(); }
+    private void Start() { if (Animating || entrancePending) return; Animating = true; watch.Restart(); last = -1; renderingTime = default; CompositionTarget.Rendering += Tick; }
     internal void Stop() { Animating = false; CompositionTarget.Rendering -= Tick; }
     private void Tick(object? sender, EventArgs e)
     {
