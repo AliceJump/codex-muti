@@ -141,8 +141,8 @@ public sealed class PoolScene : Canvas
         foreach (var removed in cards.Keys.Where(id => !visible.Any(a => a.Id == id)).ToArray()) { hits.Children.Remove(cards[removed].Hit); cards.Remove(removed); }
         var budgetWidth = ActualWidth > 0 ? ActualWidth - 20 : 580;
         var capsuleWidth = visible.Sum(model => ChipWidth(model) + 8) + 8;
-        var width = Math.Min(budgetWidth, mode == 2 ? Math.Min(580, Math.Max(140, capsuleWidth)) : mode == 0 ? 432 : 284);
-        width = Math.Max(mode == 2 ? 112 : 240, width);
+        var width = Math.Min(budgetWidth, mode == 2 ? Math.Min(580, capsuleWidth) : mode == 0 ? 432 : 268);
+        width = Math.Max(mode == 2 ? 80 : 240, width);
         var header = mode == 2 ? 0 : 68;
         var y = (double)header; var capsuleX = 8d; var capsuleY = 8d;
         foreach (var model in visible)
@@ -161,8 +161,8 @@ public sealed class PoolScene : Canvas
             {
                 x = 16; cardY = y; w = width - 32;
                 h = mode == 0 ? 62 + model.Windows.Length * 42 + (ShowQuotaState(model) ? 23 : 0) + (model.Tokens.Length > 0 ? TokenSectionHeight : 0) + 22
-                    : Math.Max(58, Math.Max(1, model.Windows.Length) * 36 + 16) + (ShowQuotaState(model) && model.Windows.Length > 0 ? 20 : 0);
-                y += h + 12;
+                    : Math.Max(64, Math.Max(1, model.Windows.Length) * 32 + 16);
+                y += h + (mode == 0 ? 12 : 8);
             }
             if (!cards.TryGetValue(model.Id, out var card))
             {
@@ -193,9 +193,13 @@ public sealed class PoolScene : Canvas
         else Start();
         Present();
     }
-    private static double ChipWidth(PoolAccountView a)
+    private double ChipWidth(PoolAccountView a)
     {
-        return Math.Max(112, Math.Min(200, a.Name.Sum(c => c > 127 ? 13d : 7d) + 64));
+        var name = new FormattedText(a.Name, CultureInfo.CurrentUICulture, System.Windows.FlowDirection.LeftToRight,
+            new Typeface(new FontFamily("Segoe UI, Microsoft YaHei UI"), FontStyles.Normal, FontWeights.SemiBold, FontStretches.Normal),
+            13, Foreground, VisualTreeHelper.GetDpi(this).PixelsPerDip);
+        // 12px padding on either side, a 25px bar and an 8px name/bar gap.
+        return Math.Clamp(Math.Ceiling(name.WidthIncludingTrailingWhitespace) + 57, 64, 135);
     }
     private void UpdateTip() => ToolTip = notice.Length > 0 ? notice : automatic ? "自动切换已开启 · Ctrl+M 切换布局" : "自动切换已关闭 · Ctrl+M 切换布局";
     private static bool ShowQuotaState(PoolAccountView a) => a.Windows.Length == 0 || a.QuotaState.StartsWith("Credits", StringComparison.Ordinal);
@@ -325,15 +329,17 @@ public sealed class PoolScene : Canvas
                 P(c.Hit.IsKeyboardFocused ? fg : active ? accent : B("#338297B8"), c.Hit.IsKeyboardFocused ? 2 : 1), r, 14, 14);
             dc.PushClip(new RectangleGeometry(r, 14, 14));
             var compact = Math.Clamp(s[3] - s[4], 0, 1); var capsule = 1 - s[3];
-            var leftWidth = (r.Width - 26) * (1 - compact * .64) - capsule * 36;
-            var nameY = r.Y + 8 + capsule * 8 + compact * (Math.Max(8, (r.Height - 36) / 2) - 8);
+            var leftWidth = (r.Width - 26) * (1 - compact * .64) - capsule * 31;
+            var credits = a.QuotaState.StartsWith("Credits", StringComparison.Ordinal);
+            var identityHeight = credits ? 50 : 36;
+            var nameY = r.Y + 8 + capsule * 8 + compact * (Math.Max(8, (r.Height - identityHeight) / 2) - 8);
             Text(dc, a.Name, new(r.X + 12, nameY), 13, fg, 1, leftWidth, true, !Animating);
             var shortWindow = a.Windows.Where(w => w.Family == "codex" && w.Seconds != 604800)
                 .OrderByDescending(w => w.Kind is "5h" or "primary_window").ThenBy(w => w.Seconds ?? int.MaxValue).FirstOrDefault();
             var weeklyWindow = a.Windows.FirstOrDefault(w => w.Family == "codex" && w.Seconds == 604800);
             MiniBar(dc, shortWindow?.Remaining, new(r.Right - 37, r.Y + 16, 25, 4), capsule, accent);
             MiniBar(dc, weeklyWindow?.Remaining, new(r.Right - 37, r.Y + 29, 25, 4), capsule, B("#7FD4B4"));
-            Text(dc, a.Status, new(r.X + 12, nameY + 22), 10, muted, compact, leftWidth);
+            Text(dc, a.Status, new(r.X + 12, nameY + (credits ? 36 : 22)), 10, muted, compact, leftWidth, trim: !Animating);
             Text(dc, a.Plan + " · " + a.Status, new(r.X + 12, r.Y + 29), 10, muted, s[4], r.Width - 24);
             var rowY = 8 + s[4] * 46;
             var quotaX = r.X + 12 + compact * (r.Width * .38 + 22);
@@ -361,9 +367,17 @@ public sealed class PoolScene : Canvas
                 dc.DrawRoundedRectangle(B("#337C9ABB"), null, new(r.X + 12, r.Y + rowY + 21, Math.Max(1, r.Width - 24), 4), 2, 2);
                 if (w.Remaining is { } amount) dc.DrawRoundedRectangle(highContrast ? SystemColors.HighlightBrush : B(amount < 15 ? "#FFFF7069" : amount < 30 ? "#FFFFC65F" : "#FF7DB8FF"), null,
                     new(r.X + 12, r.Y + rowY + 21, Math.Max(0, r.Width - 24) * amount / 100, 4), 2, 2);
-                dc.Pop(); rowY += 36 + s[4] * 6;
+                dc.Pop(); rowY += 36 + s[4] * 6 - compact * 4;
             }
-            if (ShowQuotaState(a)) { Text(dc, a.QuotaState, new(quotaX, r.Y + rowY), 10, muted, s[3], r.Right - 12 - quotaX); rowY += 23; }
+            if (ShowQuotaState(a))
+            {
+                var move = credits ? compact : 0;
+                var stateX = quotaX + (r.X + 12 - quotaX) * move;
+                var stateY = r.Y + rowY + (nameY + 20 - r.Y - rowY) * move;
+                var stateWidth = (r.Right - 12 - quotaX) * (1 - move) + leftWidth * move;
+                Text(dc, a.QuotaState, new(stateX, stateY), 10, muted, s[3], stateWidth, trim: !Animating);
+                rowY += 23;
+            }
             if (a.Tokens.Length > 0)
             {
                 Text(dc, a.Tokens, new(r.X + 12, r.Y + rowY), 10, muted, s[4], r.Width - 24);
