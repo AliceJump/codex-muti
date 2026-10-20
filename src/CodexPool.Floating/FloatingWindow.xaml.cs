@@ -440,7 +440,7 @@ public partial class FloatingWindow : Window
     }
     private void BeginNativeEntrance(bool guard)
     {
-        if (!guard) { Scene.BeginEntrance(); return; }
+        if (!guard) { if (entranceReveal is null) Scene.BeginEntrance(); return; }
         CancelEntranceReveal();
         var frames = 0;
         EventHandler? onFrame = null;

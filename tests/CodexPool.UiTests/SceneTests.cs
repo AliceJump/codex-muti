@@ -188,22 +188,26 @@ internal static class SceneTests
             try
             {
                 var scene = (PoolScene)window.FindName("Scene");
+                var highContrast = SystemParameters.HighContrast;
                 window.ShowFromLauncher();
-                Check(window.IsVisible && window.Opacity == 0 && scene.EntranceProgress == 0 && !scene.Animating);
+                Check(window.IsVisible && window.Opacity == (highContrast ? 1 : 0)
+                    && scene.EntranceProgress == (highContrast ? 1 : 0) && !scene.Animating);
                 Pump(180);
-                Check(window.Opacity == 1 && scene.Animating && scene.EntranceProgress > 0);
+                Check(window.Opacity == 1 && (highContrast
+                    ? scene.EntranceProgress == 1 && !scene.Animating
+                    : scene.EntranceProgress > 0 && scene.Animating));
                 Pump(1200);
                 window.Hide();
 
                 // A quick hide before the first rendered frame must cancel the old
                 // reveal and never let it surface a stale frame on the next open.
                 window.ShowFromLauncher();
-                Check(window.Opacity == 0);
+                Check(window.Opacity == (highContrast ? 1 : 0));
                 window.Hide();
                 Pump(80);
-                Check(!window.IsVisible && window.Opacity == 0);
+                Check(!window.IsVisible && window.Opacity == (highContrast ? 1 : 0));
                 window.ShowFromLauncher();
-                Check(window.Opacity == 0 && scene.EntranceProgress == 0);
+                Check(window.Opacity == (highContrast ? 1 : 0) && scene.EntranceProgress == (highContrast ? 1 : 0));
                 Pump(180);
                 Check(window.Opacity == 1 && scene.EntranceProgress > 0);
                 window.Hide();
