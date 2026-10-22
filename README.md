@@ -42,7 +42,7 @@ Daemon 本身不依赖 Node。协议基准为官方 Codex CLI `0.157.1`（Node 2
 
 发行包从 [GitHub Releases](https://github.com/AliceJump/codex-muti/releases) 下载 Windows x64 ZIP，完整解压后双击 **CodexPool.exe**，无需安装 .NET 或 PowerShell 7。原生账户登录仍需要官方 Codex CLI；数据保存在 LocalAppData，升级与使用见 [发行包说明](docs/windows-package.md)。
 
-当前正式版：[v0.1.2](https://github.com/AliceJump/codex-muti/releases/tag/v0.1.2)。
+当前正式版：[v0.1.3](https://github.com/AliceJump/codex-muti/releases/tag/v0.1.3)。
 
 从源码运行需要 Windows 11、.NET 10 SDK 和官方 Codex CLI。
 
