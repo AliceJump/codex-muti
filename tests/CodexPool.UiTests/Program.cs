@@ -25,6 +25,29 @@ internal static class Program
             Console.WriteLine("PASS read-only Explorer check: account and proxy icons are both registered");
             return 0;
         }
+        if (args.Length == 1 && args[0] == "--tray-publish-check")
+        {
+            var failModify = false;
+            var duplicateRejected = false;
+            var updated = false;
+            bool Notify(uint operation, ref StableTrayIcon.NotifyData data)
+            {
+                if (operation == 1 && failModify) { failModify = false; return false; }
+                var accepted = Shell_NotifyIcon(operation, ref data);
+                if (operation == 0 && !accepted) duplicateRejected = true;
+                if (operation == 1 && accepted && data.Tip == "fixture sec 88%") updated = true;
+                return accepted;
+            }
+            using var tray = new StableTrayIcon(QuotaTrayIcon.Create(59), "fixture main 59%", Notify, Guid.NewGuid());
+            var previous = tray.Icon;
+            failModify = true;
+            Check(!tray.Update(QuotaTrayIcon.Create(88), "fixture sec 88%"));
+            previous.Dispose();
+            Check(duplicateRejected && tray.Update(tray.Icon, "fixture sec 88%") && updated);
+            Check(tray.TryGetBounds(out _));
+            Console.WriteLine("PASS live Explorer: duplicate add rejected after injected modify failure; identical update retry accepted");
+            return 0;
+        }
         if (args.Length == 2 && args[0] == "--proxy-owner-check")
         {
             var identity = ProxyDaemonProcess.Capture(args[1]);
@@ -202,6 +225,69 @@ internal static class Program
             Check(calls.Last().Operation == 2);
             Check(Marshal.SizeOf<StableTrayIcon.NotifyData>() == (IntPtr.Size == 8 ? 976 : 956));
         });
+        Run("Tray retries modify after transient failure while the existing icon rejects duplicate add", () =>
+        {
+            var operations = new List<uint>();
+            var fail = false;
+            bool Notify(uint operation, ref StableTrayIcon.NotifyData data)
+            {
+                operations.Add(operation);
+                return operations.Count == 1 || (!fail && operation != 0);
+            }
+            using var tray = new StableTrayIcon(QuotaTrayIcon.Create(59), "main", Notify);
+            fail = true;
+            tray.Text = "sec";
+            fail = false;
+            tray.Text = "sec";
+            Check(operations.Last() == 1);
+        });
+        Run("Tray recovers an existing GUID when initial add fails", () =>
+        {
+            var operations = new List<uint>();
+            bool Notify(uint operation, ref StableTrayIcon.NotifyData data)
+            {
+                operations.Add(operation);
+                return operation != 0;
+            }
+            using var tray = new StableTrayIcon(QuotaTrayIcon.Create(59), "main", Notify);
+            Check(operations.SequenceEqual(new uint[] { 0, 1, 4 }));
+        });
+        Run("Tray publishes icon and tooltip together and retries unchanged account status after failure", () =>
+        {
+            var fail = false;
+            var calls = new List<(uint Operation, string Tip)>();
+            bool Notify(uint operation, ref StableTrayIcon.NotifyData data)
+            {
+                calls.Add((operation, data.Tip));
+                return calls.Count == 1 || (!fail && operation != 0);
+            }
+            using var tray = new StableTrayIcon(QuotaTrayIcon.Create(59), "main", Notify);
+            var window = new FloatingWindow(false, previewTray: tray);
+            try
+            {
+                var node = System.Text.Json.Nodes.JsonNode.Parse(SceneTests.State().GetRawText())!;
+                node["accounts"]![0]!["name"] = "main";
+                node["accounts"]![1]!["name"] = "sec";
+                window.Preview(JsonSerializer.SerializeToElement(node), 0);
+                node["accounts"]![0]!["active"] = false;
+                node["accounts"]![1]!["active"] = true;
+                var state = JsonSerializer.SerializeToElement(node);
+                var before = calls.Count;
+                fail = true;
+                window.Preview(state, 0);
+                Check(calls.Count > before);
+                before = calls.Count;
+                window.Preview(state, 0);
+                Check(calls.Count > before);
+                fail = false;
+                before = calls.Count;
+                window.Preview(state, 0);
+                Check(calls.Count == before + 1 && calls.Last().Operation == 1 && calls.Last().Tip.StartsWith("sec\n"));
+                window.Preview(state, 0);
+                Check(calls.Count == before + 1);
+            }
+            finally { window.Close(); }
+        });
         Run("Flyout centers above icon and stays in the clicked monitor work area", () =>
         {
             var work = new System.Drawing.Rectangle(0, 0, 1920, 1040);
@@ -338,6 +424,9 @@ internal static class Program
     private static void Check(bool value) { if (!value) throw new InvalidOperationException(); }
     [StructLayout(LayoutKind.Sequential)] private struct PublishedIconIdentifier { public uint Size; public nint Window; public uint Id; public Guid Guid; }
     [DllImport("shell32.dll")] private static extern int Shell_NotifyIconGetRect(ref PublishedIconIdentifier identity, out WindowRect rect);
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool Shell_NotifyIcon(uint message, ref StableTrayIcon.NotifyData data);
     private static void Pump(int milliseconds)
     {
         var frame = new DispatcherFrame();

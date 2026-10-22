@@ -31,15 +31,17 @@ internal sealed class StableTrayIcon : Forms.NativeWindow, IDisposable
         CreateHandle(new Forms.CreateParams { Caption = "Codex Pool · Tray", ExStyle = 0x80 });
         Publish();
     }
-    public System.Drawing.Icon Icon
-    {
-        get => icon;
-        set { icon = value; Publish(); }
-    }
+    public System.Drawing.Icon Icon => icon;
     public string Text
     {
         get => text;
         set { text = value; Publish(); }
+    }
+    public bool Update(System.Drawing.Icon icon, string text)
+    {
+        this.icon = icon;
+        this.text = text;
+        return Publish();
     }
     private NotifyData Data(uint flags) => new()
     {
@@ -47,16 +49,23 @@ internal sealed class StableTrayIcon : Forms.NativeWindow, IDisposable
         Flags = flags | GuidFlag, CallbackMessage = Callback, Icon = icon.Handle,
         Tip = text.Length > 127 ? text[..127] : text, Info = "", InfoTitle = "", Guid = identity
     };
-    private void Publish()
+    private bool Publish()
     {
-        if (disposed) return;
+        if (disposed) return false;
         var data = Data(0x01 | 0x02 | 0x04 | 0x80); // message, icon, tooltip, show tooltip in v4
-        if (registered && notify(1, ref data)) return;
-        registered = false;
-        registered = notify(0, ref data);
-        if (!registered) return;
+        if (registered && notify(1, ref data)) return true;
+        // A failed modify does not prove that Explorer removed the old icon.
+        // Keep retrying modify if add also fails (for example, a duplicate GUID).
+        if (!notify(0, ref data))
+        {
+            // Initial add can also encounter an existing GUID. Recover it with
+            // modify instead of getting stuck in a loop of duplicate adds.
+            if (registered || !notify(1, ref data)) return false;
+        }
+        registered = true;
         data.Version = 4;
         _ = notify(4, ref data);
+        return true;
     }
     public void ShowBalloon(string title, string message)
     {
