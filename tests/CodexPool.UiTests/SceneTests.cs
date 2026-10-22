@@ -88,8 +88,8 @@ internal static class SceneTests
                     Check(GetWindowRect(hwnd, out var current) && current.Equals(initial));
                 }
                 Pump(1100); Check(!scene.Animating && sizes == 0);
-                window.Preview(State(count: 3), 1); Pump(1100); Check(accountButton.Height < fullHeight && scene.Shape.Value[0] == 284);
-                Check(accountButton.Height == 124); // Three quota rows share a compact identity column.
+                window.Preview(State(count: 3), 1); Pump(1100); Check(accountButton.Height < fullHeight && scene.Shape.Value[0] == 268);
+                Check(accountButton.Height == 112); // Three quota rows share a compact identity column.
                 Check(AutomationProperties.GetName(accountButton).Contains("备用账户1"));
                 Check(AutomationProperties.GetHelpText(accountButton).Contains("7h 66%"));
                 string? invoked = null; scene.ActivateAccount = id => invoked = id;
@@ -375,10 +375,20 @@ internal static class SceneTests
                 window.Preview(State(count: 0), 2); Pump(1100); Check(scene.AccountTargets.Count == 0 && scene.SurfaceBounds.Height >= 64);
                 var credits = JsonSerializer.SerializeToElement(new { updatedAt = DateTimeOffset.UtcNow, windows = Array.Empty<object>(), credits = new { hasCredits = true, unlimited = false, balance = 12.5 } });
                 Check(QuotaDisplay.State(credits) == "Credits 12.5");
+                window.Preview(State(), 1); Pump(1100);
+                var compactHeight = scene.AccountTargets["a0"].Height;
+                var preview = System.Text.Json.Nodes.JsonNode.Parse(State(count: 3).GetRawText())!;
+                preview["accounts"]![1]!["name"] = "主账户";
+                preview["accounts"]![2]!["name"] = "A";
+                foreach (var usage in preview["usage"]!.AsArray())
+                    usage!["credits"] = System.Text.Json.Nodes.JsonNode.Parse("{\"hasCredits\":true,\"unlimited\":false,\"balance\":12.5}");
+                var previewState = JsonSerializer.SerializeToElement(preview);
+                window.Preview(previewState, 1); Pump(1100);
+                Check(scene.AccountTargets["a0"].Height == compactHeight);
                 var output = System.IO.Path.GetFullPath(".research/integrated-scene"); System.IO.Directory.CreateDirectory(output);
                 foreach (var mode in new[] { 0, 1, 2 })
                 {
-                    window.Preview(State(), mode); Pump(1100); scene.UpdateLayout();
+                    window.Preview(previewState, mode); Pump(1100); scene.UpdateLayout();
                     var dpi = VisualTreeHelper.GetDpi(scene);
                     var bitmap = new RenderTargetBitmap((int)(scene.ActualWidth * dpi.DpiScaleX), (int)(scene.ActualHeight * dpi.DpiScaleY), dpi.PixelsPerInchX, dpi.PixelsPerInchY, PixelFormats.Pbgra32);
                     bitmap.Render(scene); var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap));

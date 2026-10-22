@@ -44,9 +44,10 @@ public partial class FloatingWindow : Window
     private nint handle;
     internal bool Pinned => preferences.Pinned;
     public FloatingWindow() : this(true) { }
-    internal FloatingWindow(bool startServices, HttpMessageHandler? handler = null, Func<string>? readKey = null)
+    internal FloatingWindow(bool startServices, HttpMessageHandler? handler = null, Func<string>? readKey = null, StableTrayIcon? previewTray = null)
     {
         this.startServices = startServices;
+        tray = previewTray;
         http = new LocalControlClient(directory, handler, readKey);
         InitializeComponent();
         if (startServices)
@@ -220,7 +221,9 @@ public partial class FloatingWindow : Window
         if (key == trayStateKey) return;
         var icon = QuotaTrayIcon.Create(remaining, exhausted);
         var previous = tray.Icon;
-        tray.Icon = icon; tray.Text = tooltip; trayStateKey = key;
+        // Commit the display key only after Explorer accepts both values. A failed
+        // publication must be retried even when the next status snapshot is equal.
+        trayStateKey = tray.Update(icon, tooltip) ? key : null;
         previous?.Dispose();
     }
     private static string ResetLeft(JsonElement window)
