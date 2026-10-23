@@ -50,6 +50,20 @@ internal static class SceneTests
             Check(PoolPresentation.Accounts(State(reset: true), true)[0].Windows[0].Remaining is null);
             Check(PoolPresentation.Accounts(State(), false).All(a => !a.Selectable && a.Status == "离线"));
         });
+        run("Subscription deadline uses device local time and keeps absent or invalid dates unknown", () =>
+        {
+            var state = System.Text.Json.Nodes.JsonNode.Parse(State().GetRawText())!;
+            var until = DateTimeOffset.Parse("2030-01-02T23:04:05Z");
+            state["accounts"]![0]!["subscriptionActiveUntil"] = until.ToString("O");
+            var account = PoolPresentation.Accounts(JsonSerializer.SerializeToElement(state), true)[0];
+            Check(account.SubscriptionDeadline == "订阅截止 " + until.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss '(UTC'zzz')'", System.Globalization.CultureInfo.InvariantCulture));
+            Check(account.Description.Contains(account.SubscriptionDeadline));
+            Check(PoolPresentation.Accounts(State(), true)[0].SubscriptionDeadline == "订阅截止时间未知");
+            state["accounts"]![0]!["subscriptionActiveUntil"] = "invalid";
+            Check(PoolPresentation.Accounts(JsonSerializer.SerializeToElement(state), true)[0].SubscriptionDeadline == "订阅截止时间未知");
+            state["accounts"]![0]!["subscriptionActiveUntil"] = 123;
+            Check(PoolPresentation.Accounts(JsonSerializer.SerializeToElement(state), true)[0].SubscriptionDeadline == "订阅截止时间未知");
+        });
         run("Token cache bars use each account independently and keep missing cache coverage unknown", () =>
         {
             var accounts = PoolPresentation.Accounts(State(), true);
@@ -380,6 +394,7 @@ internal static class SceneTests
                 var preview = System.Text.Json.Nodes.JsonNode.Parse(State(count: 3).GetRawText())!;
                 preview["accounts"]![1]!["name"] = "主账户";
                 preview["accounts"]![2]!["name"] = "A";
+                preview["accounts"]![1]!["subscriptionActiveUntil"] = "2030-01-02T03:04:05Z";
                 foreach (var usage in preview["usage"]!.AsArray())
                     usage!["credits"] = System.Text.Json.Nodes.JsonNode.Parse("{\"hasCredits\":true,\"unlimited\":false,\"balance\":12.5}");
                 var previewState = JsonSerializer.SerializeToElement(preview);

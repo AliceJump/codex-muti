@@ -142,6 +142,7 @@ pwsh -NoProfile -File .\scripts\deploy-local.ps1 -Target Core -Dashboard
 ### Windows Widget
 
 - Widget：固定透明宿主，完整/紧凑/胶囊连续形变；点击标题栏图钉保持置顶并允许拖动，取消固定后恢复失焦收起。固定状态和位置随布局、主题保存。当前使用透明着色材质，真实 Acrylic 模糊留待独立验收。
+- 完整账户卡片与 Dashboard 显示订阅截止时间（含时区偏移），按查看设备的本地时区转换。截止时间读取已保存 ID token 的 `chatgpt_subscription_active_until`，随登录与令牌刷新更新；上游未提供时显示“订阅截止时间未知”。
 - 只有一个托盘面板实例；不再提供独立悬浮窗入口。× / Alt+F4 只隐藏面板，托盘菜单“退出托盘面板”退出 UI，Daemon 继续运行。胶囊态可通过托盘菜单固定/取消固定。
 - 使用小组件快捷方式或 `open-widget.ps1` 启动；没有代理时可自动拉起 Daemon，完整真实验收仍以报告为准。
 - 托盘右键玻璃菜单（与面板同主题）已在 [PR #8](https://github.com/AliceJump/codex-muti/pull/8) 合入。
