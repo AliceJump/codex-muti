@@ -19,7 +19,9 @@ internal sealed record PoolAccountView(string Id, string Name, bool Active, bool
 {
     internal string TokenDetails { get; init; } = "";
     internal TokenCacheSplit? TokenCache { get; init; }
+    internal string SubscriptionDeadline { get; init; } = "订阅截止时间未知";
     internal string Description => Name + " · " + Plan + " · " + Status + "\n"
+        + SubscriptionDeadline + "\n"
         + string.Join("\n", Windows.Select(w => w.Label + " " + QuotaDisplay.Percent(w) + " · " + PoolPresentation.Reset(w)))
         + "\n" + QuotaState + "\n" + Tokens + (TokenDetails.Length > 0 ? "\n" + TokenDetails : "") + "\n" + Updated;
 }
@@ -73,11 +75,16 @@ internal static class PoolPresentation
                 tokenDetails += "\n累计每次请求的上下文与输出，不代表套餐额度扣减或费用。";
             }
             return new PoolAccountView(id, String(a, "name") ?? "账户", active, enabled, selectable && connected,
-                label, String(a, "plan") ?? "Plan 待确认", QuotaDisplay.Windows(quota), QuotaDisplay.State(quota), tokens, updated) { TokenDetails = tokenDetails, TokenCache = tokenCache };
+                label, String(a, "plan") ?? "Plan 待确认", QuotaDisplay.Windows(quota), QuotaDisplay.State(quota), tokens, updated)
+                { TokenDetails = tokenDetails, TokenCache = tokenCache, SubscriptionDeadline = SubscriptionDeadline(a) };
         }).ToArray();
     }
     internal static string? String(JsonElement element, string field) => element.ValueKind == JsonValueKind.Object
         && element.TryGetProperty(field, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+    internal static string SubscriptionDeadline(JsonElement account) => account.TryGetProperty("subscriptionActiveUntil", out var value)
+        && value.ValueKind == JsonValueKind.String && value.TryGetDateTimeOffset(out var until)
+        ? "订阅截止 " + until.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss '(UTC'zzz')'", System.Globalization.CultureInfo.InvariantCulture)
+        : "订阅截止时间未知";
     internal static string Reset(DisplayQuotaWindow window)
     {
         if (window.Remaining is null) return "额度待确认";

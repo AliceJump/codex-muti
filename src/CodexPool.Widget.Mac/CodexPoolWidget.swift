@@ -36,6 +36,15 @@ struct PoolAccount: Decodable, Identifiable {
     let state: String
     let plan: String?
     let auth: String
+    var subscriptionActiveUntil: Date? = nil
+    var subscriptionDeadline: String {
+        guard let until = subscriptionActiveUntil else { return "订阅截止时间未知" }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.timeZone = .autoupdatingCurrent
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss '('ZZZZ')'"
+        return "订阅截止 " + formatter.string(from: until)
+    }
     var selectable: Bool {
         enabled && !paused && !drain && state != "cooldown" && auth == "ready"
     }
@@ -248,6 +257,7 @@ struct WidgetView: View {
                 }
             }.buttonStyle(.plain).disabled(store.preview || !store.connected || store.busy || !account.selectable)
             if !compact { Text(account.plan ?? "Plan 待确认").font(.caption2).foregroundStyle(.secondary) }
+            if !compact { Text(account.subscriptionDeadline).font(.caption2).foregroundStyle(.secondary) }
             ForEach(store.status.usage.first(where: { $0.accountId == account.id })?.windows ?? []) { window in
                 VStack(spacing: 4) {
                     HStack {

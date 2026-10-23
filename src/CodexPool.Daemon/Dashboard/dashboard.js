@@ -46,6 +46,10 @@ function patchChildren(parent, children) {
 }
 function notice(message) { setText('notice',message); $('notice').hidden=!message; }
 function reset(at) { const minutes=Math.max(0,Math.ceil((Date.parse(at)-Date.now())/60000)); return minutes>=1440?`${Math.floor(minutes/1440)}d ${Math.floor(minutes%1440/60)}h`:minutes>=60?`${Math.floor(minutes/60)}h ${minutes%60}m`:`${minutes}m`; }
+function subscriptionDeadline(value) {
+  const at=typeof value==='string'?new Date(value):null;
+  return at&&Number.isFinite(at.getTime())?`订阅截止 ${at.toLocaleString('zh-CN',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23',timeZoneName:'longOffset'})}`:'订阅截止时间未知';
+}
 function remainingTone(remaining){ if(remaining==null||!Number.isFinite(remaining)) return ''; if(remaining<15) return 'danger'; if(remaining<30) return 'warn'; return 'ok'; }
 async function api(path, data) { const response=await fetch(path,{method:data===undefined?'GET':'POST',headers:data===undefined?{}:{'Content-Type':'application/json','X-Codex-Pool-CSRF':csrf},body:data===undefined?undefined:JSON.stringify(data)}); if(!response.ok){let code='操作未完成';try{code=(await response.json()).error?.code||code;}catch{}throw new Error(code);} return response.json(); }
 async function action(path, data={}, success='已应用，下一个模型请求使用更新后的账户设置。') { if(busy)return false; busy=true; try{await api(path,data);notice(success);render(await api('/status'));return true;}catch(e){notice(e.message); if(state)render(state);return false;}finally{busy=false;} }
@@ -93,6 +97,7 @@ function render(s) {
     const canActivate=a.enabled&&!a.paused&&!a.drain&&a.state!=='cooldown'&&a.auth!=='reauth_required'&&a.auth!=='refresh_pending';
     if(a.active)card.append(keyed(text('span','✓','check-mark'),'selected'));
     head.append(text('strong',a.name),text('span',states[a.state]||a.state,'badge'));card.append(head);const meta=keyed(text('div','','meta'),'meta');meta.append(text('span',a.plan||'Plan 待确认'),text('span',`授权：${a.auth}`));card.append(meta);
+    card.append(keyed(text('div',subscriptionDeadline(a.subscriptionActiveUntil),'account-tokens'),'subscription'));
     if(canActivate&&!a.active){card.classList.add('selectable');card.onclick=e=>{if(e.target.closest('.controls')||e.target.closest('button'))return;action(`/accounts/${a.id}/activate`);};}
     const access=s.accountAvailability?.find(x=>x.accountId===a.id);if(access?.reason)card.append(keyed(text('small',`模型访问：${availabilityLabel(access)}`),'access'));
     if(a.cooldownUntil&&Date.parse(a.cooldownUntil)>Date.now())card.append(keyed(text('small',`冷却剩余 ${reset(a.cooldownUntil)}`),'cooldown'));

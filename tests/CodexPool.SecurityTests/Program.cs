@@ -32,6 +32,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Account controls preserve credentials and cannot activate excluded accounts", AccountControls),
     ("Crash during rotation leaves durable refresh_pending and never reuses token", CrashRefresh),
     ("Native registrations sharing official client ID remain separate", NativeRegistrations),
+    ("Subscription deadline uses only optional ID-token metadata and follows refresh", SubscriptionDeadline),
     ("Quota windows use durations and reject malformed percentages", QuotaParser),
     ("Durable quota, scheduler and manual epoch survive control races", PoolRouting),
     ("Native JSON refresh isolates A/B and accepts omitted replacement refresh token", NativeRefresh),
@@ -383,6 +384,44 @@ async Task RefreshTimeoutStages()
         Check(issuer.RefreshCalls == (stage == "validation" ? 1 : 0));
         await Rejected(() => auth.ReadyAsync("A", default)); Check(started == 1);
     }
+}
+async Task SubscriptionDeadline()
+{
+    using var issuer = new FakeIssuer(); using var http = new HttpClient(issuer);
+    var until = DateTimeOffset.Parse("2030-01-02T03:04:05Z");
+    string Token(object? value) => issuer.Token(NativeLogin.NativeClientId, "sub-A", null,
+        nativeMetadata: JsonSerializer.SerializeToElement(new Dictionary<string, object?>
+            { ["chatgpt_account_id"] = "backend-A", ["chatgpt_subscription_active_until"] = value }));
+    foreach (var value in new object[] { "2030-01-02T11:04:05+08:00", until.ToUnixTimeSeconds(), until.ToUnixTimeSeconds().ToString() })
+        Check(SubscriptionExpiry.FromIdToken(Token(value)) == until);
+    foreach (var value in new object?[] { null, "", "bad", "2030-01-02T03:04:05", true, new { secret = "CANARY" }, long.MaxValue, -1, 1.5 })
+        Check(SubscriptionExpiry.FromIdToken(Token(value)) is null);
+    Check(SubscriptionExpiry.FromIdToken("bad-jwt") is null);
+    Check(SubscriptionExpiry.FromIdToken(issuer.Token(NativeLogin.NativeClientId, "sub-A", null)) is null);
+    var past = DateTimeOffset.Parse("2020-01-01T00:00:00Z");
+    Check(SubscriptionExpiry.FromIdToken(Token(past.ToUnixTimeSeconds())) == past);
+
+    var vault = Store("subscription-deadline"); var account = Account("A");
+    account.ProviderKind = "native"; account.BackendAccountId = "backend-A";
+    account = new AccountCredential { Id = account.Id, Name = account.Name, Subject = account.Subject,
+        ClientId = NativeLogin.NativeClientId, ProviderKind = account.ProviderKind, BackendAccountId = account.BackendAccountId,
+        AccessToken = account.AccessToken, RefreshToken = account.RefreshToken, IdToken = Token(until.ToUnixTimeSeconds()),
+        Scope = account.Scope, ExpiresAt = DateTimeOffset.UtcNow.AddHours(1), UpdatedAt = DateTimeOffset.UtcNow };
+    vault.Add(account);
+    var restored = new Vault(Path.Combine(root, "subscription-deadline"));
+    var view = JsonSerializer.SerializeToElement(restored.PublicAccounts[0]);
+    Check(view.GetProperty("subscriptionActiveUntil").GetDateTimeOffset() == until);
+    Check(!view.GetRawText().Contains("CANARY") && !view.TryGetProperty("idToken", out _) && !view.TryGetProperty("expiresAt", out _));
+
+    var next = until.AddMonths(1);
+    issuer.NativeResponseBody = JsonSerializer.Serialize(new { access_token = issuer.Token("native-access", "sub-A", null),
+        id_token = Token(next.ToUnixTimeSeconds()) });
+    await new OAuth(http, vault).ReadyAsync("A", default, forceRefresh: true);
+    Check(JsonSerializer.SerializeToElement(vault.PublicAccounts[0]).GetProperty("subscriptionActiveUntil").GetDateTimeOffset() == next);
+    issuer.NativeResponseBody = JsonSerializer.Serialize(new { access_token = issuer.Token("native-access", "sub-A", null),
+        id_token = issuer.Token(NativeLogin.NativeClientId, "sub-A", null, nativeAccountId: "backend-A") });
+    await new OAuth(http, vault).ReadyAsync("A", default, forceRefresh: true);
+    Check(JsonSerializer.SerializeToElement(vault.PublicAccounts[0]).GetProperty("subscriptionActiveUntil").ValueKind == JsonValueKind.Null);
 }
 async Task NativeMalformedRefresh()
 {

@@ -37,7 +37,8 @@ public sealed class AccountCredential
     public object PublicView(bool active, string? authHealth = null, QuotaSnapshot? usage = null) => new { id = Id, name = Name, active,
         enabled = Enabled, paused = Paused, drain = Draining, cooldownUntil = CooldownUntil,
         state = !Enabled ? "disabled" : Paused ? "paused" : Draining ? "draining" : CooldownUntil > DateTimeOffset.UtcNow ? "cooldown" : active ? "active" : "standby",
-        provider = ProviderKind, plan = Plan, auth = authHealth ?? (AuthStatus != "ready" ? AuthStatus : ExpiresAt > DateTimeOffset.UtcNow ? "ready" : "refresh_needed"), quota = usage, quotaUpdatedAt = usage?.UpdatedAt, updatedAt = UpdatedAt };
+        provider = ProviderKind, plan = Plan, subscriptionActiveUntil = SubscriptionExpiry.FromIdToken(IdToken),
+        auth = authHealth ?? (AuthStatus != "ready" ? AuthStatus : ExpiresAt > DateTimeOffset.UtcNow ? "ready" : "refresh_needed"), quota = usage, quotaUpdatedAt = usage?.UpdatedAt, updatedAt = UpdatedAt };
 }
 
 public sealed class VaultDocument

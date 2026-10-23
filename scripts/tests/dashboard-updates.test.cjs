@@ -61,6 +61,30 @@ test('identical state causes no account DOM mutations; changes preserve card, bu
         observer.disconnect();
     } finally { h.dom.window.close(); }
 });
+test('subscription cutoff follows browser time zone including DST and unknown metadata stays unknown', async () => {
+    const h = await setup(), { w, api } = h;
+    try {
+        const s = state();
+        // Override the browser's local formatter zone to differ from the daemon/host.
+        const original = w.Date.prototype.toLocaleString;
+        let zone = 'America/Los_Angeles';
+        w.Date.prototype.toLocaleString = function(locale, options) { return original.call(this, locale, { ...options, timeZone: zone }); };
+        s.accounts[0].subscriptionActiveUntil = '2030-01-02T03:04:05Z';
+        api.render(s);
+        const deadline = w.document.querySelector('#accounts [data-key="subscription"]');
+        assert.match(deadline.textContent, /2030\/01\/01/); assert.match(deadline.textContent, /19:04:05/); assert.match(deadline.textContent, /GMT-08:00/);
+        s.accounts[0].subscriptionActiveUntil = '2030-07-02T03:04:05Z'; api.render(s);
+        assert.equal(w.document.querySelector('#accounts [data-key="subscription"]'), deadline);
+        assert.match(deadline.textContent, /2030\/07\/01/); assert.match(deadline.textContent, /20:04:05/); assert.match(deadline.textContent, /GMT-07:00/);
+        zone = 'Asia/Shanghai'; api.render(s);
+        assert.match(deadline.textContent, /2030\/07\/02/); assert.match(deadline.textContent, /11:04:05/); assert.match(deadline.textContent, /GMT\+08:00/);
+        for (const value of [undefined, null, '', 'bad', 0]) {
+            s.accounts[0].subscriptionActiveUntil = value; api.render(s);
+            assert.equal(deadline.textContent, '订阅截止时间未知');
+        }
+    } finally { h.dom.window.close(); }
+});
+
 test('statistics update values in existing rows and preserve edited form and scroll', async () => {
     const h = await setup(), { w, api } = h;
     try {

@@ -160,7 +160,7 @@ public sealed class PoolScene : Canvas
             else
             {
                 x = 16; cardY = y; w = width - 32;
-                h = mode == 0 ? 62 + model.Windows.Length * 42 + (ShowQuotaState(model) ? 23 : 0) + (model.Tokens.Length > 0 ? TokenSectionHeight : 0) + 22
+                h = mode == 0 ? 80 + model.Windows.Length * 42 + (ShowQuotaState(model) ? 23 : 0) + (model.Tokens.Length > 0 ? TokenSectionHeight : 0) + 22
                     : Math.Max(64, Math.Max(1, model.Windows.Length) * 32 + 16);
                 y += h + (mode == 0 ? 12 : 8);
             }
@@ -341,7 +341,8 @@ public sealed class PoolScene : Canvas
             MiniBar(dc, weeklyWindow?.Remaining, new(r.Right - 37, r.Y + 29, 25, 4), capsule, B("#7FD4B4"));
             Text(dc, a.Status, new(r.X + 12, nameY + (credits ? 36 : 22)), 10, muted, compact, leftWidth, trim: !Animating);
             Text(dc, a.Plan + " · " + a.Status, new(r.X + 12, r.Y + 29), 10, muted, s[4], r.Width - 24);
-            var rowY = 8 + s[4] * 46;
+            Text(dc, a.SubscriptionDeadline, new(r.X + 12, r.Y + 46), 10, muted, s[4], r.Width - 24, trim: !Animating);
+            var rowY = 8 + s[4] * 64;
             var quotaX = r.X + 12 + compact * (r.Width * .38 + 22);
             foreach (var w in a.Windows)
             {
