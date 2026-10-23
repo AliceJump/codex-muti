@@ -1,4 +1,4 @@
-# Codex Pool Windows 0.1.1
+# Codex Pool Windows 0.1.4
 
 将整个 ZIP 解压到固定文件夹，双击 **CodexPool.exe**。软件会打开 Dashboard，并添加数字额度和代理控制两个托盘图标，不会自动展开账户卡片或右键菜单。单击数字图标可显示账户浮窗。不需要安装 .NET、PowerShell 7 或以管理员身份运行，支持 Windows 11 x64。
 
