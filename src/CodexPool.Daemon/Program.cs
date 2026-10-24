@@ -69,7 +69,7 @@ try
         if (clientKey && !ModelAccess.IsModelRoute(context.Request.Method, path))
         { context.Response.StatusCode = 403; return; }
         context.Items["modelClient"] = clientKey;
-        var modelBearer = !bearer && await officialModelAuth.AcceptsAsync(context.Request.Method, path,
+        var modelBearer = !bearer && !clientKey && await officialModelAuth.AcceptsAsync(context.Request.Method, path,
             context.Request.Headers.Authorization.ToString(), context.RequestAborted);
         var session = browsers.Find(context);
         var mutating = context.Request.Method is not ("GET" or "HEAD");
@@ -84,7 +84,7 @@ try
         catch (AuthFailure ex)
         {
             if (context.Response.HasStarted) context.Abort();
-            else if (path.StartsWith("/v1/", StringComparison.Ordinal))
+            else if (path.StartsWith("/v1/", StringComparison.Ordinal) || path.StartsWith("/api/v1/", StringComparison.Ordinal))
             {
                 var error = PoolAvailability.Auth(ex.Code); context.Response.StatusCode = error.Status; context.Response.ContentType = "application/json";
                 if (error.RetryAfter is not null) context.Response.Headers["Retry-After"] = error.RetryAfter;
@@ -98,6 +98,8 @@ try
         { if (!context.Response.HasStarted) { context.Response.StatusCode = 400; await context.Response.WriteAsJsonAsync(new { error = new { code = "invalid_json" } }); } else context.Abort(); }
         catch (RequestBodyFailure ex)
         { if (!context.Response.HasStarted) { context.Response.StatusCode = ex.Status; await context.Response.WriteAsJsonAsync(new { error = new { code = ex.Code } }); } else context.Abort(); }
+        catch (CompatibilityFailure ex)
+        { if (!context.Response.HasStarted) { context.Response.StatusCode = 400; await context.Response.WriteAsJsonAsync(new { error = new { type = "invalid_request_error", code = ex.Code, message = "请求格式或参数暂不支持，请查阅机器人接入说明。" } }); } else context.Abort(); }
         catch
         { if (!context.Response.HasStarted) { context.Response.StatusCode = 500; await context.Response.WriteAsJsonAsync(new { error = new { code = "internal_error" } }); } else context.Abort(); }
     });
@@ -175,6 +177,8 @@ try
             using var json = JsonDocument.Parse(content.ToArray());
             if (json.RootElement.ValueKind != JsonValueKind.Object || !json.RootElement.TryGetProperty("models", out var models) || models.ValueKind != JsonValueKind.Array)
                 throw new AuthFailure("unrecognized_model_catalog");
+            if (context.Request.Path == "/api/v1/models" || context.Items["modelClient"] is true)
+                return Results.Json(CompatibilityCatalog.Models(json.RootElement));
             if (context.Request.Path == "/v1/models") return Results.Json(json.RootElement.Clone());
             var visible = models.EnumerateArray().Where(x => x.TryGetProperty("visibility", out var visibility) && visibility.GetString() == "list")
                 .Select(x => new { slug = x.GetProperty("slug").GetString(), displayName = x.GetProperty("display_name").GetString() }).ToArray();
@@ -184,6 +188,7 @@ try
     }
     app.MapGet("/models", (Func<HttpContext, Task<IResult>>)ModelCatalog);
     app.MapGet("/v1/models", (Func<HttpContext, Task<IResult>>)ModelCatalog);
+    app.MapGet("/api/v1/models", (Func<HttpContext, Task<IResult>>)ModelCatalog);
     app.MapPost("/accounts/login", async (HttpContext context) =>
     {
         var input = await context.Request.ReadFromJsonAsync<LoginInput>(context.RequestAborted) ?? throw new AuthFailure("invalid_login_request");
@@ -247,26 +252,42 @@ try
     // Built-in OpenAI first probes WebSocket. 426 selects Codex's supported HTTP/SSE fallback.
     // No model request or upstream bytes are sent for this transport negotiation.
     app.MapGet("/v1/responses", () => Results.StatusCode(StatusCodes.Status426UpgradeRequired));
-    app.MapPost("/v1/responses", async (HttpContext context) =>
+    async Task ModelRequest(HttpContext context)
     {
         if (context.Request.ContentType?.StartsWith("application/json", StringComparison.OrdinalIgnoreCase) != true)
         { context.Response.StatusCode = 415; return; }
         var body = await ModelRequestBody.ReadAsync(context.Request.Body, context.Request.Headers.ContentEncoding.ToString(), context.RequestAborted);
         using var document = JsonDocument.Parse(body); var json = document.RootElement;
-        if (json.ValueKind != JsonValueKind.Object || !json.TryGetProperty("input", out var input) || input.ValueKind != JsonValueKind.Array
-            || !json.TryGetProperty("stream", out var stream) || stream.ValueKind != JsonValueKind.True
-            || !json.TryGetProperty("store", out var store) || store.ValueKind != JsonValueKind.False
-            || !json.TryGetProperty("model", out var modelValue) || modelValue.ValueKind != JsonValueKind.String
-            || !Regex.IsMatch(modelValue.GetString()!, "^[a-zA-Z0-9._:/-]{1,128}$"))
-        { context.Response.StatusCode = 400; await context.Response.WriteAsJsonAsync(new { error = new { code = "invalid_responses_request" } }); return; }
-        if (json.TryGetProperty("previous_response_id", out var previous) && previous.ValueKind != JsonValueKind.Null
-            || json.TryGetProperty("conversation", out var conversation) && conversation.ValueKind != JsonValueKind.Null)
-        { context.Response.StatusCode = 400; await context.Response.WriteAsJsonAsync(new { error = new { code = "server_continuation_unsupported" } }); return; }
-        var requestedModel = modelValue.GetString()!;
+        var compatible = context.Items["modelClient"] is true || context.Request.Path.StartsWithSegments("/api/v1")
+            || context.Request.Path.Value is "/v1/chat/completions" or "/v1/images/generations";
+        CompatibilityRequest? translation = null;
+        string requestedModel;
+        if (compatible)
+        {
+            var kind = context.Request.Path.Value!.EndsWith("/images/generations", StringComparison.Ordinal) ? CompatibilityKind.Image
+                : context.Request.Path.Value.EndsWith("/chat/completions", StringComparison.Ordinal) ? CompatibilityKind.Chat : CompatibilityKind.Responses;
+            translation = CompatibilityRequest.Parse(json, kind);
+            body = translation.Body; requestedModel = translation.Model;
+        }
+        else
+        {
+            if (json.ValueKind != JsonValueKind.Object || !json.TryGetProperty("input", out var input) || input.ValueKind != JsonValueKind.Array
+                || !json.TryGetProperty("stream", out var stream) || stream.ValueKind != JsonValueKind.True
+                || !json.TryGetProperty("store", out var store) || store.ValueKind != JsonValueKind.False
+                || !json.TryGetProperty("model", out var modelValue) || modelValue.ValueKind != JsonValueKind.String
+                || !Regex.IsMatch(modelValue.GetString()!, "^[a-zA-Z0-9._:/-]{1,128}$"))
+            { context.Response.StatusCode = 400; await context.Response.WriteAsJsonAsync(new { error = new { code = "invalid_responses_request" } }); return; }
+            if (json.TryGetProperty("previous_response_id", out var previous) && previous.ValueKind != JsonValueKind.Null
+                || json.TryGetProperty("conversation", out var conversation) && conversation.ValueKind != JsonValueKind.Null)
+            { context.Response.StatusCode = 400; await context.Response.WriteAsJsonAsync(new { error = new { code = "server_continuation_unsupported" } }); return; }
+            requestedModel = modelValue.GetString()!;
+        }
         context.Items["quotaModel"] = requestedModel;
         using var reservation = pool.ReserveModelRequest(requestedModel);
         var selection = reservation.Selection;
         var candidates = await pool.PrepareAsync(reservation, context.RequestAborted);
+        if (translation?.Kind == CompatibilityKind.Image && candidates.Any(x => x.Endpoint.Host != "chatgpt.com"))
+            throw new CompatibilityFailure("image_requires_native_account");
         var account = candidates[0];
         var headers = context.Request.Headers.ToDictionary(x => x.Key, x => x.Value.ToString(), StringComparer.OrdinalIgnoreCase);
         headers.Remove("ChatGPT-Account-Id"); // Backend account routing is supplied only by validated credentials.
@@ -275,13 +296,16 @@ try
         var started = Stopwatch.GetTimestamp();
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted); lifetime.CancelAfter(TimeSpan.FromMinutes(10));
         RelayResult result = new(account.AccountId, 500, 0, false, "transport_error");
-        var sink = new WebSink(context); var attemptedAccount = account.AccountId; var attemptCount = 0;
+        var sink = new WebSink(context);
+        using var converter = translation is null ? null : new CompatibilitySink(sink, translation);
+        IResponseSink responseSink = converter is null ? sink : converter;
+        var attemptedAccount = account.AccountId; var attemptCount = 0;
         var upstreamCompleted = false;
         ResponseTokenUsage? tokenUsage = null;
         string? failoverReason = null;
         try
         {
-            result = await relay.ForwardAsync(body, "application/json", candidates, headers, sink, lifetime.Token,
+            result = await relay.ForwardAsync(body, "application/json", candidates, headers, responseSink, lifetime.Token,
                 (_, reason) => failoverReason = reason,
                 (lease, entering) =>
                 {
@@ -290,9 +314,16 @@ try
                 }, lease => { upstreamCompleted = true; pool.RecordSuccess(lease.AccountId); },
                 (lease, error) => pool.RecordFailure(lease.AccountId, error), error => pool.Unavailable(error, reservation.CandidateIds.ToArray(), reservation.AutoSwitch, requestedModel),
                 (_, value) => tokenUsage = value);
+            if (converter is not null && result.Outcome is "stream_forwarded" or "empty_stream")
+            {
+                await converter.FinishAsync(lifetime.Token);
+                if (converter.Failed) result = result with { StatusCode = 502, Outcome = "generation_failed" };
+            }
+            if (converter is not null && result.StatusCode < 400 && (!result.Committed || result.Outcome == "stream_interrupted"))
+                result = result with { StatusCode = 502 };
         }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
-        { result = new(attemptedAccount, upstreamCompleted ? 200 : context.RequestAborted.IsCancellationRequested ? 499 : 504, attemptCount, sink.Started,
+        { result = new(attemptedAccount, upstreamCompleted ? 200 : context.RequestAborted.IsCancellationRequested ? 499 : 504, attemptCount, sink.Started || converter?.Consumed == true,
             upstreamCompleted ? "completed_client_disconnect" : context.RequestAborted.IsCancellationRequested ? "client_cancelled" : "request_deadline"); }
         finally
         {
@@ -303,9 +334,22 @@ try
         pool.Complete(selection, result, failoverReason, requestedModel);
         ResponsesHeaders.Remember(headers, sessionOwners, result.AccountId);
         if (context.RequestAborted.IsCancellationRequested) return;
+        if (converter is not null)
+        {
+            if (result.Outcome is "stream_interrupted" or "request_deadline" || !result.Committed)
+            {
+                if (context.Response.HasStarted) context.Abort();
+                else { context.Response.StatusCode = result.StatusCode >= 400 ? result.StatusCode : 502;
+                    await context.Response.WriteAsJsonAsync(new { error = new { type = "proxy_transport_error", code = converter.FailureCode ?? "generation_interrupted", message = "生成未能完成，请稍后重试。" } }); }
+            }
+            return;
+        }
         if (result.Committed && result.Outcome is "stream_interrupted" or "request_deadline") context.Abort();
         else if (!result.Committed) { context.Response.StatusCode = result.StatusCode; await context.Response.WriteAsJsonAsync(new { error = new { type = "proxy_transport_error", code = result.Outcome, message = "模型传输未能完成。" } }); }
-    });
+    }
+    foreach (var route in new[] { "/v1/responses", "/v1/chat/completions", "/v1/images/generations",
+        "/api/v1/responses", "/api/v1/chat/completions", "/api/v1/images/generations" })
+        app.MapPost(route, ModelRequest);
     app.MapFallback(() => Results.NotFound(new { error = new { code = "endpoint_not_supported_in_phase0" } }));
     Console.WriteLine("Codex Pool listening at http://127.0.0.1:3210 (live migration acceptance gate applies).");
     var eventTask = events.RunAsync(Status, app.Lifetime.ApplicationStopping);

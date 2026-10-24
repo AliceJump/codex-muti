@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace CodexPool.Daemon;
 
 public static class ModelKeyEndpoints
@@ -9,8 +11,8 @@ public static class ModelKeyEndpoints
         {
             // A credential is displayed only once to an authenticated, CSRF-protected browser.
             // Existing middleware denies model-only keys on all management routes.
-            if (context.Request.ContentLength is > 4096) return Results.BadRequest(new { error = new { code = "invalid_key_name" } });
-            var input = await context.Request.ReadFromJsonAsync<KeyInput>(context.RequestAborted);
+            var bytes = await ModelRequestBody.ReadAsync(context.Request.Body, "", context.RequestAborted, 4096);
+            var input = JsonSerializer.Deserialize<KeyInput>(bytes, new JsonSerializerOptions(JsonSerializerDefaults.Web));
             try
             {
                 var issued = vault.CreateModelKey(input?.Name ?? "");

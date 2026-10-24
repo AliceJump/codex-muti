@@ -837,6 +837,25 @@ async Task LocalApi()
         using var backendHost = await http.SendAsync(backendHostRequest); Check(backendHost.StatusCode == HttpStatusCode.Forbidden);
         using var status = await http.GetAsync("http://127.0.0.1:3210/status"); var text = await status.Content.ReadAsStringAsync();
         Check(status.IsSuccessStatusCode && !text.Contains(vault.LocalKey) && !text.Contains("accessToken"));
+        using var issuedResponse = await http.PostAsJsonAsync("http://127.0.0.1:3210/model-keys/create", new { name = "HTTP fixture" });
+        using var issuedJson = JsonDocument.Parse(await issuedResponse.Content.ReadAsStringAsync());
+        Check(issuedResponse.IsSuccessStatusCode);
+        using var robot = new HttpClient(new SocketsHttpHandler { UseProxy = false });
+        robot.DefaultRequestHeaders.Authorization = new("Bearer", issuedJson.RootElement.GetProperty("key").GetString());
+        foreach (var route in new[] { "/status", "/accounts", "/model-keys", "/settings" })
+        { using var rejected = await robot.GetAsync("http://127.0.0.1:3210" + route); Check(rejected.StatusCode == HttpStatusCode.Forbidden); }
+        using var blockedKeyCreation = await robot.PostAsJsonAsync("http://127.0.0.1:3210/model-keys/create", new { name = "denied" });
+        Check(blockedKeyCreation.StatusCode == HttpStatusCode.Forbidden);
+        using var badChat = await robot.PostAsJsonAsync("http://127.0.0.1:3210/api/v1/chat/completions", new { });
+        Check(badChat.StatusCode == HttpStatusCode.BadRequest);
+        using var invalidParameters = await robot.PostAsJsonAsync("http://127.0.0.1:3210/api/v1/chat/completions", new { model = "gpt-6.1-sol", messages = new[] { new { role = "user", content = "fixture" } }, temperature = 0.7 });
+        Check(invalidParameters.StatusCode == HttpStatusCode.BadRequest);
+        using var keyList = await http.GetAsync("http://127.0.0.1:3210/model-keys");
+        Check(!(await keyList.Content.ReadAsStringAsync()).Contains(issuedJson.RootElement.GetProperty("key").GetString()!));
+        using var revokedKey = await http.PostAsync("http://127.0.0.1:3210/model-keys/" + issuedJson.RootElement.GetProperty("id").GetString() + "/revoke", null);
+        Check(revokedKey.IsSuccessStatusCode);
+        using var revokedAccess = await robot.GetAsync("http://127.0.0.1:3210/api/v1/models");
+        Check(revokedAccess.StatusCode == HttpStatusCode.Unauthorized);
         using var statistics = await http.GetAsync("http://127.0.0.1:3210/statistics");
         using var statsJson = JsonDocument.Parse(await statistics.Content.ReadAsStringAsync());
         Check(statistics.IsSuccessStatusCode && statsJson.RootElement.GetProperty("allTime").GetProperty("totals").GetProperty("requests").GetInt64() == 0);
@@ -851,6 +870,8 @@ async Task LocalApi()
         using var browserStatistics = await browser.GetAsync("http://127.0.0.1:3210/statistics"); Check(browserStatistics.IsSuccessStatusCode);
         using var noCsrf = await browser.PostAsJsonAsync("http://127.0.0.1:3210/settings", new { autoSwitch = false, fiveHourThreshold = 90, weeklyThreshold = 90 });
         Check(noCsrf.StatusCode == HttpStatusCode.Forbidden);
+        using var keyNoCsrf = await browser.PostAsJsonAsync("http://127.0.0.1:3210/model-keys/create", new { name = "denied" });
+        Check(keyNoCsrf.StatusCode == HttpStatusCode.Forbidden);
         using var sessionResponse = await browser.GetAsync("http://127.0.0.1:3210/browser-session");
         using var sessionJson = JsonDocument.Parse(await sessionResponse.Content.ReadAsStringAsync());
         browser.DefaultRequestHeaders.Add("X-Codex-Pool-CSRF", sessionJson.RootElement.GetProperty("csrf").GetString());
