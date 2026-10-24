@@ -19,6 +19,7 @@ using Microsoft.Extensions.Logging;
 var root = Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, ".research", "security-" + Guid.NewGuid().ToString("N")));
 var tests = new (string Name, Func<Task> Run)[]
 {
+    ("Model-only keys survive storage, revoke immediately, redact and exclude management routes", ModelKeys),
     ("Daemon shutdown accepts only local bearer and acknowledges before requesting host shutdown", DaemonShutdown),
     ("DPAPI storage never contains plaintext canaries; public views redact", Storage),
     ("OIDC rejects wrong signature, issuer, audience, nonce and expiry", IdToken),
@@ -77,6 +78,27 @@ Console.WriteLine($"{tests.Length - failed}/{tests.Length} passed; synthetic cre
 return failed == 0 ? 0 : 1;
 
 Vault Store(string name) => new(Path.Combine(root, name));
+Task ModelKeys()
+{
+    var directory = Path.Combine(root, "model-keys");
+    var vault = new Vault(directory);
+    var issued = vault.CreateModelKey("AstrBot");
+    var auth = "Bearer " + issued.Secret;
+    Check(vault.AcceptsModelKey(auth) && new Vault(directory).AcceptsModelKey(auth));
+    Check(!vault.AcceptsModelKey("Bearer " + vault.LocalKey) && !vault.AcceptsModelKey(auth + "x"));
+    Check(!issued.ToString().Contains(issued.Secret) && !JsonSerializer.Serialize(issued).Contains(issued.Secret));
+    Check(!JsonSerializer.Serialize(vault.ModelKeys).Contains(issued.Secret));
+    Check(!Encoding.UTF8.GetString(File.ReadAllBytes(Path.Combine(directory, "vault.dpapi"))).Contains(issued.Secret));
+    foreach (var path in new[] { "/v1/models", "/api/v1/models" }) Check(ModelAccess.IsModelRoute("GET", path));
+    foreach (var path in new[] { "/v1/responses", "/v1/chat/completions", "/v1/images/generations", "/api/v1/responses", "/api/v1/chat/completions", "/api/v1/images/generations" })
+        Check(ModelAccess.IsModelRoute("POST", path) && !ModelAccess.IsModelRoute("DELETE", path));
+    foreach (var path in new[] { "/model-keys", "/model-keys/create", "/model-keys/x/revoke", "/accounts", "/accounts/login", "/control/shutdown", "/dashboard/session", "/settings", "/v1/models/../accounts" })
+        foreach (var method in new[] { "GET", "POST" }) Check(!ModelAccess.IsModelRoute(method, path));
+    Check(vault.RevokeModelKey(issued.Id) && !vault.AcceptsModelKey(auth) && !new Vault(directory).AcceptsModelKey(auth));
+    Check(!vault.RevokeModelKey(issued.Id));
+    try { vault.CreateModelKey("\n"); throw new InvalidOperationException(); } catch (ArgumentException) { }
+    return Task.CompletedTask;
+}
 static void Check(bool value) { if (!value) throw new InvalidOperationException(); }
 static Dictionary<string, string> Query(string query) => query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries)
     .Select(x => x.Split('=', 2)).ToDictionary(x => Uri.UnescapeDataString(x[0]), x => Uri.UnescapeDataString(x.ElementAtOrDefault(1) ?? ""));

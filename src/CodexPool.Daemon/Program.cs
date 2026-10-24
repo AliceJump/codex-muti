@@ -65,15 +65,19 @@ try
         var publicPath = path is "/" or "/health" or "/auth/callback" or "/dashboard.js" or "/dashboard.css"
             || path.StartsWith("/dashboard/open/", StringComparison.Ordinal);
         var bearer = LocalCommands.EqualSecret(context.Request.Headers.Authorization.ToString(), "Bearer " + vault.LocalKey);
+        var clientKey = vault.AcceptsModelKey(context.Request.Headers.Authorization.ToString());
+        if (clientKey && !ModelAccess.IsModelRoute(context.Request.Method, path))
+        { context.Response.StatusCode = 403; return; }
+        context.Items["modelClient"] = clientKey;
         var modelBearer = !bearer && await officialModelAuth.AcceptsAsync(context.Request.Method, path,
             context.Request.Headers.Authorization.ToString(), context.RequestAborted);
         var session = browsers.Find(context);
         var mutating = context.Request.Method is not ("GET" or "HEAD");
-        var bearerOnly = path.StartsWith("/v1/", StringComparison.Ordinal) || path.StartsWith("/control/", StringComparison.Ordinal)
+        var bearerOnly = path.StartsWith("/v1/", StringComparison.Ordinal) || path.StartsWith("/api/v1/", StringComparison.Ordinal) || path.StartsWith("/control/", StringComparison.Ordinal)
             || path is "/accounts/login" or "/dashboard/session";
-        if (!publicPath && !bearer && !modelBearer && (bearerOnly || session is null))
+        if (!publicPath && !bearer && !modelBearer && !clientKey && (bearerOnly || session is null))
         { context.Response.StatusCode = 401; return; }
-        if (!publicPath && !bearer && !modelBearer && mutating && !LocalCommands.EqualSecret(context.Request.Headers["X-Codex-Pool-CSRF"].ToString(), session!.Csrf))
+        if (!publicPath && !bearer && !modelBearer && !clientKey && mutating && !LocalCommands.EqualSecret(context.Request.Headers["X-Codex-Pool-CSRF"].ToString(), session!.Csrf))
         { context.Response.StatusCode = 403; return; }
         try { await next(); }
         catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested) { }
@@ -98,6 +102,7 @@ try
         { if (!context.Response.HasStarted) { context.Response.StatusCode = 500; await context.Response.WriteAsJsonAsync(new { error = new { code = "internal_error" } }); } else context.Abort(); }
     });
     app.MapGet("/health", () => new { status = "running", stage = "acceptance", automaticSwitching = pool.Settings.AutoSwitch });
+    ModelKeyEndpoints.Map(app, vault);
     object Status() => new { activeAccountId = vault.ActiveId, stage = "acceptance", automaticSwitching = pool.Settings.AutoSwitch, settings = pool.Settings,
         boundaryProbe, distinctUsers = vault.DistinctUsers, nativeDistinctUsers = vault.NativeDistinctUsers, liveMigrationValidated = false, quotaSource = "per_registration", accounts = vault.Views(auth.Health), accountAvailability = pool.Availability(),
         nativeLoginAttempts = nativeLogin.PublicAttempts, usage = quota.Views, quotaRefreshErrors = quota.RefreshErrors, quotaSelectionError = pool.QuotaSelectionError,
