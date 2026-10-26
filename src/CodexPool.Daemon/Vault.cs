@@ -37,7 +37,10 @@ public sealed class AccountCredential
     public object PublicView(bool active, string? authHealth = null, QuotaSnapshot? usage = null) => new { id = Id, name = Name, active,
         enabled = Enabled, paused = Paused, drain = Draining, cooldownUntil = CooldownUntil,
         state = !Enabled ? "disabled" : Paused ? "paused" : Draining ? "draining" : CooldownUntil > DateTimeOffset.UtcNow ? "cooldown" : active ? "active" : "standby",
-        provider = ProviderKind, plan = Plan, subscriptionActiveUntil = SubscriptionExpiry.FromIdToken(IdToken),
+        provider = ProviderKind, plan = Plan,
+        subscriptionActiveUntil = SubscriptionExpiry.ActiveUntil(IdToken, DateTimeOffset.UtcNow),
+        subscriptionDeadlineState = SubscriptionExpiry.DeadlineState(IdToken, DateTimeOffset.UtcNow),
+        planProvenance = usage?.Plan is not null ? "quota" : Plan is not null ? "credential" : "unknown",
         auth = authHealth ?? (AuthStatus != "ready" ? AuthStatus : ExpiresAt > DateTimeOffset.UtcNow ? "ready" : "refresh_needed"), quota = usage, quotaUpdatedAt = usage?.UpdatedAt, updatedAt = UpdatedAt };
 }
 
@@ -323,7 +326,12 @@ public sealed class Vault
             var next = CloneDocument(document); var target = next.Accounts.Single(x => x.Id == id);
             if (target.RefreshToken != expectedRefreshToken) throw new InvalidOperationException("Refresh generation changed.");
             target.AccessToken = tokens.AccessToken; target.RefreshToken = tokens.RefreshToken;
-            if (!string.IsNullOrEmpty(tokens.IdToken)) target.IdToken = tokens.IdToken;
+            if (!string.IsNullOrEmpty(tokens.IdToken))
+            {
+                target.IdToken = tokens.IdToken;
+                // Fresh ID-token claims are trusted for plan display after renew/refresh.
+                if (SubscriptionExpiry.PlanFromIdToken(tokens.IdToken) is { } plan) target.Plan = plan;
+            }
             target.Scope = tokens.Scope; target.ExpiresAt = DateTimeOffset.UtcNow.AddSeconds(tokens.ExpiresIn);
             target.AuthStatus = "ready";
             target.EarliestRefreshAt = tokens.EarliestRefreshAt; target.UpdatedAt = DateTimeOffset.UtcNow;
