@@ -68,6 +68,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Quota recovery requires a new successful query and preserves independent restrictions", QuotaRecovery),
     ("Quota queries started before rejection cannot clear a newer cooldown", QuotaRecoveryRace),
     ("Legacy cooldown recovery waits for fresh authorization and preserves actual quota denials", LegacyQuotaRecovery),
+    ("Quota auth recovery retries once on 401 and classifies 403/429 without thrash", QuotaAuthRecovery),
+    ("Stale subscription deadline is unknown pending sync; renewal updates plan provenance", SubscriptionRenewalSync),
     ("Settings restoration preserves unified and legacy thresholds exactly", SettingsRestoration)
 };
 if (args.Length != 0)
@@ -427,6 +429,17 @@ async Task SubscriptionDeadline()
     Check(SubscriptionExpiry.FromIdToken(issuer.Token(NativeLogin.NativeClientId, "sub-A", null)) is null);
     var past = DateTimeOffset.Parse("2020-01-01T00:00:00Z");
     Check(SubscriptionExpiry.FromIdToken(Token(past.ToUnixTimeSeconds())) == past);
+    Check(SubscriptionExpiry.ActiveUntil(Token(past.ToUnixTimeSeconds()), DateTimeOffset.UtcNow) is null);
+    Check(SubscriptionExpiry.DeadlineState(Token(past.ToUnixTimeSeconds()), DateTimeOffset.UtcNow) == "stale");
+    Check(SubscriptionExpiry.ActiveUntil(Token(until.ToUnixTimeSeconds()), DateTimeOffset.UtcNow) == until);
+    Check(SubscriptionExpiry.DeadlineState(Token(until.ToUnixTimeSeconds()), DateTimeOffset.UtcNow) == "reported");
+    Check(SubscriptionExpiry.DeadlineState(issuer.Token(NativeLogin.NativeClientId, "sub-A", null), DateTimeOffset.UtcNow) == "unknown");
+    Check(SubscriptionExpiry.PlanFromIdToken(issuer.Token(NativeLogin.NativeClientId, "sub-A", null,
+        nativeMetadata: JsonSerializer.SerializeToElement(new Dictionary<string, object?>
+            { ["chatgpt_account_id"] = "backend-A", ["chatgpt_plan_type"] = "plus" }))) == "plus");
+    Check(SubscriptionExpiry.PlanFromIdToken(issuer.Token(NativeLogin.NativeClientId, "sub-A", null,
+        nativeMetadata: JsonSerializer.SerializeToElement(new Dictionary<string, object?>
+            { ["chatgpt_account_id"] = "backend-A", ["chatgpt_plan_type"] = "SECRET-CANARY" }))) is null);
 
     var vault = Store("subscription-deadline"); var account = Account("A");
     account.ProviderKind = "native"; account.BackendAccountId = "backend-A";
@@ -438,7 +451,15 @@ async Task SubscriptionDeadline()
     var restored = new Vault(Path.Combine(root, "subscription-deadline"));
     var view = JsonSerializer.SerializeToElement(restored.PublicAccounts[0]);
     Check(view.GetProperty("subscriptionActiveUntil").GetDateTimeOffset() == until);
+    Check(view.GetProperty("subscriptionDeadlineState").GetString() == "reported");
     Check(!view.GetRawText().Contains("CANARY") && !view.TryGetProperty("idToken", out _) && !view.TryGetProperty("expiresAt", out _));
+    var staleVault = Store("subscription-deadline-stale");
+    staleVault.Add(new AccountCredential { Id = "past", Name = "past", Subject = "sub-past", ClientId = NativeLogin.NativeClientId,
+        ProviderKind = "native", BackendAccountId = "backend-past", Plan = "free", AccessToken = "ACCESS-PAST", RefreshToken = "REFRESH-PAST",
+        IdToken = Token(past.ToUnixTimeSeconds()), Scope = "native_codex", ExpiresAt = DateTimeOffset.UtcNow.AddHours(1), UpdatedAt = DateTimeOffset.UtcNow });
+    var staleView = JsonSerializer.SerializeToElement(staleVault.PublicAccounts[0]);
+    Check(staleView.GetProperty("subscriptionActiveUntil").ValueKind == JsonValueKind.Null);
+    Check(staleView.GetProperty("subscriptionDeadlineState").GetString() == "stale");
 
     var next = until.AddMonths(1);
     issuer.NativeResponseBody = JsonSerializer.Serialize(new { access_token = issuer.Token("native-access", "sub-A", null),
@@ -673,6 +694,173 @@ Task QuotaSelectionFailure()
     }
     pool.SelectAfterQuotaRefresh(); Check(pool.QuotaSelectionError is null && pool.Active == "B" && vault.ActiveId == "B");
     return Task.CompletedTask;
+}
+
+async Task QuotaAuthRecovery()
+{
+    AccountCredential NativeAccount(FakeIssuer tokenIssuer, string plan, DateTimeOffset subscriptionUntil)
+    {
+        var account = Account("A");
+        return new AccountCredential
+        {
+            Id = "A", Name = "A", Subject = "sub-A", ClientId = NativeLogin.NativeClientId, ProviderKind = "native",
+            BackendAccountId = "backend-A", Plan = plan, AccessToken = account.AccessToken, RefreshToken = account.RefreshToken,
+            IdToken = tokenIssuer.Token(NativeLogin.NativeClientId, "sub-A", null,
+                nativeMetadata: JsonSerializer.SerializeToElement(new Dictionary<string, object?>
+                {
+                    ["chatgpt_account_id"] = "backend-A", ["chatgpt_plan_type"] = plan,
+                    ["chatgpt_subscription_active_until"] = subscriptionUntil.ToUnixTimeSeconds()
+                })),
+            Scope = "native_codex", ExpiresAt = DateTimeOffset.UtcNow.AddHours(1), UpdatedAt = DateTimeOffset.UtcNow
+        };
+    }
+    using var issuer = new FakeIssuer(); using var authHttp = new HttpClient(issuer);
+    var future = DateTimeOffset.UtcNow.AddMonths(1);
+    var statuses = new Queue<HttpStatusCode>();
+    var bearer = new List<string>();
+    using var quotaHttp = new HttpClient(new AsyncHandler((request, _) =>
+    {
+        bearer.Add(request.Headers.Authorization?.Parameter ?? "");
+        var status = statuses.Count > 0 ? statuses.Dequeue() : HttpStatusCode.OK;
+        if (status != HttpStatusCode.OK) return Task.FromResult(new HttpResponseMessage(status));
+        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{\"plan_type\":\"plus\",\"rate_limit\":{\"allowed\":true,\"limit_reached\":false,"
+                + "\"primary_window\":{\"used_percent\":10,\"limit_window_seconds\":18000,\"reset_at\":2000000000},"
+                + "\"secondary_window\":{\"used_percent\":20,\"limit_window_seconds\":604800,\"reset_at\":2000000000}}}")
+        });
+    }));
+
+    // 401 → single forced credential recovery → retry succeeds; last cache is replaced only after success.
+    statuses.Enqueue(HttpStatusCode.Unauthorized); statuses.Enqueue(HttpStatusCode.OK);
+    var vault = Store("quota-auth-401"); vault.Add(NativeAccount(issuer, "free", future));
+    vault.SaveQuota(new("A", "native_codex_usage", "free", DateTimeOffset.UtcNow.AddMinutes(-5),
+        [new("primary_window", 2592000, 0, 100, DateTimeOffset.UtcNow.AddDays(20))]));
+    var auth = new OAuth(authHttp, vault); var quota = new Quota(quotaHttp, auth, vault);
+    var beforeRefresh = issuer.RefreshCalls; bearer.Clear();
+    await quota.RefreshAsync("A", default, force: true);
+    Check(issuer.RefreshCalls == beforeRefresh + 1);
+    Check(quota.RefreshErrors.Length == 0);
+    Check(quota.Snapshot("A") is { Plan: "plus", Windows: { Count: 2 } });
+    Check(vault.Find("A")!.Plan == "plus");
+    Check(bearer.Count == 2 && bearer[0] != bearer[1]);
+
+    // 403 must not rotate credentials or wipe the last successful cache.
+    statuses.Clear(); statuses.Enqueue(HttpStatusCode.Forbidden);
+    var forbiddenVault = Store("quota-auth-403"); forbiddenVault.Add(NativeAccount(issuer, "plus", future));
+    forbiddenVault.SaveQuota(new("A", "native_codex_usage", "plus", DateTimeOffset.UtcNow.AddMinutes(-5),
+        [new("5h", 18000, 10, 90, DateTimeOffset.UtcNow.AddHours(1))]));
+    var forbiddenAuth = new OAuth(authHttp, forbiddenVault); var forbiddenQuota = new Quota(quotaHttp, forbiddenAuth, forbiddenVault);
+    var forbiddenBefore = issuer.RefreshCalls;
+    await forbiddenQuota.RefreshAsync("A", default, force: true);
+    Check(issuer.RefreshCalls == forbiddenBefore);
+    Check(forbiddenQuota.RefreshErrors.Single().Code == "quota_forbidden");
+    Check(forbiddenQuota.Snapshot("A") is { Plan: "plus", Windows: { Count: 1 } });
+    Check(!JsonSerializer.Serialize(forbiddenQuota.RefreshErrors).Contains("CANARY"));
+
+    // 429 is rate-limit, not token expiry.
+    statuses.Clear(); statuses.Enqueue(HttpStatusCode.TooManyRequests);
+    var limitedVault = Store("quota-auth-429"); limitedVault.Add(NativeAccount(issuer, "plus", future));
+    limitedVault.SaveQuota(new("A", "native_codex_usage", "plus", DateTimeOffset.UtcNow.AddMinutes(-5),
+        [new("5h", 18000, 10, 90, DateTimeOffset.UtcNow.AddHours(1))]));
+    var limitedAuth = new OAuth(authHttp, limitedVault); var limitedQuota = new Quota(quotaHttp, limitedAuth, limitedVault);
+    var limitedBefore = issuer.RefreshCalls;
+    await limitedQuota.RefreshAsync("A", default, force: true);
+    Check(issuer.RefreshCalls == limitedBefore);
+    Check(limitedQuota.RefreshErrors.Single().Code == "quota_rate_limited");
+    Check(limitedQuota.Snapshot("A") is { Plan: "plus" });
+
+    // Persistent 401 after one recovery fails closed; historical cache remains.
+    statuses.Clear(); statuses.Enqueue(HttpStatusCode.Unauthorized); statuses.Enqueue(HttpStatusCode.Unauthorized);
+    var stickyVault = Store("quota-auth-401-sticky"); stickyVault.Add(NativeAccount(issuer, "free", future));
+    stickyVault.SaveQuota(new("A", "native_codex_usage", "free", DateTimeOffset.UtcNow.AddMinutes(-5),
+        [new("primary_window", 2592000, 0, 100, DateTimeOffset.UtcNow.AddDays(20))]));
+    var stickyAuth = new OAuth(authHttp, stickyVault); var stickyQuota = new Quota(quotaHttp, stickyAuth, stickyVault);
+    var stickyBefore = issuer.RefreshCalls; bearer.Clear();
+    await stickyQuota.RefreshAsync("A", default, force: true);
+    Check(issuer.RefreshCalls == stickyBefore + 1);
+    Check(bearer.Count == 2);
+    Check(stickyQuota.RefreshErrors.Single().Code == "quota_unauthorized");
+    Check(stickyQuota.Snapshot("A") is { Plan: "free" });
+    // Sticky 401 arms a cooldown: another poll must not rotate credentials again.
+    statuses.Clear(); statuses.Enqueue(HttpStatusCode.Unauthorized);
+    var stickyAgain = issuer.RefreshCalls; bearer.Clear();
+    await stickyQuota.RefreshAsync("A", default, force: true);
+    Check(issuer.RefreshCalls == stickyAgain);
+    Check(bearer.Count == 1);
+    Check(stickyQuota.RefreshErrors.Single().Code == "quota_unauthorized");
+    Check(stickyQuota.Snapshot("A") is { Plan: "free" });
+
+    // Concurrent callers share one in-flight recovery under the account lock.
+    // force:false so followers reuse the snapshot after the leader recovers (no thrash).
+    statuses.Clear(); statuses.Enqueue(HttpStatusCode.Unauthorized); statuses.Enqueue(HttpStatusCode.OK);
+    var concurrentVault = Store("quota-auth-concurrent"); concurrentVault.Add(NativeAccount(issuer, "free", future));
+    var concurrentAuth = new OAuth(authHttp, concurrentVault); var concurrentQuota = new Quota(quotaHttp, concurrentAuth, concurrentVault);
+    var concurrentBefore = issuer.RefreshCalls; bearer.Clear();
+    await Task.WhenAll(Enumerable.Range(0, 4).Select(_ => concurrentQuota.RefreshAsync("A", default)));
+    Check(issuer.RefreshCalls == concurrentBefore + 1);
+    Check(bearer.Count == 2);
+    Check(concurrentQuota.RefreshErrors.Length == 0 && concurrentQuota.Snapshot("A") is { Plan: "plus" });
+}
+async Task SubscriptionRenewalSync()
+{
+    using var issuer = new FakeIssuer(); using var authHttp = new HttpClient(issuer);
+    var past = DateTimeOffset.UtcNow.AddDays(-2);
+    var next = DateTimeOffset.UtcNow.AddMonths(1);
+    string Meta(string plan, DateTimeOffset until) => JsonSerializer.Serialize(new Dictionary<string, object?>
+    {
+        ["chatgpt_account_id"] = "backend-A", ["chatgpt_plan_type"] = plan,
+        ["chatgpt_subscription_active_until"] = until.ToUnixTimeSeconds()
+    });
+    var vault = Store("subscription-renewal-sync");
+    var account = Account("A");
+    account = new AccountCredential
+    {
+        Id = "A", Name = "main", Subject = "sub-A", ClientId = NativeLogin.NativeClientId, ProviderKind = "native",
+        BackendAccountId = "backend-A", Plan = "free", AccessToken = account.AccessToken, RefreshToken = account.RefreshToken,
+        IdToken = issuer.Token(NativeLogin.NativeClientId, "sub-A", null, nativeMetadata: JsonSerializer.SerializeToElement(JsonSerializer.Deserialize<Dictionary<string, object?>>(Meta("free", past))!)),
+        Scope = "native_codex", ExpiresAt = DateTimeOffset.UtcNow.AddHours(1), UpdatedAt = DateTimeOffset.UtcNow
+    };
+    vault.Add(account);
+    vault.SaveQuota(new("A", "native_codex_usage", "free", DateTimeOffset.UtcNow.AddMinutes(-10),
+        [new("primary_window", 2592000, 0, 100, DateTimeOffset.UtcNow.AddDays(20))]));
+    var stale = JsonSerializer.SerializeToElement(vault.PublicAccounts[0]);
+    Check(stale.GetProperty("subscriptionActiveUntil").ValueKind == JsonValueKind.Null);
+    Check(stale.GetProperty("subscriptionDeadlineState").GetString() == "stale");
+    Check(stale.GetProperty("plan").GetString() == "free");
+
+    issuer.NativeResponseBody = JsonSerializer.Serialize(new
+    {
+        access_token = issuer.Token("native-access", "sub-A", null),
+        refresh_token = "native-refresh-renewed-A",
+        id_token = issuer.Token(NativeLogin.NativeClientId, "sub-A", null,
+            nativeMetadata: JsonSerializer.SerializeToElement(JsonSerializer.Deserialize<Dictionary<string, object?>>(Meta("plus", next))!))
+    });
+    using var quotaHttp = new HttpClient(new AsyncHandler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+    {
+        Content = new StringContent("{\"plan_type\":\"plus\",\"rate_limit\":{\"allowed\":true,\"limit_reached\":false,"
+            + "\"primary_window\":{\"used_percent\":5,\"limit_window_seconds\":18000,\"reset_at\":2000000000},"
+            + "\"secondary_window\":{\"used_percent\":8,\"limit_window_seconds\":604800,\"reset_at\":2000000000}}}")
+    })));
+    var auth = new OAuth(authHttp, vault); var quota = new Quota(quotaHttp, auth, vault);
+    var before = issuer.RefreshCalls;
+    await quota.RefreshAsync("A", default, force: true);
+    Check(issuer.RefreshCalls == before + 1);
+    Check(quota.Snapshot("A") is { Plan: "plus" });
+    Check(vault.Find("A")!.Plan == "plus");
+    var renewed = JsonSerializer.SerializeToElement(vault.PublicAccounts[0]);
+    Check(renewed.GetProperty("subscriptionActiveUntil").GetDateTimeOffset().ToUnixTimeSeconds() == next.ToUnixTimeSeconds());
+    Check(renewed.GetProperty("subscriptionDeadlineState").GetString() == "reported");
+    Check(renewed.GetProperty("plan").GetString() == "plus");
+    Check(renewed.GetProperty("planProvenance").GetString() == "quota");
+
+    // Omitting a replacement ID token must not invent a fresh deadline from the old claim.
+    issuer.NativeResponseBody = JsonSerializer.Serialize(new { access_token = issuer.Token("native-access", "sub-A", null) });
+    await auth.ReadyAsync("A", default, forceRefresh: true);
+    // Keep the previous ID token for identity hints, but do not claim its deadline was refreshed.
+    var omitted = JsonSerializer.SerializeToElement(vault.PublicAccounts[0]);
+    Check(omitted.GetProperty("subscriptionDeadlineState").GetString() == "stale");
+    Check(omitted.GetProperty("subscriptionActiveUntil").ValueKind == JsonValueKind.Null);
 }
 Task SettingsRestoration()
 {

@@ -32,12 +32,13 @@ public sealed class Quota(HttpClient http, OAuth auth, Vault vault)
     private readonly ConcurrentDictionary<string, SemaphoreSlim> locks = new();
     private readonly ConcurrentDictionary<string, QuotaRefreshFailure> refreshFailures = new();
     private readonly ConcurrentDictionary<string, DateTimeOffset> recoveryBackoff = new();
+    private readonly ConcurrentDictionary<string, DateTimeOffset> renewalSyncAt = new();
     public QuotaRefreshFailure[] RefreshErrors => refreshFailures.Values.Where(x => vault.Find(x.AccountId) is not null).ToArray();
     public object View(string id) => Snapshot(id) is { } snapshot ? snapshot : new { accountId = id, available = false, reason = "quota_source_unverified", refreshError = refreshFailures.GetValueOrDefault(id) };
     public object[] Views => vault.Accounts.Select(x => View(x.Id)).ToArray();
     public QuotaSnapshot? Snapshot(string id) => snapshots.TryGetValue(id, out var snapshot)
         ? snapshot with { RefreshError = refreshFailures.GetValueOrDefault(id) } : null;
-    public void Forget(string id) { snapshots.TryRemove(id, out _); refreshFailures.TryRemove(id, out _); recoveryBackoff.TryRemove(id, out _); }
+    public void Forget(string id) { snapshots.TryRemove(id, out _); refreshFailures.TryRemove(id, out _); recoveryBackoff.TryRemove(id, out _); renewalSyncAt.TryRemove(id, out _); }
     public async Task RefreshAllAsync(IEnumerable<string> accountIds, CancellationToken cancellationToken, bool force = false)
     {
         foreach (var id in accountIds.ToArray())
@@ -68,7 +69,25 @@ public sealed class Quota(HttpClient http, OAuth auth, Vault vault)
             if (refreshFailures.TryGetValue(id, out var concurrentFailure) && concurrentFailure.At >= startedAt) return View(id);
             if (Snapshot(id) is { RefreshError: null } current && (current.UpdatedAt >= startedAt
                 || !force && current.Fresh(DateTimeOffset.UtcNow) && DateTimeOffset.UtcNow - current.UpdatedAt < TimeSpan.FromSeconds(30))) return current;
+            var beforeReady = account;
             account = await auth.ReadyAsync(id, cancellationToken);
+            var preparedRefresh = account.UpdatedAt != beforeReady.UpdatedAt || account.AccessToken != beforeReady.AccessToken
+                || account.RefreshToken != beforeReady.RefreshToken;
+            var now = DateTimeOffset.UtcNow;
+            // Preserve bounded manual renewal sync for a known past deadline.
+            // Unknown/missing metadata alone never triggers a rotation.
+            if (force && !preparedRefresh && SubscriptionExpiry.FromIdToken(account.IdToken) <= now
+                && (!renewalSyncAt.TryGetValue(id, out var lastSync) || now - lastSync >= TimeSpan.FromMinutes(15)))
+            {
+                renewalSyncAt[id] = now;
+                try
+                {
+                    account = await auth.ReadyAsync(id, cancellationToken, forceRefresh: true, rejectedCredential: account);
+                    preparedRefresh = true;
+                }
+                catch (AuthFailure ex) when (ex.Code is "auth_temporarily_unavailable" or "refresh_not_yet_allowed")
+                { account = await auth.ReadyAsync(id, cancellationToken); }
+            }
             async Task<HttpResponseMessage> SendAsync(AccountCredential credential)
             {
                 using var request = new HttpRequestMessage(HttpMethod.Get, "https://chatgpt.com/backend-api/wham/usage");
@@ -88,11 +107,15 @@ public sealed class Quota(HttpClient http, OAuth auth, Vault vault)
                     && !(recoveryBackoff.TryGetValue(id, out var retryAt) && retryAt > DateTimeOffset.UtcNow))
                 {
                     response.Dispose(); recovering = true;
-                    recoveryBackoff[id] = DateTimeOffset.UtcNow.AddSeconds(30);
-                    account = await auth.ReadyAsync(id, cancellationToken, forceRefresh: true, rejectedCredential: account);
-                    requestedAt = DateTimeOffset.UtcNow;
-                    response = await SendAsync(account);
-                    status = (int)response.StatusCode; recovering = false;
+                    recoveryBackoff[id] = DateTimeOffset.UtcNow.AddMinutes(15);
+                    if (!preparedRefresh)
+                    {
+                        account = await auth.ReadyAsync(id, cancellationToken, forceRefresh: true, rejectedCredential: account);
+                        requestedAt = DateTimeOffset.UtcNow;
+                        response = await SendAsync(account);
+                        status = (int)response.StatusCode;
+                    }
+                    recovering = false;
                 }
                 if (!response.IsSuccessStatusCode)
                 {

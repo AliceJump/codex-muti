@@ -10,22 +10,26 @@ namespace CodexPool.Daemon;
 public static class SubscriptionExpiry
 {
     public sealed record Metadata(DateTimeOffset? ActiveUntil, string State, DateTimeOffset? ObservedAt, bool TokenCurrent = false);
-    public static Metadata Inspect(string idToken, bool stale = false)
+    public static Metadata Inspect(string idToken, bool stale = false, DateTimeOffset? now = null)
     {
         var until = FromIdToken(idToken);
         try
         {
             var jwt = new JsonWebToken(idToken);
             var observedAt = jwt.IssuedAt == DateTime.MinValue ? (DateTimeOffset?)null : new DateTimeOffset(jwt.IssuedAt, TimeSpan.Zero);
-            var tokenCurrent = !stale && jwt.ValidTo > DateTime.UtcNow;
+            var checkedAt = now ?? DateTimeOffset.UtcNow;
+            var tokenCurrent = !stale && jwt.ValidTo > checkedAt.UtcDateTime;
             if (until is null) return new(null, "not_reported", observedAt, tokenCurrent);
-            if (!tokenCurrent || until <= DateTimeOffset.UtcNow)
+            if (!tokenCurrent || until <= checkedAt)
                 return new(null, "stale", observedAt, tokenCurrent);
             return new(until, "current", observedAt, tokenCurrent);
         }
         catch (Exception ex) when (ex is ArgumentException or FormatException or InvalidOperationException)
         { return new(null, "unknown", null); }
     }
+    public static DateTimeOffset? ActiveUntil(string idToken, DateTimeOffset now) => Inspect(idToken, now: now).ActiveUntil;
+    public static string DeadlineState(string idToken, DateTimeOffset now) => Inspect(idToken, now: now).State switch
+    { "current" => "reported", "not_reported" => "unknown", var state => state };
     public static string? PlanFromIdToken(string idToken)
     {
         try
