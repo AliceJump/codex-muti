@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using CodexPool.Core;
 using Microsoft.IdentityModel.JsonWebTokens;
 
 namespace CodexPool.Daemon;
@@ -39,7 +40,7 @@ public static class SubscriptionExpiry
             using var json = JsonDocument.Parse(metadata.Value);
             return json.RootElement.ValueKind == JsonValueKind.Object
                 && json.RootElement.TryGetProperty("chatgpt_plan_type", out var plan) && plan.ValueKind == JsonValueKind.String
-                && plan.GetString() is { } value && Regex.IsMatch(value, "^[a-zA-Z0-9_-]{1,80}$") ? value : null;
+                && plan.GetString() is { } value && Regex.IsMatch(value, "^[a-zA-Z0-9_-]{1,80}$") && ModelErrors.ValidPlan(value) ? value : null;
         }
         catch (Exception ex) when (ex is ArgumentException or JsonException or FormatException or InvalidOperationException)
         { return null; }

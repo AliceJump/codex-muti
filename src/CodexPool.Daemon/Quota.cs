@@ -106,6 +106,9 @@ public sealed class Quota(HttpClient http, OAuth auth, Vault vault)
                 if (response.StatusCode == HttpStatusCode.Unauthorized
                     && !(recoveryBackoff.TryGetValue(id, out var retryAt) && retryAt > DateTimeOffset.UtcNow))
                 {
+                    // Invalidate display/routing evidence immediately, including if
+                    // the caller cancels while the durable rotation is completing.
+                    refreshFailures[id] = new(id, "quota_unauthorized", DateTimeOffset.UtcNow, status);
                     response.Dispose(); recovering = true;
                     recoveryBackoff[id] = DateTimeOffset.UtcNow.AddMinutes(15);
                     if (!preparedRefresh)

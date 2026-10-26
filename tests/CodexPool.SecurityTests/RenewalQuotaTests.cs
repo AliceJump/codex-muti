@@ -165,4 +165,28 @@ internal static class RenewalQuotaTests
             Check(issuer.RefreshCalls == 1 && !JsonSerializer.Serialize(quota.RefreshErrors).Contains("CANARY"));
         }
     }
+    public static async Task Cancellation(string root)
+    {
+        var vault = Store(root, "renewal-quota-cancellation");
+        vault.SaveQuota(Quota.Parse("A", Encoding.UTF8.GetBytes(Payload("free"))));
+        using var issuer = new FakeIssuer(); using var authHttp = new HttpClient(issuer); var auth = new OAuth(authHttp, vault);
+        using var http = new HttpClient(new AsyncHandler((_, _) => Task.FromResult(Reply(HttpStatusCode.Unauthorized))));
+        var quota = new Quota(http, auth, vault);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        issuer.Barrier = async ct => { entered.TrySetResult(); await release.Task.WaitAsync(ct); };
+        using var caller = new CancellationTokenSource();
+        var refresh = quota.RefreshAsync("A", caller.Token, force: true);
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            Check(quota.Snapshot("A")!.CacheState == "historical");
+            caller.Cancel();
+        }
+        finally { release.TrySetResult(); }
+        try { await refresh; Check(false); } catch (OperationCanceledException) { }
+        Check(vault.Find("A")!.AuthStatus == "ready" && issuer.RefreshCalls == 1);
+        Check(quota.Snapshot("A")!.CacheState == "historical" && quota.RefreshErrors.Single().Status == 401);
+        Check(vault.Find("B")!.RefreshToken == "old-refresh-B");
+    }
 }

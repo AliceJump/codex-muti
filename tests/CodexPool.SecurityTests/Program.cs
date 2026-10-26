@@ -64,6 +64,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Renewal quota coalesces concurrent 401 recovery and uses a newer credential generation", () => RenewalQuotaTests.Concurrency(root)),
     ("Renewal metadata marks omitted, expired and missing subscription claims without inventing dates", () => RenewalQuotaTests.Metadata(root)),
     ("Renewal credential recovery preserves refresh backoff and permanent rejection without affecting B", () => RenewalQuotaTests.RecoveryFailure(root)),
+    ("Renewal quota cancellation retains rejected history while persisting the accepted rotation", () => RenewalQuotaTests.Cancellation(root)),
     ("Quota selection survives persistence faults without changing the owner", QuotaSelectionFailure),
     ("Quota recovery requires a new successful query and preserves independent restrictions", QuotaRecovery),
     ("Quota queries started before rejection cannot clear a newer cooldown", QuotaRecoveryRace),
