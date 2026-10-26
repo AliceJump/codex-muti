@@ -179,5 +179,26 @@ for(const button of $('statistics-periods').querySelectorAll('button'))button.on
 $('history-range').onsubmit=e=>{e.preventDefault();if($('history-from').value&&$('history-to').value&&$('history-from').value>$('history-to').value){notice('开始日期不能晚于结束日期。');return;}filterFrom=$('history-from').value;filterTo=$('history-to').value;statisticsPeriod='custom';refreshHistory(true);};
 $('history-refresh').onclick=()=>refreshHistory(true);
 $('requests-more').onclick=()=>{if(!historyLoading&&nextBefore!==null)refreshHistory(true,true);};
-async function start(){try{csrf=(await api('/browser-session')).csrf;$('workspace').hidden=false;render(await api('/status'));const events=new EventSource('/events');events.addEventListener('status',e=>{render(JSON.parse(e.data));$('connection').textContent='服务在线';});events.onerror=()=>{$('connection').textContent='正在重新连接';};}catch{$('locked').hidden=false;$('connection').textContent='等待安全会话';}}
+let issuedModelKeyId = null;
+function clearIssuedModelKey(){issuedModelKeyId=null;$('model-key-secret').value='';$('model-key-issued').hidden=true;}
+async function refreshModelKeys(){
+  const keys=await api('/model-keys');
+  $('model-keys').replaceChildren(...keys.map(key=>{
+    const row=text('div','');row.className='section-title';row.append(text('span',key.name));
+    const revoke=text('button','撤销');revoke.type='button';revoke.onclick=async()=>{
+      revoke.disabled=true;
+      try{await api('/model-keys/'+encodeURIComponent(key.id)+'/revoke',{});if(issuedModelKeyId===key.id)clearIssuedModelKey();await refreshModelKeys();notice('密钥已撤销，后续请求将被拒绝。');}
+      catch(e){notice(e.message);revoke.disabled=false;}
+    };row.append(revoke);return row;
+  }));
+}
+$('model-key-create').onsubmit=async e=>{
+  e.preventDefault();const button=e.submitter;if(button)button.disabled=true;
+  try{const issued=await api('/model-keys/create',{name:$('model-key-name').value});issuedModelKeyId=issued.id;$('model-key-secret').value=issued.key;$('model-key-issued').hidden=false;await refreshModelKeys();notice('模型密钥已创建，请复制到应用配置中。');}
+  catch(e){notice(e.message);}finally{if(button)button.disabled=false;}
+};
+$('model-key-copy').onclick=async()=>{try{await navigator.clipboard.writeText($('model-key-secret').value);notice('密钥已复制。');}catch{notice('复制未完成，请允许浏览器访问剪贴板后重试。');}};
+$('model-key-dismiss').onclick=clearIssuedModelKey;
+window.addEventListener('pagehide',clearIssuedModelKey);
+async function start(){try{csrf=(await api('/browser-session')).csrf;$('workspace').hidden=false;render(await api('/status'));refreshModelKeys().catch(()=>notice('模型密钥列表读取失败。'));const events=new EventSource('/events');events.addEventListener('status',e=>{render(JSON.parse(e.data));$('connection').textContent='服务在线';});events.onerror=()=>{$('connection').textContent='正在重新连接';};}catch{$('locked').hidden=false;$('connection').textContent='等待安全会话';}}
 start();setInterval(()=>{if(state)render(state);},30000);

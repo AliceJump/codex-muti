@@ -50,6 +50,7 @@ public sealed class VaultDocument
     public List<AccountCredential> Accounts { get; set; } = [];
     public PoolSettings Settings { get; set; } = new();
     public List<QuotaSnapshot> Quotas { get; set; } = [];
+    public List<ModelAccessKey> ModelKeys { get; set; } = [];
     public override string ToString() => "VaultDocument [REDACTED]";
 }
 
@@ -75,6 +76,40 @@ public sealed class Vault
         if (!File.Exists(path)) Persist(document);
     }
     public string LocalKey { get { lock (gate) return document.LocalKey; } }
+    public ModelKeyView[] ModelKeys { get { lock (gate) return document.ModelKeys.Select(x => new ModelKeyView(x.Id, x.Name, x.CreatedAt)).ToArray(); } }
+    public IssuedModelKey CreateModelKey(string name)
+    {
+        name = name.Trim();
+        if (name.Length is < 1 or > 80 || name.Any(char.IsControl)) throw new ArgumentException("invalid_key_name");
+        lock (gate)
+        {
+            if (document.ModelKeys.Count >= 100) throw new ArgumentException("model_key_limit");
+            var secret = "cpk_" + Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+            var record = new ModelAccessKey { Id = Guid.NewGuid().ToString("N"), Name = name, Hash = ModelAccessKey.Digest(secret), CreatedAt = DateTimeOffset.UtcNow };
+            var next = CloneDocument(document); next.ModelKeys.Add(record); Persist(next); document = next;
+            return new(record.Id, secret);
+        }
+    }
+    public bool RevokeModelKey(string id)
+    {
+        lock (gate)
+        {
+            var next = CloneDocument(document);
+            if (next.ModelKeys.RemoveAll(x => x.Id == id) == 0) return false;
+            Persist(next); document = next; return true;
+        }
+    }
+    public bool AcceptsModelKey(string authorization)
+    {
+        if (!authorization.StartsWith("Bearer cpk_", StringComparison.Ordinal) || authorization.Length != 75) return false;
+        var hash = ModelAccessKey.Digest(authorization[7..]);
+        lock (gate)
+        {
+            var accepted = false;
+            foreach (var key in document.ModelKeys) accepted |= LocalCommands.EqualSecret(hash, key.Hash);
+            return accepted;
+        }
+    }
     public IDisposable AcquireUse(string id, bool model = false)
     {
         lock (gate)

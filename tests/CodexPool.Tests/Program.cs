@@ -6,6 +6,7 @@ using CodexPool.Core;
 
 var tests = new (string Name, Func<Task> Run)[]
 {
+    ("Compatibility converts history, tools, images, fragmented SSE, usage and terminal failures without replay", CompatibilityTests.Run),
     ("Definite quota rejection fails over once", () => Scenario(429, "usage_limit_reached", 2)),
     ("Definite auth rejection fails over once", () => Scenario(401, "invalid_token", 2)),
     ("Ordinary 429 never fails over", () => Scenario(429, "rate_limit_exceeded", 1)),

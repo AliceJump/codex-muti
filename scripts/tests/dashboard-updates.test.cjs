@@ -32,7 +32,7 @@ async function setup() {
         calls.push({ url, options });
         if (intercept) { const reply = intercept(url, options); if (reply) return reply; }
         const data = url === '/browser-session' ? { csrf: 'fixture' } : url === '/status' ? current
-            : url.startsWith('/statistics?') ? statistics : url.startsWith('/requests?') ? history : {};
+            : url.startsWith('/statistics?') ? statistics : url.startsWith('/requests?') ? history : url === '/model-keys' ? [] : {};
         return { ok: true, json: async () => structuredClone(data) };
     };
     w.eval(script + '\nwindow.testApi={render,refreshHistory,renderStatistics,patchChildren,patchElement,getItems:()=>historyItems,getCursor:()=>nextBefore};');
@@ -40,6 +40,43 @@ async function setup() {
     return { dom, w, calls, api: w.testApi, setState(value) { current = value; }, setPage(value) { history = value; },
         intercept(value) { intercept = value; }, setStats(value) { statistics = value; } };
 }
+test('model key lifecycle requires CSRF, renders names as text, and clears the one-time secret', async () => {
+    const h = await setup(), { w } = h;
+    try {
+        let keys = [{ id: 'previous-key', name: 'Existing key' }], copied = '';
+        Object.defineProperty(w.navigator, 'clipboard', { value: { writeText: async value => { copied = value; } } });
+        h.intercept((url) => {
+            const data = url === '/model-keys/create' ? { id: 'fixture-key', key: 'SYNTHETIC-KEY-CANARY' }
+                : url === '/model-keys' ? keys : url === '/model-keys/fixture-key/revoke' || url === '/model-keys/previous-key/revoke' ? { revoked: true } : undefined;
+            if (data === undefined) return null;
+            if (url === '/model-keys/create') keys.push({ id: 'fixture-key', name: '<img src=x onerror=alert(1)>' });
+            if (url.endsWith('/revoke')) keys = keys.filter(key => url !== `/model-keys/${key.id}/revoke`);
+            return { ok: true, json: async () => structuredClone(data) };
+        });
+        const form = w.document.getElementById('model-key-create');
+        w.document.getElementById('model-key-name').value = 'AstrBot';
+        form.dispatchEvent(new w.SubmitEvent('submit', { cancelable: true, submitter: form.querySelector('button') }));
+        await tick();
+        const creation = h.calls.find(x => x.url === '/model-keys/create');
+        assert.equal(creation.options.headers['X-Codex-Pool-CSRF'], 'fixture');
+        assert.equal(JSON.parse(creation.options.body).name, 'AstrBot');
+        assert.equal(w.document.getElementById('model-key-secret').value, 'SYNTHETIC-KEY-CANARY');
+        assert.equal(w.document.querySelector('#model-keys img'), null);
+        assert.match(w.document.getElementById('model-keys').textContent, /<img/);
+        w.document.getElementById('model-key-copy').click(); await tick();
+        assert.equal(copied, 'SYNTHETIC-KEY-CANARY');
+        w.document.getElementById('model-keys').querySelector('button').click(); await tick();
+        assert.equal(w.document.getElementById('model-key-secret').value, 'SYNTHETIC-KEY-CANARY');
+        assert.equal(w.document.getElementById('model-key-issued').hidden, false);
+        assert.equal(w.document.getElementById('model-keys').children.length, 1);
+        w.document.getElementById('model-keys').querySelector('button').click(); await tick();
+        assert.equal(w.document.getElementById('model-key-secret').value, '');
+        assert.equal(w.document.getElementById('model-key-issued').hidden, true);
+        assert.equal(w.document.getElementById('model-keys').children.length, 0);
+        assert.equal(w.localStorage.length, 0);
+        assert.equal(w.sessionStorage.length, 0);
+    } finally { h.dom.window.close(); }
+});
 test('identical state causes no account DOM mutations; changes preserve card, button focus, and latest actions', async () => {
     const h = await setup(), { w, api } = h;
     try {
