@@ -33,7 +33,7 @@ try
         options.Limits.MaxRequestBodySize = ModelRequestBody.MaximumBytes;
         options.Limits.RequestHeadersTimeout = TimeSpan.FromSeconds(15);
     });
-    var app = builder.Build();
+    await using var app = builder.Build();
     using var http = new HttpClient(new SocketsHttpHandler { AllowAutoRedirect = false,
         AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate })
         { Timeout = TimeSpan.FromSeconds(30) };
@@ -352,6 +352,9 @@ try
         "/api/v1/responses", "/api/v1/chat/completions", "/api/v1/images/generations" })
         app.MapPost(route, ModelRequest);
     app.MapFallback(() => Results.NotFound(new { error = new { code = "endpoint_not_supported_in_phase0" } }));
+    // No background credential rotation before successful listener startup. A
+    // deployment can safely discard a new process that never began listening.
+    await app.StartAsync();
     Console.WriteLine("Codex Pool listening at http://127.0.0.1:3210 (live migration acceptance gate applies).");
     var eventTask = events.RunAsync(Status, app.Lifetime.ApplicationStopping);
     var statisticsTask = Task.Run(async () =>
@@ -375,7 +378,7 @@ try
         }
         catch (OperationCanceledException) when (app.Lifetime.ApplicationStopping.IsCancellationRequested) { }
     });
-    await app.RunAsync(); await Task.WhenAll(eventTask, quotaTask, statisticsTask);
+    await app.WaitForShutdownAsync(); await Task.WhenAll(eventTask, quotaTask, statisticsTask);
     // ApplicationStopping occurs before Kestrel drains its accepted requests.
     statistics.Flush(); return 0;
 }

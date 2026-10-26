@@ -911,6 +911,18 @@ Task PoolRouting()
 }
 async Task DaemonShutdown()
 {
+    foreach (var inFlight in new[] { 0, 1 })
+        Check(LocalCommands.CanShutdown(JsonSerializer.SerializeToElement(new { inFlightRequests = new[] { new { value = inFlight } },
+            accounts = Array.Empty<object>(), nativeLoginAttempts = Array.Empty<object>() })) == (inFlight == 0));
+    Check(!LocalCommands.CanShutdown(JsonSerializer.SerializeToElement(new { inFlightRequests = Array.Empty<object>(),
+        accounts = Array.Empty<object>(), nativeLoginAttempts = new[] { new { state = "waiting_for_browser" } } })));
+    foreach (var reason in new[] { "auth_unavailable", "auth_temporarily_unavailable", "unknown" })
+    {
+        var status = JsonSerializer.SerializeToElement(new { inFlightRequests = Array.Empty<object>(), nativeLoginAttempts = Array.Empty<object>(),
+            accounts = new[] { new { id = "A", auth = "refresh_pending" } }, accountAvailability = new[] { new { accountId = "A", reason } } });
+        Check(LocalCommands.CanShutdown(status) == (reason == "auth_unavailable"));
+    }
+    Check(!LocalCommands.CanShutdown(JsonSerializer.SerializeToElement(new { accounts = Array.Empty<object>() })));
     var builder = WebApplication.CreateBuilder([]); builder.Logging.ClearProviders();
     builder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, 0));
     await using var app = builder.Build();

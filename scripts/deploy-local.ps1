@@ -8,6 +8,7 @@ $taskMutex = [Threading.Mutex]::new($false, ('Local\CodexPoolDeploy-' + [Environ
 $taskOwned = $false
 $taskOld = $null
 $taskNew = $null
+$taskNewReadiness = [pscustomobject]@{Ready=$false;ListenerObserved=$false}
 $taskStopped = $false
 $taskOldUi = @()
 $taskUiStopped = @()
@@ -44,7 +45,8 @@ function Assert-PoolIdle($Status) {
     if ($null -eq $Status.inFlightRequests -or @($Status.inFlightRequests | Where-Object value -GT 0).Count) {
         throw '模型请求仍在进行或活动状态未知，保留现有代理；请求结束后再部署。'
     }
-    if (@($Status.accounts | Where-Object auth -EQ 'refresh_pending').Count -or
+    $taskRefresh = Get-PoolRefreshGuard $Status
+    if ($taskRefresh.Active.Count -or $taskRefresh.Unknown.Count -or
         @($Status.nativeLoginAttempts | Where-Object state -EQ 'waiting_for_browser').Count) {
         throw '授权操作仍在进行，保留现有代理；完成后再部署。'
     }
@@ -77,15 +79,18 @@ function Get-PoolRefreshGuard($Status) {
     }
     [pscustomobject]@{Active=$taskActive;Reauthorize=$taskReauthorize;Unknown=$taskUnknown}
 }
-function Wait-PoolDaemon($Process, [string]$Path) {
+function Wait-PoolDaemon($Process, [string]$Path, $Readiness = $null) {
     for ($taskAttempt=0; $taskAttempt -lt 30; $taskAttempt++) {
         $Process.Refresh()
         if ($Process.HasExited) { throw '新代理进程提前退出。' }
         try {
             $taskListener = @(Get-NetTCPConnection -LocalPort 3210 -State Listen -ErrorAction SilentlyContinue)
+            if ($Readiness -and @($taskListener | Where-Object OwningProcess -EQ $Process.Id).Count) { $Readiness.ListenerObserved = $true }
             $taskHealth = Invoke-RestMethod -Uri 'http://127.0.0.1:3210/health' -NoProxy -TimeoutSec 1
             if ($taskHealth.status -eq 'running' -and $taskListener.Count -gt 0 -and @($taskListener | Where-Object OwningProcess -NE $Process.Id).Count -eq 0) {
-                return (Get-PoolStatus $Path)
+                $taskReadyStatus = Get-PoolStatus $Path
+                if ($Readiness) { $Readiness.Ready = $true }
+                return $taskReadyStatus
             }
         } catch { }
         Start-Sleep -Milliseconds 200
@@ -151,7 +156,7 @@ try {
     if ($taskDeployCore) {
         if (Get-NetTCPConnection -LocalPort 3210 -State Listen -ErrorAction SilentlyContinue) { throw '3210 仍被占用。' }
         $taskNew = Start-PoolDaemon $taskNewExe $taskBoundary
-        $taskNewStatus = Wait-PoolDaemon $taskNew $taskNewExe
+        $taskNewStatus = Wait-PoolDaemon $taskNew $taskNewExe $taskNewReadiness
         if ($taskOld -and (Get-PoolSettingsSnapshot $taskNewStatus.settings) -ne (Get-PoolSettingsSnapshot $taskStatus.settings)) { throw '账户池设置校验失败。' }
     }
     if ($taskDeployUi) {
@@ -181,7 +186,16 @@ try {
     if ($taskNew) {
         $taskNew.Refresh()
         if (-not $taskNew.HasExited) {
-            try { Stop-IdlePoolDaemon ([pscustomobject]@{Id=$taskNew.Id;Path=$taskNew.Path;StartTicks=$taskNew.StartTime.ToUniversalTime().Ticks}) $taskNewExe }
+            try {
+                $taskNewIdentity = [pscustomobject]@{Id=$taskNew.Id;Path=$taskNew.Path;StartTicks=$taskNew.StartTime.ToUniversalTime().Ticks}
+                if (-not $taskNewReadiness.Ready -and -not $taskNewReadiness.ListenerObserved) {
+                    # Query all listeners: an absent LocalPort match can itself
+                    # produce a cmdlet error, which is not proof of unknown state.
+                    $taskListenersNow = @(Get-NetTCPConnection -State Listen -ErrorAction Stop | Where-Object LocalPort -EQ 3210)
+                    if ($taskListenersNow.Count) { throw '新代理可能已监听，保留进程。' }
+                    Stop-OwnedProcess $taskNewIdentity
+                } else { Stop-IdlePoolDaemon $taskNewIdentity $taskNewExe }
+            }
             catch { $taskCanRestoreCore = $false; Write-Warning '新代理仍在工作或无法确认安全停止，保留进程；未强制回滚核心。' }
         }
     }
