@@ -43,14 +43,14 @@ async function setup() {
 test('model key lifecycle requires CSRF, renders names as text, and clears the one-time secret', async () => {
     const h = await setup(), { w } = h;
     try {
-        let keys = [], copied = '';
+        let keys = [{ id: 'previous-key', name: 'Existing key' }], copied = '';
         Object.defineProperty(w.navigator, 'clipboard', { value: { writeText: async value => { copied = value; } } });
         h.intercept((url) => {
             const data = url === '/model-keys/create' ? { id: 'fixture-key', key: 'SYNTHETIC-KEY-CANARY' }
-                : url === '/model-keys' ? keys : url === '/model-keys/fixture-key/revoke' ? { revoked: true } : undefined;
+                : url === '/model-keys' ? keys : url === '/model-keys/fixture-key/revoke' || url === '/model-keys/previous-key/revoke' ? { revoked: true } : undefined;
             if (data === undefined) return null;
-            if (url === '/model-keys/create') keys = [{ id: 'fixture-key', name: '<img src=x onerror=alert(1)>' }];
-            if (url.endsWith('/revoke')) keys = [];
+            if (url === '/model-keys/create') keys.push({ id: 'fixture-key', name: '<img src=x onerror=alert(1)>' });
+            if (url.endsWith('/revoke')) keys = keys.filter(key => url !== `/model-keys/${key.id}/revoke`);
             return { ok: true, json: async () => structuredClone(data) };
         });
         const form = w.document.getElementById('model-key-create');
@@ -65,6 +65,10 @@ test('model key lifecycle requires CSRF, renders names as text, and clears the o
         assert.match(w.document.getElementById('model-keys').textContent, /<img/);
         w.document.getElementById('model-key-copy').click(); await tick();
         assert.equal(copied, 'SYNTHETIC-KEY-CANARY');
+        w.document.getElementById('model-keys').querySelector('button').click(); await tick();
+        assert.equal(w.document.getElementById('model-key-secret').value, 'SYNTHETIC-KEY-CANARY');
+        assert.equal(w.document.getElementById('model-key-issued').hidden, false);
+        assert.equal(w.document.getElementById('model-keys').children.length, 1);
         w.document.getElementById('model-keys').querySelector('button').click(); await tick();
         assert.equal(w.document.getElementById('model-key-secret').value, '');
         assert.equal(w.document.getElementById('model-key-issued').hidden, true);
