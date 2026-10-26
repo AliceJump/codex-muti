@@ -40,6 +40,25 @@ function Get-PoolStatus([string]$Path) {
     if ($LASTEXITCODE -ne 0) { throw '无法验证代理授权状态，请使用与原代理相同的账户存储环境。' }
     $taskRaw | ConvertFrom-Json
 }
+function Assert-PoolIdle($Status) {
+    if ($null -eq $Status.inFlightRequests -or @($Status.inFlightRequests | Where-Object value -GT 0).Count) {
+        throw '模型请求仍在进行或活动状态未知，保留现有代理；请求结束后再部署。'
+    }
+    if (@($Status.accounts | Where-Object auth -EQ 'refresh_pending').Count -or
+        @($Status.nativeLoginAttempts | Where-Object state -EQ 'waiting_for_browser').Count) {
+        throw '授权操作仍在进行，保留现有代理；完成后再部署。'
+    }
+}
+function Stop-IdlePoolDaemon($ProcessInfo, [string]$CommandPath) {
+    $taskProcess = Get-Process -Id $ProcessInfo.Id -ErrorAction Stop
+    if ($taskProcess.Path -ne $ProcessInfo.Path -or $taskProcess.StartTime.ToUniversalTime().Ticks -ne $ProcessInfo.StartTicks) { throw '进程身份已变化，拒绝停止。' }
+    Assert-PoolIdle (Get-PoolStatus $CommandPath)
+    & $CommandPath shutdown
+    if ($LASTEXITCODE -ne 0) { throw '代理未接受安全停止，未强制结束进程。' }
+    # Never terminate accepted requests or rotations. Newer daemons can drain for
+    # the full upstream timeout; a slow shutdown leaves this build unpublished.
+    if (-not $taskProcess.WaitForExit(45000)) { throw '代理仍在安全退出，未强制结束；退出完成后再部署。' }
+}
 function Get-PoolSettingsSnapshot($Settings) {
     # Older daemons omit the new optional threshold. Compare its effective absence as null.
     [ordered]@{autoSwitch=[bool]$Settings.autoSwitch;fiveHourThreshold=[double]$Settings.fiveHourThreshold;
@@ -125,8 +144,9 @@ try {
         [pscustomobject]@{Id=$_.ProcessId;Path=$_.ExecutablePath;StartTicks=$taskUiProcess.StartTime.ToUniversalTime().Ticks;Tray=($_.CommandLine -match '(?:^|\s)--(?:tray|widget)(?:\s|$)');Proxy=($_.CommandLine -match '(?:^|\s)--proxy-tray(?:\s|$)');Source=$taskOldSource}
     }) }
     Write-Host "2/4 仅停止所选范围：$Target。"
+    if ($taskOld) { Assert-PoolIdle (Get-PoolStatus $taskNewExe) }
     foreach ($taskUi in $taskOldUi) { Stop-OwnedProcess $taskUi; $taskUiStopped += $taskUi }
-    if ($taskOld) { Stop-OwnedProcess $taskOld; $taskStopped = $true }
+    if ($taskOld) { Stop-IdlePoolDaemon $taskOld $taskNewExe; $taskStopped = $true }
     Write-Host '3/4 启动所选版本并验证状态…'
     if ($taskDeployCore) {
         if (Get-NetTCPConnection -LocalPort 3210 -State Listen -ErrorAction SilentlyContinue) { throw '3210 仍被占用。' }
@@ -156,12 +176,16 @@ try {
     Write-Host "部署完成：$taskBuild"
 } catch {
     $taskFailure = $_
+    $taskCanRestoreCore = $true
     foreach ($taskUi in $taskNewUi) { try { Stop-OwnedProcess $taskUi } catch { Write-Warning '新界面未能自动退出。' } }
     if ($taskNew) {
         $taskNew.Refresh()
-        if (-not $taskNew.HasExited) { Stop-Process -InputObject $taskNew -Force; [void]$taskNew.WaitForExit(10000) }
+        if (-not $taskNew.HasExited) {
+            try { Stop-IdlePoolDaemon ([pscustomobject]@{Id=$taskNew.Id;Path=$taskNew.Path;StartTicks=$taskNew.StartTime.ToUniversalTime().Ticks}) $taskNewExe }
+            catch { $taskCanRestoreCore = $false; Write-Warning '新代理仍在工作或无法确认安全停止，保留进程；未强制回滚核心。' }
+        }
     }
-    if ($taskStopped -and $taskOld) {
+    if ($taskStopped -and $taskOld -and $taskCanRestoreCore) {
         try { $taskRestored = Start-PoolDaemon $taskOld.Path $taskOld.Boundary; $null = Wait-PoolDaemon $taskRestored $taskOld.Path; Write-Warning '部署失败，已启动旧版本。' }
         catch { Write-Warning ('旧版本自动恢复失败，请手动运行：' + $taskOld.Path + ' serve') }
     }

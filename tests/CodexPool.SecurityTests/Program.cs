@@ -725,8 +725,9 @@ async Task DaemonShutdown()
     builder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, 0));
     await using var app = builder.Build();
     var stopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var busy = true;
     const string key = "LOCAL-SHUTDOWN-CANARY";
-    DaemonControlEndpoints.Map(app, key, () => stopped.TrySetResult());
+    DaemonControlEndpoints.Map(app, key, () => stopped.TrySetResult(), () => !busy);
     await app.StartAsync();
     using var http = new HttpClient(new SocketsHttpHandler { UseProxy = false })
         { BaseAddress = new(app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single()) };
@@ -737,6 +738,8 @@ async Task DaemonShutdown()
     using (var browser = await http.PostAsJsonAsync("/control/shutdown", new { })) Check(browser.StatusCode == HttpStatusCode.Unauthorized);
     Check(!stopped.Task.IsCompleted);
     http.DefaultRequestHeaders.Authorization = new("Bearer", key);
+    using (var rejected = await http.PostAsJsonAsync("/control/shutdown", new { })) Check(rejected.StatusCode == HttpStatusCode.Conflict);
+    Check(!stopped.Task.IsCompleted); busy = false;
     using var response = await http.PostAsJsonAsync("/control/shutdown", new { });
     Check(response.StatusCode == HttpStatusCode.Accepted);
     using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());

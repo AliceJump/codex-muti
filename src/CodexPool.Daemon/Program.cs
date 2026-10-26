@@ -26,7 +26,7 @@ try
     var modelClientVersion = CodexClientVersion.ResolveInstalled(Environment.GetEnvironmentVariable("CODEX_POOL_CLIENT_VERSION"));
     var builder = WebApplication.CreateBuilder([]);
     builder.Logging.ClearProviders();
-    builder.Services.Configure<HostOptions>(options => options.ShutdownTimeout = TimeSpan.FromSeconds(30));
+    builder.Services.Configure<HostOptions>(options => options.ShutdownTimeout = TimeSpan.FromMinutes(11));
     builder.WebHost.ConfigureKestrel(options =>
     {
         options.Listen(System.Net.IPAddress.Loopback, 3210);
@@ -119,7 +119,8 @@ try
     foreach (var asset in new[] { (Path: "/", File: "index.html", Type: "text/html"), (Path: "/dashboard.js", File: "dashboard.js", Type: "text/javascript"), (Path: "/dashboard.css", File: "dashboard.css", Type: "text/css") })
         app.MapGet(asset.Path, () => Results.Stream(typeof(Vault).Assembly.GetManifestResourceStream("CodexPool.Daemon.Dashboard." + asset.File)!, asset.Type));
     app.MapGet("/settings", () => pool.Settings);
-    DaemonControlEndpoints.Map(app, vault.LocalKey, app.Lifetime.StopApplication);
+    DaemonControlEndpoints.Map(app, vault.LocalKey, app.Lifetime.StopApplication,
+        () => inFlight.Values.All(x => x == 0) && vault.Accounts.All(x => !auth.IsRefreshing(x.Id)));
     app.MapPost("/settings", async (HttpContext context) =>
     {
         var settings = await context.Request.ReadFromJsonAsync<PoolSettings>(context.RequestAborted) ?? throw new AuthFailure("invalid_settings");

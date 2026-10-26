@@ -10,6 +10,22 @@ function New-TestFile([string]$Path, [string]$Value) {
     $null = New-Item -ItemType Directory -Path (Split-Path $Path -Parent) -Force
     [IO.File]::WriteAllText($Path, $Value)
 }
+# Exercise the real idle guard independently of the mocked process lifecycle.
+$taskDeployAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $taskRepository 'scripts/deploy-local.ps1'),[ref]$null,[ref]$null)
+$taskIdleGuard = $taskDeployAst.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Assert-PoolIdle'},$true)
+. ([scriptblock]::Create($taskIdleGuard.Extent.Text))
+foreach ($taskBusyState in @(
+    [pscustomobject]@{accounts=@();nativeLoginAttempts=@()},
+    [pscustomobject]@{inFlightRequests=@(@{value=1});accounts=@();nativeLoginAttempts=@()},
+    [pscustomobject]@{inFlightRequests=@();accounts=@(@{auth='refresh_pending'});nativeLoginAttempts=@()},
+    [pscustomobject]@{inFlightRequests=@();accounts=@();nativeLoginAttempts=@(@{state='waiting_for_browser'})}
+)) {
+    $taskRejected = $false
+    try { Assert-PoolIdle $taskBusyState } catch { $taskRejected = $true }
+    Assert-Test $taskRejected 'Deployment must preserve a busy daemon or unknown activity.'
+}
+Assert-PoolIdle ([pscustomobject]@{inFlightRequests=@(@{value=0});accounts=@();nativeLoginAttempts=@()})
+Write-Output 'PASS deployment refuses active models, rotations, logins and unknown activity'
 function New-TestRoot([string]$Name) {
     $taskTestState.Sandbox = Join-Path $taskFixtures $Name
     $null = New-Item -ItemType Directory -Path (Join-Path $taskTestState.Sandbox 'scripts') -Force
@@ -122,7 +138,7 @@ foreach ($taskCase in @('All','Core','Components','FailCore','FailAllCore','Fail
     New-TestFile (Join-Path $taskTestState.Sandbox '.local/desktop/Proxy/source-build.txt') (Join-Path $taskTestState.Sandbox '.local/base')
     $taskStatusStub = @'
 function Get-PoolStatus([string]$Path) {
-    [pscustomobject]@{boundaryProbe=$true;accounts=@();nativeLoginAttempts=@();settings=[pscustomobject]@{autoSwitch=$false;fiveHourThreshold=95;weeklyThreshold=95;windowThreshold=$null}}
+    [pscustomobject]@{boundaryProbe=$true;accounts=@();nativeLoginAttempts=@();inFlightRequests=@();settings=[pscustomobject]@{autoSwitch=$false;fiveHourThreshold=95;weeklyThreshold=95;windowThreshold=$null}}
 }
 '@
     $taskSourcePath = Join-Path $taskTestState.Sandbox 'scripts/deploy-local.ps1'
@@ -130,6 +146,10 @@ function Get-PoolStatus([string]$Path) {
     $taskStatusFunction = $taskAst.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-PoolStatus'},$true)
     $taskSource = Get-Content -LiteralPath $taskSourcePath -Raw
     $taskSource = $taskSource.Remove($taskStatusFunction.Extent.StartOffset,$taskStatusFunction.Extent.EndOffset-$taskStatusFunction.Extent.StartOffset).Insert($taskStatusFunction.Extent.StartOffset,$taskStatusStub)
+    $taskAst = [Management.Automation.Language.Parser]::ParseInput($taskSource,[ref]$null,[ref]$null)
+    $taskStopFunction = $taskAst.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Stop-IdlePoolDaemon'},$true)
+    $taskStopStub = 'function Stop-IdlePoolDaemon($ProcessInfo, [string]$CommandPath) { Stop-OwnedProcess $ProcessInfo }'
+    $taskSource = $taskSource.Remove($taskStopFunction.Extent.StartOffset,$taskStopFunction.Extent.EndOffset-$taskStopFunction.Extent.StartOffset).Insert($taskStopFunction.Extent.StartOffset,$taskStopStub)
     [IO.File]::WriteAllText($taskSourcePath,$taskSource)
     New-TestFile (Join-Path $taskTestState.Sandbox 'scripts/desktop-client.ps1') @'
 function Start-PoolDesktopClient {
@@ -183,7 +203,7 @@ Write-Output 'PASS invalid CMD target cannot deploy All'
 $taskBatchBytes = [IO.File]::ReadAllBytes((Join-Path $taskRepository 'deploy.cmd'))
 Assert-Test (@($taskBatchBytes | Where-Object { $_ -gt 127 }).Count -eq 0) 'Batch wrapper must remain ASCII.'
 Assert-Test ([IO.File]::ReadAllText((Join-Path $taskRepository 'deploy.cmd')) -notmatch '(?<!\r)\n') 'Batch wrapper must use CRLF.'
-Write-Output '18/18 deployment target checks passed; simulated publishing/processes only'
+Write-Output '19/19 deployment target checks passed; simulated publishing/processes only'
 # The invalid-target CMD check deliberately leaves a nonzero native exit code.
 # Assertions above already checked that rejection; successful callers must receive success.
 $global:LASTEXITCODE = 0

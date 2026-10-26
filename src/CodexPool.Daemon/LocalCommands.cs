@@ -55,6 +55,17 @@ public static class LocalCommands
         }
         using var client = new HttpClient(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(30) };
         client.DefaultRequestHeaders.Authorization = new("Bearer", key);
+        if (command == "shutdown" && args.Length == 0)
+        {
+            using var status = JsonDocument.Parse(await client.GetStringAsync("http://127.0.0.1:3210/status"));
+            if (!status.RootElement.TryGetProperty("inFlightRequests", out var requests) || requests.ValueKind != JsonValueKind.Array
+                || requests.EnumerateArray().Any(x => x.GetProperty("value").GetInt32() > 0)
+                || status.RootElement.GetProperty("accounts").EnumerateArray().Any(x => x.GetProperty("auth").GetString() == "refresh_pending"))
+            { Console.Error.WriteLine("代理仍在处理请求或刷新凭据，未停止。"); return 1; }
+            using var response = await client.PostAsync("http://127.0.0.1:3210/control/shutdown", null);
+            Console.WriteLine(response.IsSuccessStatusCode ? "代理已请求安全停止。" : "代理拒绝停止，保留现有进程。");
+            return response.IsSuccessStatusCode ? 0 : 1;
+        }
         if (command == "settings" && args.Length is 0 or 2 or 3 or 4)
         {
             if (args.Length == 0) { Console.WriteLine(await client.GetStringAsync("http://127.0.0.1:3210/settings")); return 0; }
