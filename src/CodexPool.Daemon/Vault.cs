@@ -47,6 +47,7 @@ public sealed class AccountCredential
         planState = (PlanSource is "validated_id_token" or "login_id_token") && subscription.TokenCurrent
             || usage?.Plan == Plan && PlanUpdatedAt == usage?.UpdatedAt && usage?.Fresh(DateTimeOffset.UtcNow) == true ? "current" : "historical",
         subscriptionActiveUntil = subscription.ActiveUntil, subscriptionState = subscription.State,
+        subscriptionSyncReason = subscription.Reason,
         subscriptionDeadlineState = subscription.State switch { "current" => "reported", "not_reported" => "unknown", var status => status },
         planProvenance = usage?.Plan is not null && usage.Plan == Plan ? "quota" : Plan is not null ? "credential" : "unknown",
         subscriptionSource = "validated_id_token", subscriptionObservedAt = subscription.ObservedAt,

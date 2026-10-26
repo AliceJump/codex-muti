@@ -46,8 +46,8 @@ function patchChildren(parent, children) {
 }
 function notice(message) { setText('notice',message); $('notice').hidden=!message; }
 function reset(at) { const minutes=Math.max(0,Math.ceil((Date.parse(at)-Date.now())/60000)); return minutes>=1440?`${Math.floor(minutes/1440)}d ${Math.floor(minutes%1440/60)}h`:minutes>=60?`${Math.floor(minutes/60)}h ${minutes%60}m`:`${minutes}m`; }
-function subscriptionDeadline(value, status) {
-  if(status==='stale')return '订阅截止时间待同步（旧授权资料）';
+function subscriptionDeadline(value, status, reason) {
+  if(status==='stale')return `订阅截止时间待同步（${({deadline_in_past:'上游仍返回旧日期',id_token_expired:'授权资料已过期',id_token_not_refreshed:'授权资料未更新'})[reason]||'旧授权资料'}）`;
   if(status==='not_reported')return '订阅截止时间未知（上游未提供）';
   const at=typeof value==='string'?new Date(value):null;
   return at&&Number.isFinite(at.getTime())?`订阅截止 ${at.toLocaleString('zh-CN',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23',timeZoneName:'longOffset'})}`:'订阅截止时间未知';
@@ -100,7 +100,7 @@ function render(s) {
     const canActivate=a.enabled&&!a.paused&&!a.drain&&a.state!=='cooldown'&&a.auth!=='reauth_required'&&a.auth!=='refresh_pending';
     if(a.active)card.append(keyed(text('span','✓','check-mark'),'selected'));
     head.append(text('strong',a.name),text('span',states[a.state]||a.state,'badge'));card.append(head);const meta=keyed(text('div','','meta'),'meta');meta.append(text('span',a.plan||'Plan 待确认'),text('span',`授权：${a.auth}`));card.append(meta);
-    card.append(keyed(text('div',subscriptionDeadline(a.subscriptionActiveUntil,a.subscriptionState),'account-tokens'),'subscription'));
+    card.append(keyed(text('div',subscriptionDeadline(a.subscriptionActiveUntil,a.subscriptionState,a.subscriptionSyncReason),'account-tokens'),'subscription'));
     if(a.planSource)card.append(keyed(text('small',`套餐来源：${a.planSource==='native_codex_usage'?'额度接口':a.planSource==='validated_id_token'?'已验证授权资料':a.planSource==='login_id_token'?'登录资料':'旧资料'}${a.planState==='historical'?' · 待同步':''}`),'plan-source'));
     if(canActivate&&!a.active){card.classList.add('selectable');card.onclick=e=>{if(e.target.closest('.controls')||e.target.closest('button'))return;action(`/accounts/${a.id}/activate`);};}
     const access=s.accountAvailability?.find(x=>x.accountId===a.id);if(access?.reason)card.append(keyed(text('small',`模型访问：${availabilityLabel(access)}`),'access'));

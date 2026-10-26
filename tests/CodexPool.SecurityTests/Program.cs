@@ -65,6 +65,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Renewal metadata marks omitted, expired and missing subscription claims without inventing dates", () => RenewalQuotaTests.Metadata(root)),
     ("Renewal credential recovery preserves refresh backoff and permanent rejection without affecting B", () => RenewalQuotaTests.RecoveryFailure(root)),
     ("Renewal quota cancellation retains rejected history while persisting the accepted rotation", () => RenewalQuotaTests.Cancellation(root)),
+    ("Renewal manual refresh updates expired subscription metadata and avoids repeating fresh upstream dates", () => RenewalQuotaTests.ExpiredMetadata(root)),
     ("Quota selection survives persistence faults without changing the owner", QuotaSelectionFailure),
     ("Quota recovery requires a new successful query and preserves independent restrictions", QuotaRecovery),
     ("Quota queries started before rejection cannot clear a newer cooldown", QuotaRecoveryRace),
@@ -1414,7 +1415,7 @@ sealed class FakeIssuer : HttpMessageHandler
     public int CodeCalls { get; private set; }
     public bool ValidPkce { get; private set; }
     public List<string> UsedRefreshTokens { get; } = [];
-    public string Token(string audience, string subject, string? nonce, string issuer = "https://auth.openai.com", bool expired = false, bool forged = false, string? nativeAccountId = null, object? nativeMetadata = null)
+    public string Token(string audience, string subject, string? nonce, string issuer = "https://auth.openai.com", bool expired = false, bool forged = false, string? nativeAccountId = null, object? nativeMetadata = null, DateTimeOffset? issuedAt = null)
     {
         using var other = RSA.Create(2048); var key = new RsaSecurityKey(forged ? other : signing) { KeyId = "fixture-key" };
         var claims = new Dictionary<string, object> { ["sub"] = subject }; if (nonce is not null) claims["nonce"] = nonce;
@@ -1422,7 +1423,7 @@ sealed class FakeIssuer : HttpMessageHandler
         if (nativeMetadata is not null) claims["https://api.openai.com/auth"] = nativeMetadata;
         var now = DateTime.UtcNow;
         return new JsonWebTokenHandler().CreateToken(new SecurityTokenDescriptor { Issuer = issuer, Audience = audience, Claims = claims,
-            IssuedAt = now.AddHours(-2), NotBefore = now.AddHours(-2), Expires = expired ? now.AddMinutes(-10) : now.AddHours(1),
+            IssuedAt = issuedAt?.UtcDateTime ?? now.AddHours(-2), NotBefore = now.AddHours(-2), Expires = expired ? now.AddMinutes(-10) : now.AddHours(1),
             SigningCredentials = new(key, SecurityAlgorithms.RsaSha256) });
     }
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)

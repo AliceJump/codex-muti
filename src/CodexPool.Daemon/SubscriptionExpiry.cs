@@ -10,7 +10,7 @@ namespace CodexPool.Daemon;
 // Deriving this from the stored token also covers existing accounts and refreshes.
 public static class SubscriptionExpiry
 {
-    public sealed record Metadata(DateTimeOffset? ActiveUntil, string State, DateTimeOffset? ObservedAt, bool TokenCurrent = false);
+    public sealed record Metadata(DateTimeOffset? ActiveUntil, string State, DateTimeOffset? ObservedAt, bool TokenCurrent = false, string? Reason = null);
     public static Metadata Inspect(string idToken, bool stale = false, DateTimeOffset? now = null)
     {
         var until = FromIdToken(idToken);
@@ -20,9 +20,9 @@ public static class SubscriptionExpiry
             var observedAt = jwt.IssuedAt == DateTime.MinValue ? (DateTimeOffset?)null : new DateTimeOffset(jwt.IssuedAt, TimeSpan.Zero);
             var checkedAt = now ?? DateTimeOffset.UtcNow;
             var tokenCurrent = !stale && jwt.ValidTo > checkedAt.UtcDateTime;
-            if (until is null) return new(null, "not_reported", observedAt, tokenCurrent);
+            if (until is null) return new(null, "not_reported", observedAt, tokenCurrent, "upstream_not_reported");
             if (!tokenCurrent || until <= checkedAt)
-                return new(null, "stale", observedAt, tokenCurrent);
+                return new(null, "stale", observedAt, tokenCurrent, stale ? "id_token_not_refreshed" : !tokenCurrent ? "id_token_expired" : "deadline_in_past");
             return new(until, "current", observedAt, tokenCurrent);
         }
         catch (Exception ex) when (ex is ArgumentException or FormatException or InvalidOperationException)

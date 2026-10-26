@@ -62,6 +62,9 @@ test('renewal separates fresh plan from unavailable subscription dates and faile
         api.render(s);
         assert.match(cards[0].textContent, /旧授权资料/);
         assert.doesNotMatch(cards[0].textContent, /2030/);
+        s.accounts[0].subscriptionSyncReason = 'deadline_in_past';
+        api.render(s);
+        assert.match(cards[0].textContent, /上游仍返回旧日期/);
     } finally { h.dom.window.close(); }
 });
 test('model key lifecycle requires CSRF, renders names as text, and clears the one-time secret', async () => {

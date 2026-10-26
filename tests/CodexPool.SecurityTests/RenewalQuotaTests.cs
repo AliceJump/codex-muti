@@ -189,4 +189,33 @@ internal static class RenewalQuotaTests
         Check(quota.Snapshot("A")!.CacheState == "historical" && quota.RefreshErrors.Single().Status == 401);
         Check(vault.Find("B")!.RefreshToken == "old-refresh-B");
     }
+    public static async Task ExpiredMetadata(string root)
+    {
+        using var issuer = new FakeIssuer(); using var authHttp = new HttpClient(issuer);
+        var until = DateTimeOffset.UtcNow.AddDays(20);
+        string IdToken(DateTimeOffset date, bool expired = false, DateTimeOffset? issuedAt = null) => issuer.Token(NativeLogin.NativeClientId, "sub-A", null,
+            expired: expired, nativeMetadata: new Dictionary<string, object> { ["chatgpt_account_id"] = "backend-A", ["chatgpt_plan_type"] = "plus",
+                ["chatgpt_subscription_active_until"] = date.ToUnixTimeSeconds() }, issuedAt: issuedAt);
+        var vault = Store(root, "renewal-expired-metadata");
+        vault.ReplaceTokens("A", "old-refresh-A", new() { AccessToken = "old-access-A", RefreshToken = "old-refresh-A", IdToken = IdToken(until, expired: true), ExpiresIn = 86400 });
+        var beforeB = JsonSerializer.Serialize(vault.Find("B"));
+        Check(SubscriptionExpiry.Inspect(vault.Find("A")!.IdToken).Reason == "id_token_expired");
+        issuer.NativeResponseBody = JsonSerializer.Serialize(new { access_token = issuer.Token("native-access", "sub-A", null), id_token = IdToken(until) });
+        using var http = new HttpClient(new AsyncHandler((_, _) => Task.FromResult(Reply(HttpStatusCode.OK, Payload()))));
+        var quota = new Quota(http, new OAuth(authHttp, vault), vault);
+        await quota.RefreshAsync("A", default, force: true);
+        Check(issuer.RefreshCalls == 1 && SubscriptionExpiry.Inspect(vault.Find("A")!.IdToken).State == "current");
+        await quota.RefreshAsync("A", default, force: true);
+        Check(issuer.RefreshCalls == 1 && JsonSerializer.Serialize(vault.Find("B")) == beforeB);
+        // Actual upstream behavior: even a newly issued ID token can report the
+        // previous subscription period. Repeated rotations cannot invent a date.
+        var freshVault = Store(root, "renewal-fresh-old-deadline");
+        freshVault.ReplaceTokens("A", "old-refresh-A", new() { AccessToken = "new-access-A", RefreshToken = "new-refresh-A",
+            IdToken = IdToken(DateTimeOffset.UtcNow.AddDays(-2), issuedAt: DateTimeOffset.UtcNow), ExpiresIn = 86400 });
+        var freshQuota = new Quota(http, new OAuth(authHttp, freshVault), freshVault);
+        await freshQuota.RefreshAsync("A", default, force: true);
+        Check(issuer.RefreshCalls == 1 && freshQuota.Snapshot("A")!.Fresh(DateTimeOffset.UtcNow));
+        var view = JsonSerializer.SerializeToElement(freshVault.Find("A")!.PublicView(true));
+        Check(view.GetProperty("subscriptionSyncReason").GetString() == "deadline_in_past" && view.GetProperty("subscriptionActiveUntil").ValueKind == JsonValueKind.Null);
+    }
 }
