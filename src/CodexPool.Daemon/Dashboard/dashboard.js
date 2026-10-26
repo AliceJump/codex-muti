@@ -101,7 +101,7 @@ function render(s) {
     if(a.active)card.append(keyed(text('span','✓','check-mark'),'selected'));
     head.append(text('strong',a.name),text('span',states[a.state]||a.state,'badge'));card.append(head);const meta=keyed(text('div','','meta'),'meta');meta.append(text('span',a.plan||'Plan 待确认'),text('span',`授权：${a.auth}`));card.append(meta);
     card.append(keyed(text('div',subscriptionDeadline(a.subscriptionActiveUntil,a.subscriptionState),'account-tokens'),'subscription'));
-    if(a.planSource)card.append(keyed(text('small',`套餐来源：${a.planSource==='native_codex_usage'?'额度接口':a.planSource==='login_id_token'?'登录资料':'旧资料'}${a.planState==='historical'?' · 待同步':''}`),'plan-source'));
+    if(a.planSource)card.append(keyed(text('small',`套餐来源：${a.planSource==='native_codex_usage'?'额度接口':a.planSource==='validated_id_token'?'已验证授权资料':a.planSource==='login_id_token'?'登录资料':'旧资料'}${a.planState==='historical'?' · 待同步':''}`),'plan-source'));
     if(canActivate&&!a.active){card.classList.add('selectable');card.onclick=e=>{if(e.target.closest('.controls')||e.target.closest('button'))return;action(`/accounts/${a.id}/activate`);};}
     const access=s.accountAvailability?.find(x=>x.accountId===a.id);if(access?.reason)card.append(keyed(text('small',`模型访问：${availabilityLabel(access)}`),'access'));
     if(a.cooldownUntil&&Date.parse(a.cooldownUntil)>Date.now())card.append(keyed(text('small',`冷却剩余 ${reset(a.cooldownUntil)}`),'cooldown'));

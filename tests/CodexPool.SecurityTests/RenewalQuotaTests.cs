@@ -131,6 +131,18 @@ internal static class RenewalQuotaTests
         await new OAuth(http, vault).ReadyAsync("A", default, forceRefresh: true);
         view = JsonSerializer.SerializeToElement(vault.Find("A")!.PublicView(true));
         Check(view.GetProperty("subscriptionState").GetString() == "not_reported" && view.GetProperty("subscriptionActiveUntil").ValueKind == JsonValueKind.Null);
+        issuer.NativeResponseBody = JsonSerializer.Serialize(new { access_token = issuer.Token("native-access", "sub-A", null),
+            id_token = issuer.Token(NativeLogin.NativeClientId, "sub-A", null, nativeMetadata: new Dictionary<string, object>
+                { ["chatgpt_account_id"] = "backend-A", ["chatgpt_plan_type"] = "plus" }) });
+        await new OAuth(http, vault).ReadyAsync("A", default, forceRefresh: true);
+        Check(vault.Find("A")!.Plan == "plus" && vault.Find("A")!.PlanSource == "validated_id_token");
+        view = JsonSerializer.SerializeToElement(vault.Find("A")!.PublicView(true));
+        Check(view.GetProperty("planState").GetString() == "current" && view.GetProperty("subscriptionActiveUntil").ValueKind == JsonValueKind.Null);
+        vault.SaveQuota(Quota.Parse("A", Encoding.UTF8.GetBytes(Payload("pro"))));
+        await new OAuth(http, vault).ReadyAsync("A", default, forceRefresh: true);
+        Check(vault.Find("A")!.Plan == "pro" && vault.Find("A")!.PlanSource == "native_codex_usage");
+        Check(SubscriptionExpiry.PlanFromIdToken(issuer.Token(NativeLogin.NativeClientId, "sub-A", null,
+            nativeMetadata: new Dictionary<string, object> { ["chatgpt_plan_type"] = "INVALID-PLAN-CANARY<" })) is null);
     }
     public static async Task RecoveryFailure(string root)
     {

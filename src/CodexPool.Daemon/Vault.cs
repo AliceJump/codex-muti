@@ -44,7 +44,8 @@ public sealed class AccountCredential
         enabled = Enabled, paused = Paused, drain = Draining, cooldownUntil = CooldownUntil,
         state = !Enabled ? "disabled" : Paused ? "paused" : Draining ? "draining" : CooldownUntil > DateTimeOffset.UtcNow ? "cooldown" : active ? "active" : "standby",
         provider = ProviderKind, plan = Plan, planSource = PlanSource ?? "legacy", planUpdatedAt = PlanUpdatedAt,
-        planState = usage?.Plan == Plan && PlanUpdatedAt == usage?.UpdatedAt && usage?.Fresh(DateTimeOffset.UtcNow) == true ? "current" : "historical",
+        planState = (PlanSource is "validated_id_token" or "login_id_token") && subscription.TokenCurrent
+            || usage?.Plan == Plan && PlanUpdatedAt == usage?.UpdatedAt && usage?.Fresh(DateTimeOffset.UtcNow) == true ? "current" : "historical",
         subscriptionActiveUntil = subscription.ActiveUntil, subscriptionState = subscription.State,
         subscriptionSource = "validated_id_token", subscriptionObservedAt = subscription.ObservedAt,
         auth = authHealth ?? (AuthStatus != "ready" ? AuthStatus : ExpiresAt > DateTimeOffset.UtcNow ? "ready" : "refresh_needed"), quota = usage, quotaUpdatedAt = usage?.UpdatedAt, updatedAt = UpdatedAt };
@@ -337,7 +338,17 @@ public sealed class Vault
             var next = CloneDocument(document); var target = next.Accounts.Single(x => x.Id == id);
             if (target.RefreshToken != expectedRefreshToken) throw new InvalidOperationException("Refresh generation changed.");
             target.AccessToken = tokens.AccessToken; target.RefreshToken = tokens.RefreshToken;
-            if (!string.IsNullOrEmpty(tokens.IdToken)) target.IdToken = tokens.IdToken;
+            if (!string.IsNullOrEmpty(tokens.IdToken))
+            {
+                target.IdToken = tokens.IdToken;
+                var metadata = SubscriptionExpiry.Inspect(tokens.IdToken);
+                // A returned, validated ID token can update the plan independently
+                // of usage. Never let older claims overwrite a newer usage response.
+                if (metadata.ObservedAt is { } issuedAt && metadata.TokenCurrent
+                    && !(target.PlanSource == "native_codex_usage" && target.PlanUpdatedAt > issuedAt)
+                    && SubscriptionExpiry.PlanFromIdToken(tokens.IdToken) is { } plan)
+                { target.Plan = plan; target.PlanSource = "validated_id_token"; target.PlanUpdatedAt = issuedAt; }
+            }
             // A successful refresh may omit ID metadata. Keeping the old token for
             // identity hints must not present its subscription claims as refreshed.
             target.IdTokenMetadataStale = string.IsNullOrEmpty(tokens.IdToken);

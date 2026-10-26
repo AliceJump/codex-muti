@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.IdentityModel.JsonWebTokens;
 
 namespace CodexPool.Daemon;
@@ -8,7 +9,7 @@ namespace CodexPool.Daemon;
 // Deriving this from the stored token also covers existing accounts and refreshes.
 public static class SubscriptionExpiry
 {
-    public sealed record Metadata(DateTimeOffset? ActiveUntil, string State, DateTimeOffset? ObservedAt);
+    public sealed record Metadata(DateTimeOffset? ActiveUntil, string State, DateTimeOffset? ObservedAt, bool TokenCurrent = false);
     public static Metadata Inspect(string idToken, bool stale = false)
     {
         var until = FromIdToken(idToken);
@@ -16,13 +17,28 @@ public static class SubscriptionExpiry
         {
             var jwt = new JsonWebToken(idToken);
             var observedAt = jwt.IssuedAt == DateTime.MinValue ? (DateTimeOffset?)null : new DateTimeOffset(jwt.IssuedAt, TimeSpan.Zero);
-            if (until is null) return new(null, "not_reported", observedAt);
-            if (stale || jwt.ValidTo <= DateTime.UtcNow || until <= DateTimeOffset.UtcNow)
-                return new(null, "stale", observedAt);
-            return new(until, "current", observedAt);
+            var tokenCurrent = !stale && jwt.ValidTo > DateTime.UtcNow;
+            if (until is null) return new(null, "not_reported", observedAt, tokenCurrent);
+            if (!tokenCurrent || until <= DateTimeOffset.UtcNow)
+                return new(null, "stale", observedAt, tokenCurrent);
+            return new(until, "current", observedAt, tokenCurrent);
         }
         catch (Exception ex) when (ex is ArgumentException or FormatException or InvalidOperationException)
         { return new(null, "unknown", null); }
+    }
+    public static string? PlanFromIdToken(string idToken)
+    {
+        try
+        {
+            var jwt = new JsonWebToken(idToken);
+            if (!jwt.TryGetClaim("https://api.openai.com/auth", out var metadata)) return null;
+            using var json = JsonDocument.Parse(metadata.Value);
+            return json.RootElement.ValueKind == JsonValueKind.Object
+                && json.RootElement.TryGetProperty("chatgpt_plan_type", out var plan) && plan.ValueKind == JsonValueKind.String
+                && plan.GetString() is { } value && Regex.IsMatch(value, "^[a-zA-Z0-9_-]{1,80}$") ? value : null;
+        }
+        catch (Exception ex) when (ex is ArgumentException or JsonException or FormatException or InvalidOperationException)
+        { return null; }
     }
     public static DateTimeOffset? FromIdToken(string idToken)
     {
