@@ -106,7 +106,7 @@ try
     app.MapGet("/health", () => new { status = "running", stage = "acceptance", automaticSwitching = pool.Settings.AutoSwitch });
     ModelKeyEndpoints.Map(app, vault);
     object Status() => new { activeAccountId = vault.ActiveId, stage = "acceptance", automaticSwitching = pool.Settings.AutoSwitch, settings = pool.Settings,
-        boundaryProbe, distinctUsers = vault.DistinctUsers, nativeDistinctUsers = vault.NativeDistinctUsers, liveMigrationValidated = false, quotaSource = "per_registration", accounts = vault.Views(auth.Health), accountAvailability = pool.Availability(),
+        boundaryProbe, distinctUsers = vault.DistinctUsers, nativeDistinctUsers = vault.NativeDistinctUsers, liveMigrationValidated = false, quotaSource = "per_registration", accounts = vault.Views(auth.Health, quota.Snapshot), accountAvailability = pool.Availability(),
         nativeLoginAttempts = nativeLogin.PublicAttempts, usage = quota.Views, quotaRefreshErrors = quota.RefreshErrors, quotaSelectionError = pool.QuotaSelectionError,
         tokenStatistics = statistics.View() with { Daily = [] }, inFlightRequests = inFlight.ToArray(), recentRequests = statistics.RecentRequests, recentSwitches = statistics.RecentSwitches };
     app.MapGet("/status", () => Status());
@@ -126,7 +126,7 @@ try
         try { StickyScheduler.Validate(settings); } catch (ArgumentException) { return Results.BadRequest(new { error = new { code = "invalid_thresholds" } }); }
         pool.UpdateSettings(settings); return Results.Ok(pool.Settings);
     });
-    app.MapGet("/accounts", () => vault.Views(auth.Health));
+    app.MapGet("/accounts", () => vault.Views(auth.Health, quota.Snapshot));
     app.MapGet("/usage", async (HttpContext context) =>
     {
         await quota.RefreshAllAsync(vault.Accounts.Where(x => x.ProviderKind == "native").Select(x => x.Id), context.RequestAborted, force: true);

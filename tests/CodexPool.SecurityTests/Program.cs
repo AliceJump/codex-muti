@@ -59,6 +59,11 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Refresh timeouts distinguish discovery, exchange and identity validation", RefreshTimeoutStages),
     ("Malformed native rotations fail closed without reusing credentials", NativeMalformedRefresh),
     ("Quota batches isolate account IO and auth faults, recover, and preserve cancellation", QuotaBatchFailures),
+    ("Renewal quota recovers an unexpired rejected credential and synchronizes plan independently", () => RenewalQuotaTests.Recovery(root)),
+    ("Renewal quota classifies HTTP and transport errors, preserves history and never disables model access", () => RenewalQuotaTests.Failures(root)),
+    ("Renewal quota coalesces concurrent 401 recovery and uses a newer credential generation", () => RenewalQuotaTests.Concurrency(root)),
+    ("Renewal metadata marks omitted, expired and missing subscription claims without inventing dates", () => RenewalQuotaTests.Metadata(root)),
+    ("Renewal credential recovery preserves refresh backoff and permanent rejection without affecting B", () => RenewalQuotaTests.RecoveryFailure(root)),
     ("Quota selection survives persistence faults without changing the owner", QuotaSelectionFailure),
     ("Quota recovery requires a new successful query and preserves independent restrictions", QuotaRecovery),
     ("Quota queries started before rejection cannot clear a newer cooldown", QuotaRecoveryRace),
@@ -1209,6 +1214,7 @@ sealed class FakeIssuer : HttpMessageHandler
     public bool RejectRefreshAOnly { get; set; }
     public bool OmitNativeRefresh { get; set; }
     public string? NativeResponseBody { get; set; }
+    public HttpStatusCode NativeResponseStatus { get; set; } = HttpStatusCode.OK;
     public Func<CancellationToken, Task>? Barrier { get; set; }
     public Func<CancellationToken, Task>? DiscoveryBarrier { get; set; }
     public Func<CancellationToken, Task>? JwksBarrier { get; set; }
@@ -1248,7 +1254,7 @@ sealed class FakeIssuer : HttpMessageHandler
             using var native = JsonDocument.Parse(await request.Content.ReadAsStringAsync(cancellationToken)); var nativeFields = native.RootElement;
             if (nativeFields.GetProperty("client_id").GetString() != NativeLogin.NativeClientId || nativeFields.TryGetProperty("resource", out _)) throw new InvalidOperationException();
             var old = nativeFields.GetProperty("refresh_token").GetString()!; UsedRefreshTokens.Add(old); RefreshCalls++;
-            if (NativeResponseBody is not null) return new(HttpStatusCode.OK) { Content = new StringContent(NativeResponseBody, Encoding.UTF8, "application/json") };
+            if (NativeResponseBody is not null) return new(NativeResponseStatus) { Content = new StringContent(NativeResponseBody, Encoding.UTF8, "application/json") };
             var id = old.Split('-').Last();
             return Json(new { access_token = Token("native-access", "sub-" + id, null),
                 refresh_token = OmitNativeRefresh ? "" : "native-refresh-" + RefreshCalls + "-" + id,

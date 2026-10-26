@@ -7,6 +7,8 @@ internal sealed record DisplayQuotaWindow(string Key, string Kind, string Label,
 internal static class QuotaDisplay
 {
     internal static bool Fresh(JsonElement quota) => quota.ValueKind == JsonValueKind.Object
+        && (!quota.TryGetProperty("refreshError", out var error) || error.ValueKind == JsonValueKind.Null)
+        && (!quota.TryGetProperty("cacheState", out var cache) || cache.GetString() != "historical")
         && quota.TryGetProperty("updatedAt", out var updated) && updated.ValueKind == JsonValueKind.String && updated.TryGetDateTimeOffset(out var at)
         && DateTimeOffset.UtcNow - at <= TimeSpan.FromMinutes(2) && at <= DateTimeOffset.UtcNow.AddSeconds(30);
     internal static DisplayQuotaWindow[] Windows(JsonElement quota)
@@ -43,6 +45,8 @@ internal static class QuotaDisplay
     }
     internal static string State(JsonElement quota)
     {
+        if (quota.ValueKind == JsonValueKind.Object && quota.TryGetProperty("refreshError", out var error) && error.ValueKind == JsonValueKind.Object)
+            return "历史缓存 · " + QuotaLabels.Failure(PoolPresentation.String(error, "code"));
         if (!Fresh(quota)) return "额度未知或已过期";
         if (quota.TryGetProperty("credits", out var credits) && credits.ValueKind == JsonValueKind.Object)
         {

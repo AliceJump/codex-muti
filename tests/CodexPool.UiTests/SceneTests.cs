@@ -63,6 +63,19 @@ internal static class SceneTests
             Check(PoolPresentation.Accounts(JsonSerializer.SerializeToElement(state), true)[0].SubscriptionDeadline == "订阅截止时间未知");
             state["accounts"]![0]!["subscriptionActiveUntil"] = 123;
             Check(PoolPresentation.Accounts(JsonSerializer.SerializeToElement(state), true)[0].SubscriptionDeadline == "订阅截止时间未知");
+            state["accounts"]![0]!["subscriptionState"] = "not_reported";
+            Check(PoolPresentation.Accounts(JsonSerializer.SerializeToElement(state), true)[0].SubscriptionDeadline.Contains("上游未提供"));
+            state["accounts"]![0]!["subscriptionState"] = "stale";
+            state["accounts"]![0]!["subscriptionActiveUntil"] = until.ToString("O");
+            Check(PoolPresentation.Accounts(JsonSerializer.SerializeToElement(state), true)[0].SubscriptionDeadline.Contains("旧授权资料"));
+        });
+        run("Quota refresh failure immediately hides current percentages and preserves account selection", () =>
+        {
+            var state = System.Text.Json.Nodes.JsonNode.Parse(State().GetRawText())!;
+            state["usage"]![0]!["refreshError"] = new System.Text.Json.Nodes.JsonObject { ["code"] = "quota_forbidden", ["status"] = 403 };
+            var accounts = PoolPresentation.Accounts(JsonSerializer.SerializeToElement(state), true);
+            Check(accounts[0].Windows.All(w => w.Remaining is null) && accounts[0].QuotaState.Contains("历史缓存") && accounts[0].QuotaState.Contains("403"));
+            Check(accounts[0].Selectable && accounts[1].Windows.All(w => w.Remaining is not null));
         });
         run("Token cache bars use each account independently and keep missing cache coverage unknown", () =>
         {

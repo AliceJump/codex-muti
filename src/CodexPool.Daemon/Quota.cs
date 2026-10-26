@@ -2,18 +2,20 @@ using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Security.Cryptography;
+using System.Net;
 
 namespace CodexPool.Daemon;
 
 public sealed record QuotaWindow(string Kind, int? WindowSeconds, double UsedPercent, double RemainingPercent, DateTimeOffset? ResetAt,
     string LimitId = "codex", string? Model = null, string? LimitName = null);
 public sealed record QuotaCredits(bool HasCredits, bool Unlimited, decimal? Balance);
-public sealed record QuotaRefreshFailure(string AccountId, string Code, DateTimeOffset At);
+public sealed record QuotaRefreshFailure(string AccountId, string Code, DateTimeOffset At, int? Status = null, string? RecoveryCode = null);
 public sealed record QuotaSnapshot(string AccountId, string Source, string? Plan, DateTimeOffset UpdatedAt, IReadOnlyList<QuotaWindow> Windows,
     bool? Allowed = null, bool? LimitReached = null, QuotaCredits? Credits = null, bool? SpendControlReached = null,
-    string WindowState = "unknown", DateTimeOffset? RequestedAt = null)
+    string WindowState = "unknown", DateTimeOffset? RequestedAt = null, QuotaRefreshFailure? RefreshError = null)
 {
-    public bool Fresh(DateTimeOffset now) => now - UpdatedAt <= TimeSpan.FromMinutes(2) && UpdatedAt <= now.AddSeconds(30);
+    public bool Fresh(DateTimeOffset now) => RefreshError is null && now - UpdatedAt <= TimeSpan.FromMinutes(2) && UpdatedAt <= now.AddSeconds(30);
+    public string CacheState => Fresh(DateTimeOffset.UtcNow) ? "current" : "historical";
     // A response to a query already in flight when rejection occurred is not recovery evidence.
     public bool ConfirmsRecovery(DateTimeOffset rejectedAt, DateTimeOffset now) => Fresh(now)
         && RequestedAt > rejectedAt && RequestedAt <= UpdatedAt && Allowed == true && LimitReached != true
@@ -29,11 +31,13 @@ public sealed class Quota(HttpClient http, OAuth auth, Vault vault)
     private readonly ConcurrentDictionary<string, QuotaSnapshot> snapshots = new(vault.Quotas.Select(x => new KeyValuePair<string, QuotaSnapshot>(x.AccountId, x)));
     private readonly ConcurrentDictionary<string, SemaphoreSlim> locks = new();
     private readonly ConcurrentDictionary<string, QuotaRefreshFailure> refreshFailures = new();
+    private readonly ConcurrentDictionary<string, DateTimeOffset> recoveryBackoff = new();
     public QuotaRefreshFailure[] RefreshErrors => refreshFailures.Values.Where(x => vault.Find(x.AccountId) is not null).ToArray();
-    public object View(string id) => snapshots.TryGetValue(id, out var snapshot) ? snapshot : new { accountId = id, available = false, reason = "quota_source_unverified" };
+    public object View(string id) => Snapshot(id) is { } snapshot ? snapshot : new { accountId = id, available = false, reason = "quota_source_unverified", refreshError = refreshFailures.GetValueOrDefault(id) };
     public object[] Views => vault.Accounts.Select(x => View(x.Id)).ToArray();
-    public QuotaSnapshot? Snapshot(string id) => snapshots.GetValueOrDefault(id);
-    public void Forget(string id) { snapshots.TryRemove(id, out _); refreshFailures.TryRemove(id, out _); }
+    public QuotaSnapshot? Snapshot(string id) => snapshots.TryGetValue(id, out var snapshot)
+        ? snapshot with { RefreshError = refreshFailures.GetValueOrDefault(id) } : null;
+    public void Forget(string id) { snapshots.TryRemove(id, out _); refreshFailures.TryRemove(id, out _); recoveryBackoff.TryRemove(id, out _); }
     public async Task RefreshAllAsync(IEnumerable<string> accountIds, CancellationToken cancellationToken, bool force = false)
     {
         foreach (var id in accountIds.ToArray())
@@ -45,15 +49,7 @@ public sealed class Quota(HttpClient http, OAuth auth, Vault vault)
             catch (Exception ex) when (ex is AuthFailure or HttpRequestException or JsonException or IOException
                 or UnauthorizedAccessException or CryptographicException or OperationCanceledException)
             {
-                // Only fixed classifications leave this boundary; never exception
-                // text, token payloads or upstream response bodies.
-                var code = ex switch
-                {
-                    AuthFailure => "quota_auth_unavailable", HttpRequestException => "quota_network_unavailable",
-                    JsonException => "invalid_quota_response", OperationCanceledException => "quota_refresh_timeout",
-                    _ => "quota_storage_or_io_failed"
-                };
-                refreshFailures[id] = new(id, code, DateTimeOffset.UtcNow);
+                // RefreshAsync records only fixed classifications, never exception text.
             }
         }
     }
@@ -62,28 +58,81 @@ public sealed class Quota(HttpClient http, OAuth auth, Vault vault)
         using var use = vault.AcquireUse(id);
         var account = vault.Find(id) ?? throw new AuthFailure("account_not_found");
         if (account.ProviderKind != "native") return View(id); // Do not use SIWC grants against backend-api.
+        var startedAt = DateTimeOffset.UtcNow;
         var singleFlight = locks.GetOrAdd(id, _ => new(1, 1)); await singleFlight.WaitAsync(cancellationToken);
+        int? status = null; var recovering = false;
         try
         {
-            if (!force && snapshots.TryGetValue(id, out var current) && DateTimeOffset.UtcNow - current.UpdatedAt < TimeSpan.FromSeconds(30)) return current;
+            // Concurrent callers share the result completed after they arrived.
+            // A later explicit read can retry a failed query immediately.
+            if (refreshFailures.TryGetValue(id, out var concurrentFailure) && concurrentFailure.At >= startedAt) return View(id);
+            if (Snapshot(id) is { RefreshError: null } current && (current.UpdatedAt >= startedAt
+                || !force && current.Fresh(DateTimeOffset.UtcNow) && DateTimeOffset.UtcNow - current.UpdatedAt < TimeSpan.FromSeconds(30))) return current;
             account = await auth.ReadyAsync(id, cancellationToken);
-            using var request = new HttpRequestMessage(HttpMethod.Get, "https://chatgpt.com/backend-api/wham/usage");
-            request.Headers.Authorization = new("Bearer", account.AccessToken);
-            request.Headers.TryAddWithoutValidation("ChatGPT-Account-Id", account.BackendAccountId);
-            request.Headers.UserAgent.ParseAdd("codex_pool/0.1.0");
-            var requestedAt = DateTimeOffset.UtcNow;
-            using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-            if (!response.IsSuccessStatusCode)
+            async Task<HttpResponseMessage> SendAsync(AccountCredential credential)
             {
-                refreshFailures[id] = new(id, "native_quota_unavailable", DateTimeOffset.UtcNow);
-                return new { accountId = id, available = false, reason = "native_quota_unavailable", status = (int)response.StatusCode };
+                using var request = new HttpRequestMessage(HttpMethod.Get, "https://chatgpt.com/backend-api/wham/usage");
+                request.Headers.Authorization = new("Bearer", credential.AccessToken);
+                request.Headers.TryAddWithoutValidation("ChatGPT-Account-Id", credential.BackendAccountId);
+                request.Headers.UserAgent.ParseAdd("codex_pool/0.1.0");
+                return await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
             }
-            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-            using var buffer = new MemoryStream(); var bytes = new byte[8192];
-            while (true) { var count = await stream.ReadAsync(bytes, cancellationToken); if (count == 0) break;
-                if (buffer.Length + count > 512 * 1024) throw new AuthFailure("oversized_quota_response"); buffer.Write(bytes, 0, count); }
-            var snapshot = Parse(id, buffer.ToArray()) with { RequestedAt = requestedAt }; vault.SaveQuota(snapshot); snapshots[id] = snapshot;
-            refreshFailures.TryRemove(id, out _); return snapshot;
+            var requestedAt = DateTimeOffset.UtcNow;
+            var response = await SendAsync(account);
+            try
+            {
+                status = (int)response.StatusCode;
+                // Only explicit 401 is authentication evidence. No recovery on policy,
+                // rate limits, network failures or arbitrary upstream response bodies.
+                if (response.StatusCode == HttpStatusCode.Unauthorized
+                    && !(recoveryBackoff.TryGetValue(id, out var retryAt) && retryAt > DateTimeOffset.UtcNow))
+                {
+                    response.Dispose(); recovering = true;
+                    recoveryBackoff[id] = DateTimeOffset.UtcNow.AddSeconds(30);
+                    account = await auth.ReadyAsync(id, cancellationToken, forceRefresh: true, rejectedCredential: account);
+                    requestedAt = DateTimeOffset.UtcNow;
+                    response = await SendAsync(account);
+                    status = (int)response.StatusCode; recovering = false;
+                }
+                if (!response.IsSuccessStatusCode)
+                {
+                    var code = response.StatusCode switch
+                    {
+                        HttpStatusCode.Unauthorized => "quota_unauthorized", HttpStatusCode.Forbidden => "quota_forbidden",
+                        HttpStatusCode.TooManyRequests => "quota_rate_limited", _ when status >= 500 => "quota_upstream_unavailable",
+                        _ => "quota_http_error"
+                    };
+                    refreshFailures[id] = new(id, code, DateTimeOffset.UtcNow, status);
+                    return View(id);
+                }
+                await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+                using var buffer = new MemoryStream(); var bytes = new byte[8192];
+                while (true) { var count = await stream.ReadAsync(bytes, cancellationToken); if (count == 0) break;
+                    if (buffer.Length + count > 512 * 1024) throw new AuthFailure("oversized_quota_response"); buffer.Write(bytes, 0, count); }
+                var snapshot = Parse(id, buffer.ToArray()) with { RequestedAt = requestedAt }; vault.SaveQuota(snapshot); snapshots[id] = snapshot;
+                refreshFailures.TryRemove(id, out _); recoveryBackoff.TryRemove(id, out _); return snapshot;
+                }
+            finally { response.Dispose(); }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception ex) when (ex is AuthFailure or HttpRequestException or JsonException or IOException
+            or UnauthorizedAccessException or CryptographicException or OperationCanceledException)
+        {
+            var code = ex switch
+            {
+                AuthFailure a when a.Code is "unrecognized_quota_response" or "oversized_quota_response" => "invalid_quota_response",
+                AuthFailure => "quota_auth_unavailable", HttpRequestException => "quota_network_unavailable",
+                JsonException => "invalid_quota_response", OperationCanceledException => "quota_refresh_timeout",
+                _ => "quota_storage_or_io_failed"
+            };
+            // Allowlist recovery diagnostics: AuthFailure can also originate from a
+            // transport/test boundary, so arbitrary exception codes cannot escape.
+            var recoveryCode = recovering && ex is AuthFailure failure && failure.Code is
+                ("reauth_required" or "auth_temporarily_unavailable" or "refresh_not_yet_allowed" or "refresh_outcome_unknown"
+                or "refresh_validation_timeout" or "rotated_token_persistence_failed" or "invalid_token_response"
+                or "invalid_id_token" or "account_identity_mismatch") ? failure.Code : null;
+            refreshFailures[id] = new(id, code, DateTimeOffset.UtcNow, status, recoveryCode);
+            throw;
         }
         finally { singleFlight.Release(); }
     }

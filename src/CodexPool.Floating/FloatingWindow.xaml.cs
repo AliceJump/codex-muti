@@ -272,7 +272,8 @@ public partial class FloatingWindow : Window
     }
     internal static string QuotaRefreshNotice(JsonElement state) => state.TryGetProperty("quotaRefreshErrors", out var errors)
         && errors.ValueKind == JsonValueKind.Array && errors.GetArrayLength() > 0
-        ? $"{errors.GetArrayLength()} 个账户额度更新失败，保留上次数据。请在 Dashboard 查看状态。" : "额度已更新";
+        ? $"{errors.GetArrayLength()} 个账户额度更新失败，保留历史缓存。"
+            + string.Join("；", errors.EnumerateArray().Select(e => CodexPool.Core.QuotaLabels.Failure(PoolPresentation.String(e, "code"))).Distinct()) : "额度已更新";
     private void NotifyTray(string title, string text)
     {
         if (tray is null) return;

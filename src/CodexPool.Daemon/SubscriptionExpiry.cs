@@ -8,6 +8,22 @@ namespace CodexPool.Daemon;
 // Deriving this from the stored token also covers existing accounts and refreshes.
 public static class SubscriptionExpiry
 {
+    public sealed record Metadata(DateTimeOffset? ActiveUntil, string State, DateTimeOffset? ObservedAt);
+    public static Metadata Inspect(string idToken, bool stale = false)
+    {
+        var until = FromIdToken(idToken);
+        try
+        {
+            var jwt = new JsonWebToken(idToken);
+            var observedAt = jwt.IssuedAt == DateTime.MinValue ? (DateTimeOffset?)null : new DateTimeOffset(jwt.IssuedAt, TimeSpan.Zero);
+            if (until is null) return new(null, "not_reported", observedAt);
+            if (stale || jwt.ValidTo <= DateTime.UtcNow || until <= DateTimeOffset.UtcNow)
+                return new(null, "stale", observedAt);
+            return new(until, "current", observedAt);
+        }
+        catch (Exception ex) when (ex is ArgumentException or FormatException or InvalidOperationException)
+        { return new(null, "unknown", null); }
+    }
     public static DateTimeOffset? FromIdToken(string idToken)
     {
         if (string.IsNullOrWhiteSpace(idToken)) return null;
