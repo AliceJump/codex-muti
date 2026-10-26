@@ -10,6 +10,25 @@ function New-TestFile([string]$Path, [string]$Value) {
     $null = New-Item -ItemType Directory -Path (Split-Path $Path -Parent) -Force
     [IO.File]::WriteAllText($Path, $Value)
 }
+# Exercise the real idle guard independently of the mocked process lifecycle.
+$taskDeployAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $taskRepository 'scripts/deploy-local.ps1'),[ref]$null,[ref]$null)
+$taskIdleGuard = $taskDeployAst.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Assert-PoolIdle'},$true)
+$taskRefreshGuard = $taskDeployAst.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-PoolRefreshGuard'},$true)
+. ([scriptblock]::Create($taskRefreshGuard.Extent.Text))
+. ([scriptblock]::Create($taskIdleGuard.Extent.Text))
+foreach ($taskBusyState in @(
+    [pscustomobject]@{accounts=@();nativeLoginAttempts=@()},
+    [pscustomobject]@{inFlightRequests=@(@{value=1});accounts=@();nativeLoginAttempts=@()},
+    [pscustomobject]@{inFlightRequests=@();accounts=@(@{auth='refresh_pending'});nativeLoginAttempts=@()},
+    [pscustomobject]@{inFlightRequests=@();accounts=@();nativeLoginAttempts=@(@{state='waiting_for_browser'})}
+)) {
+    $taskRejected = $false
+    try { Assert-PoolIdle $taskBusyState } catch { $taskRejected = $true }
+    Assert-Test $taskRejected 'Deployment must preserve a busy daemon or unknown activity.'
+}
+Assert-PoolIdle ([pscustomobject]@{inFlightRequests=@(@{value=0});accounts=@();nativeLoginAttempts=@()})
+Assert-PoolIdle ([pscustomobject]@{inFlightRequests=@();accounts=@(@{id='A';auth='refresh_pending'});accountAvailability=@(@{accountId='A';reason='auth_unavailable'});nativeLoginAttempts=@()})
+Write-Output 'PASS deployment refuses active models, rotations, logins and unknown activity'
 function New-TestRoot([string]$Name) {
     $taskTestState.Sandbox = Join-Path $taskFixtures $Name
     $null = New-Item -ItemType Directory -Path (Join-Path $taskTestState.Sandbox 'scripts') -Force
@@ -80,7 +99,13 @@ function New-TestProcess([int]$Id, [string]$Path, [bool]$Exited = $false) {
 function script:git { 'worktree ' + $taskTestState.Sandbox; $global:LASTEXITCODE = 0 }
 function script:Get-NetTCPConnection {
     param($LocalPort,$State,$ErrorAction)
-    if ($taskTestState.Core -and -not $taskTestState.Core.HasExited) { [pscustomobject]@{OwningProcess=$taskTestState.Core.Id} }
+    if ($taskTestState.Core -and -not $taskTestState.Core.HasExited) {
+        if ($taskTestState.Core.Path -notmatch '[\\/]base[\\/]') {
+            if ($taskTestState.Failure -eq 'NoListener') { return }
+            if ($taskTestState.Failure -eq 'ListenerUnknown') { throw 'Synthetic listener lookup failure.' }
+        }
+        [pscustomobject]@{OwningProcess=$taskTestState.Core.Id;LocalPort=3210}
+    }
 }
 function script:Get-Process {
     param($Id,$ErrorAction)
@@ -106,12 +131,12 @@ function script:Start-Process {
     return $taskTestState.Core
 }
 function script:Invoke-RestMethod { param($Uri,[switch]$NoProxy,$TimeoutSec) [pscustomobject]@{status='running'} }
-foreach ($taskCase in @('All','Core','Components','FailCore','FailAllCore','FailComponents','FailComponentsOffline','FailProxy')) {
+foreach ($taskCase in @('All','Core','Components','FailCore','FailAllCore','FailComponents','FailComponentsOffline','FailProxy','FailCoreNoListener','FailCoreListenerUnknown')) {
     $taskTestState.Sandbox = New-TestRoot "deploy-$taskCase"
     $taskTestState.Trace = [Collections.Generic.List[string]]::new()
     $taskTestState.Processes = @{}
-    $taskTestState.Failure = if ($taskCase -in @('FailCore','FailAllCore')) {'Core'} elseif ($taskCase.StartsWith('FailComponents')) {'Components'} elseif ($taskCase -eq 'FailProxy') {'Proxy'} else {''}
-    $taskTarget = if ($taskCase -in @('FailComponentsOffline','FailProxy')) {'Components'} elseif ($taskCase -eq 'FailAllCore') {'All'} else {$taskCase.Replace('Fail','')}
+    $taskTestState.Failure = if ($taskCase -eq 'FailCoreNoListener') {'NoListener'} elseif ($taskCase -eq 'FailCoreListenerUnknown') {'ListenerUnknown'} elseif ($taskCase -in @('FailCore','FailAllCore')) {'Core'} elseif ($taskCase.StartsWith('FailComponents')) {'Components'} elseif ($taskCase -eq 'FailProxy') {'Proxy'} else {''}
+    $taskTarget = if ($taskCase -in @('FailComponentsOffline','FailProxy')) {'Components'} elseif ($taskCase -eq 'FailAllCore') {'All'} elseif ($taskCase.StartsWith('FailCore')) {'Core'} else {$taskCase.Replace('Fail','')}
     $taskTestState.Core = New-TestProcess 101 (Join-Path $taskTestState.Sandbox '.local/base/Daemon/CodexPool.Daemon.exe') ($taskCase -eq 'FailComponentsOffline')
     foreach ($taskId in @(201,202)) {
         $taskKind = if ($taskId -eq 201) {'Widget'} else {'Floating'}
@@ -122,7 +147,7 @@ foreach ($taskCase in @('All','Core','Components','FailCore','FailAllCore','Fail
     New-TestFile (Join-Path $taskTestState.Sandbox '.local/desktop/Proxy/source-build.txt') (Join-Path $taskTestState.Sandbox '.local/base')
     $taskStatusStub = @'
 function Get-PoolStatus([string]$Path) {
-    [pscustomobject]@{boundaryProbe=$true;accounts=@();nativeLoginAttempts=@();settings=[pscustomobject]@{autoSwitch=$false;fiveHourThreshold=95;weeklyThreshold=95;windowThreshold=$null}}
+    [pscustomobject]@{boundaryProbe=$true;accounts=@();nativeLoginAttempts=@();inFlightRequests=@();settings=[pscustomobject]@{autoSwitch=$false;fiveHourThreshold=95;weeklyThreshold=95;windowThreshold=$null}}
 }
 '@
     $taskSourcePath = Join-Path $taskTestState.Sandbox 'scripts/deploy-local.ps1'
@@ -130,6 +155,10 @@ function Get-PoolStatus([string]$Path) {
     $taskStatusFunction = $taskAst.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-PoolStatus'},$true)
     $taskSource = Get-Content -LiteralPath $taskSourcePath -Raw
     $taskSource = $taskSource.Remove($taskStatusFunction.Extent.StartOffset,$taskStatusFunction.Extent.EndOffset-$taskStatusFunction.Extent.StartOffset).Insert($taskStatusFunction.Extent.StartOffset,$taskStatusStub)
+    $taskAst = [Management.Automation.Language.Parser]::ParseInput($taskSource,[ref]$null,[ref]$null)
+    $taskStopFunction = $taskAst.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Stop-IdlePoolDaemon'},$true)
+    $taskStopStub = 'function Stop-IdlePoolDaemon($ProcessInfo, [string]$CommandPath) { Stop-OwnedProcess $ProcessInfo }'
+    $taskSource = $taskSource.Remove($taskStopFunction.Extent.StartOffset,$taskStopFunction.Extent.EndOffset-$taskStopFunction.Extent.StartOffset).Insert($taskStopFunction.Extent.StartOffset,$taskStopStub)
     [IO.File]::WriteAllText($taskSourcePath,$taskSource)
     New-TestFile (Join-Path $taskTestState.Sandbox 'scripts/desktop-client.ps1') @'
 function Start-PoolDesktopClient {
@@ -156,7 +185,9 @@ function Start-PoolDesktopClient {
     }
     if ($taskFailed) {
         Assert-Test ($taskPointer.path -eq (Join-Path $taskTestState.Sandbox '.local/base')) 'Failure published the new pointer.'
-        if ($taskTarget -eq 'Core') { Assert-Test ($taskTestState.Trace.Count -eq 3 -and $taskTestState.Core.Path -match '[\\/]base[\\/]') 'Old core was not restored.' }
+        if ($taskCase -eq 'FailCoreNoListener') { Assert-Test ($taskTestState.Trace.Count -eq 4 -and $taskTestState.Core.Path -match '[\\/]base[\\/]') 'Unready non-listening core did not restore the old process.' }
+        elseif ($taskCase -eq 'FailCoreListenerUnknown') { Assert-Test ($taskTestState.Trace.Count -eq 2 -and -not $taskTestState.Processes[301].HasExited) 'Unknown listener state must preserve the new process.' }
+        elseif ($taskTarget -eq 'Core') { Assert-Test ($taskTestState.Trace.Count -eq 3 -and $taskTestState.Core.Path -match '[\\/]base[\\/]') 'Old core was not restored.' }
         elseif ($taskCase -eq 'FailAllCore') { Assert-Test ($taskTestState.Core.Path -match '[\\/]base[\\/]' -and @($taskTestState.Trace | Where-Object { $_ -eq 'restore:ui' }).Count -eq 3) 'Early core failure must restore all tray clients as well as the core.' }
         elseif ($taskCase -eq 'FailComponentsOffline') { Assert-Test ($taskTestState.Trace -contains 'restore:files' -and $taskTestState.Trace -notcontains 'restore:ui') 'Offline core was restarted by old UI rollback.' }
         else { Assert-Test (@($taskTestState.Trace | Where-Object { $_ -eq 'restore:ui' }).Count -eq 3) 'Both tray clients and the legacy UI must be restored.' }
@@ -183,7 +214,7 @@ Write-Output 'PASS invalid CMD target cannot deploy All'
 $taskBatchBytes = [IO.File]::ReadAllBytes((Join-Path $taskRepository 'deploy.cmd'))
 Assert-Test (@($taskBatchBytes | Where-Object { $_ -gt 127 }).Count -eq 0) 'Batch wrapper must remain ASCII.'
 Assert-Test ([IO.File]::ReadAllText((Join-Path $taskRepository 'deploy.cmd')) -notmatch '(?<!\r)\n') 'Batch wrapper must use CRLF.'
-Write-Output '18/18 deployment target checks passed; simulated publishing/processes only'
+Write-Output '21/21 deployment target checks passed; simulated publishing/processes only'
 # The invalid-target CMD check deliberately leaves a nonzero native exit code.
 # Assertions above already checked that rejection; successful callers must receive success.
 $global:LASTEXITCODE = 0

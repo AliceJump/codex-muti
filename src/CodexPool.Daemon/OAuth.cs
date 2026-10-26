@@ -67,7 +67,8 @@ public sealed class OAuth(HttpClient http, Vault vault)
         health.TryRemove(savedId, out _); refreshBackoff.TryRemove(savedId, out _); return savedId;
     }
 
-    public async Task<AccountCredential> ReadyAsync(string id, CancellationToken cancellationToken, bool forceRefresh = false)
+    public async Task<AccountCredential> ReadyAsync(string id, CancellationToken cancellationToken, bool forceRefresh = false,
+        AccountCredential? rejectedCredential = null)
     {
         using var use = vault.AcquireUse(id);
         var refreshLock = refreshLocks.GetOrAdd(id, _ => new(1, 1)); await refreshLock.WaitAsync(cancellationToken);
@@ -75,6 +76,10 @@ public sealed class OAuth(HttpClient http, Vault vault)
         {
             var account = vault.Find(id) ?? throw new AuthFailure("account_not_found");
             if (account.AuthStatus is "reauth_required" or "refresh_pending" || health.TryGetValue(id, out var status) && status == "reauth_required") throw new AuthFailure("reauth_required");
+            // Compare under the rotation lock: a concurrent refresh/login may already
+            // have replaced the rejected generation. Never rotate that new grant again.
+            if (rejectedCredential is not null && (account.AccessToken != rejectedCredential.AccessToken
+                || account.RefreshToken != rejectedCredential.RefreshToken || account.UpdatedAt != rejectedCredential.UpdatedAt)) return account;
             if (!forceRefresh && account.ExpiresAt > DateTimeOffset.UtcNow.AddMinutes(2)) return account;
             if (refreshBackoff.TryGetValue(id, out var retryAt) && retryAt > DateTimeOffset.UtcNow) throw new AuthFailure("auth_temporarily_unavailable");
             if (account.EarliestRefreshAt > DateTimeOffset.UtcNow) throw new AuthFailure("refresh_not_yet_allowed");

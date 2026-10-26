@@ -40,6 +40,33 @@ async function setup() {
     return { dom, w, calls, api: w.testApi, setState(value) { current = value; }, setPage(value) { history = value; },
         intercept(value) { intercept = value; }, setStats(value) { statistics = value; } };
 }
+test('renewal separates fresh plan from unavailable subscription dates and failed quota history', async () => {
+    const h = await setup(), { w, api } = h;
+    try {
+        const s = state();
+        Object.assign(s.accounts[0], { plan: 'plus', planSource: 'native_codex_usage', planState: 'current', subscriptionState: 'not_reported' });
+        api.render(s);
+        let cards = w.document.querySelectorAll('#accounts article');
+        assert.match(cards[0].textContent, /plus/);
+        assert.match(cards[0].textContent, /套餐来源：额度接口/);
+        assert.match(cards[0].textContent, /上游未提供/);
+        s.quotaRefreshErrors = [{ accountId: 'a', code: 'quota_rate_limited', status: 429, at: now }];
+        api.render(s);
+        cards = w.document.querySelectorAll('#accounts article');
+        assert.match(cards[0].textContent, /历史缓存.*限流（429）/);
+        assert.doesNotMatch(cards[0].textContent, /剩 60%/);
+        assert.equal(cards[0].querySelector('progress'), null);
+        assert.match(cards[1].textContent, /剩 60%/);
+        s.accounts[0].subscriptionState = 'stale';
+        s.accounts[0].subscriptionActiveUntil = '2030-01-01T00:00:00Z';
+        api.render(s);
+        assert.match(cards[0].textContent, /旧授权资料/);
+        assert.doesNotMatch(cards[0].textContent, /2030/);
+        s.accounts[0].subscriptionSyncReason = 'deadline_in_past';
+        api.render(s);
+        assert.match(cards[0].textContent, /上游仍返回旧日期/);
+    } finally { h.dom.window.close(); }
+});
 test('model key lifecycle requires CSRF, renders names as text, and clears the one-time secret', async () => {
     const h = await setup(), { w } = h;
     try {

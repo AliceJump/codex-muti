@@ -9,6 +9,24 @@ namespace CodexPool.Daemon;
 
 public static class LocalCommands
 {
+    /// <summary>Fail closed on active/unknown work; durable reauthorization is idle, not a rotation.</summary>
+    public static bool CanShutdown(JsonElement status)
+    {
+        if (!status.TryGetProperty("inFlightRequests", out var requests) || requests.ValueKind != JsonValueKind.Array
+            || requests.EnumerateArray().Any(x => !x.TryGetProperty("value", out var count) || count.ValueKind != JsonValueKind.Number || !count.TryGetInt32(out var value) || value != 0)
+            || !status.TryGetProperty("accounts", out var accounts) || accounts.ValueKind != JsonValueKind.Array
+            || !status.TryGetProperty("nativeLoginAttempts", out var logins) || logins.ValueKind != JsonValueKind.Array
+            || logins.EnumerateArray().Any(x => x.TryGetProperty("state", out var state) && state.GetString() == "waiting_for_browser")) return false;
+        foreach (var account in accounts.EnumerateArray())
+        {
+            if (!account.TryGetProperty("auth", out var auth) || auth.GetString() != "refresh_pending") continue;
+            if (!account.TryGetProperty("id", out var id) || id.ValueKind != JsonValueKind.String
+                || !status.TryGetProperty("accountAvailability", out var availability) || availability.ValueKind != JsonValueKind.Array
+                || !availability.EnumerateArray().Any(x => x.TryGetProperty("accountId", out var accountId) && accountId.GetString() == id.GetString()
+                    && x.TryGetProperty("reason", out var reason) && reason.GetString() == "auth_unavailable")) return false;
+        }
+        return true;
+    }
     public static bool EqualSecret(string a, string b) => CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(a), Encoding.UTF8.GetBytes(b));
     public static PoolSettings? ParseSettings(string[] args)
     {
@@ -55,6 +73,15 @@ public static class LocalCommands
         }
         using var client = new HttpClient(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(30) };
         client.DefaultRequestHeaders.Authorization = new("Bearer", key);
+        if (command == "shutdown" && args.Length == 0)
+        {
+            using var status = JsonDocument.Parse(await client.GetStringAsync("http://127.0.0.1:3210/status"));
+            if (!CanShutdown(status.RootElement))
+            { Console.Error.WriteLine("代理仍在处理请求或刷新凭据，未停止。"); return 1; }
+            using var response = await client.PostAsync("http://127.0.0.1:3210/control/shutdown", null);
+            Console.WriteLine(response.IsSuccessStatusCode ? "代理已请求安全停止。" : "代理拒绝停止，保留现有进程。");
+            return response.IsSuccessStatusCode ? 0 : 1;
+        }
         if (command == "settings" && args.Length is 0 or 2 or 3 or 4)
         {
             if (args.Length == 0) { Console.WriteLine(await client.GetStringAsync("http://127.0.0.1:3210/settings")); return 0; }

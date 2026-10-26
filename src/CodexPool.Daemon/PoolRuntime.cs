@@ -113,7 +113,7 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
                 ? availability.ResetAt ?? (failures.TryGetValue(x.Id, out var failure) ? failure.Until : DateTimeOffset.UtcNow.AddMinutes(1)) : x.CooldownUntil;
             return new PoolAccount(x.Id, x.Enabled, x.Paused, x.Draining, x.AuthStatus == "ready" && auth.Health(x.Id) != "reauth_required"
                 && availability.Reason is not ("auth_unavailable" or "access_unavailable" or "configuration_unavailable"),
-                cooldown, QuotaUpdatedAt: usage?.UpdatedAt, Windows: usage is null ? [] : RoutingWindows(usage, model, DateTimeOffset.UtcNow));
+                cooldown, QuotaUpdatedAt: usage?.UpdatedAt, Windows: usage?.Fresh(DateTimeOffset.UtcNow) == true ? RoutingWindows(usage, model, DateTimeOffset.UtcNow) : []);
         }).ToArray();
     }
     public AccountSelection Select(string? model = null)

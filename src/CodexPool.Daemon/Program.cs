@@ -26,14 +26,14 @@ try
     var modelClientVersion = CodexClientVersion.ResolveInstalled(Environment.GetEnvironmentVariable("CODEX_POOL_CLIENT_VERSION"));
     var builder = WebApplication.CreateBuilder([]);
     builder.Logging.ClearProviders();
-    builder.Services.Configure<HostOptions>(options => options.ShutdownTimeout = TimeSpan.FromSeconds(30));
+    builder.Services.Configure<HostOptions>(options => options.ShutdownTimeout = TimeSpan.FromMinutes(11));
     builder.WebHost.ConfigureKestrel(options =>
     {
         options.Listen(System.Net.IPAddress.Loopback, 3210);
         options.Limits.MaxRequestBodySize = ModelRequestBody.MaximumBytes;
         options.Limits.RequestHeadersTimeout = TimeSpan.FromSeconds(15);
     });
-    var app = builder.Build();
+    await using var app = builder.Build();
     using var http = new HttpClient(new SocketsHttpHandler { AllowAutoRedirect = false,
         AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate })
         { Timeout = TimeSpan.FromSeconds(30) };
@@ -106,7 +106,7 @@ try
     app.MapGet("/health", () => new { status = "running", stage = "acceptance", automaticSwitching = pool.Settings.AutoSwitch });
     ModelKeyEndpoints.Map(app, vault);
     object Status() => new { activeAccountId = vault.ActiveId, stage = "acceptance", automaticSwitching = pool.Settings.AutoSwitch, settings = pool.Settings,
-        boundaryProbe, distinctUsers = vault.DistinctUsers, nativeDistinctUsers = vault.NativeDistinctUsers, liveMigrationValidated = false, quotaSource = "per_registration", accounts = vault.Views(auth.Health), accountAvailability = pool.Availability(),
+        boundaryProbe, distinctUsers = vault.DistinctUsers, nativeDistinctUsers = vault.NativeDistinctUsers, liveMigrationValidated = false, quotaSource = "per_registration", accounts = vault.Views(auth.Health, quota.Snapshot), accountAvailability = pool.Availability(),
         nativeLoginAttempts = nativeLogin.PublicAttempts, usage = quota.Views, quotaRefreshErrors = quota.RefreshErrors, quotaSelectionError = pool.QuotaSelectionError,
         tokenStatistics = statistics.View() with { Daily = [] }, inFlightRequests = inFlight.ToArray(), recentRequests = statistics.RecentRequests, recentSwitches = statistics.RecentSwitches };
     app.MapGet("/status", () => Status());
@@ -119,14 +119,15 @@ try
     foreach (var asset in new[] { (Path: "/", File: "index.html", Type: "text/html"), (Path: "/dashboard.js", File: "dashboard.js", Type: "text/javascript"), (Path: "/dashboard.css", File: "dashboard.css", Type: "text/css") })
         app.MapGet(asset.Path, () => Results.Stream(typeof(Vault).Assembly.GetManifestResourceStream("CodexPool.Daemon.Dashboard." + asset.File)!, asset.Type));
     app.MapGet("/settings", () => pool.Settings);
-    DaemonControlEndpoints.Map(app, vault.LocalKey, app.Lifetime.StopApplication);
+    DaemonControlEndpoints.Map(app, vault.LocalKey, app.Lifetime.StopApplication,
+        () => inFlight.Values.All(x => x == 0) && vault.Accounts.All(x => !auth.IsRefreshing(x.Id)));
     app.MapPost("/settings", async (HttpContext context) =>
     {
         var settings = await context.Request.ReadFromJsonAsync<PoolSettings>(context.RequestAborted) ?? throw new AuthFailure("invalid_settings");
         try { StickyScheduler.Validate(settings); } catch (ArgumentException) { return Results.BadRequest(new { error = new { code = "invalid_thresholds" } }); }
         pool.UpdateSettings(settings); return Results.Ok(pool.Settings);
     });
-    app.MapGet("/accounts", () => vault.Views(auth.Health));
+    app.MapGet("/accounts", () => vault.Views(auth.Health, quota.Snapshot));
     app.MapGet("/usage", async (HttpContext context) =>
     {
         await quota.RefreshAllAsync(vault.Accounts.Where(x => x.ProviderKind == "native").Select(x => x.Id), context.RequestAborted, force: true);
@@ -351,6 +352,9 @@ try
         "/api/v1/responses", "/api/v1/chat/completions", "/api/v1/images/generations" })
         app.MapPost(route, ModelRequest);
     app.MapFallback(() => Results.NotFound(new { error = new { code = "endpoint_not_supported_in_phase0" } }));
+    // No background credential rotation before successful listener startup. A
+    // deployment can safely discard a new process that never began listening.
+    await app.StartAsync();
     Console.WriteLine("Codex Pool listening at http://127.0.0.1:3210 (live migration acceptance gate applies).");
     var eventTask = events.RunAsync(Status, app.Lifetime.ApplicationStopping);
     var statisticsTask = Task.Run(async () =>
@@ -374,7 +378,7 @@ try
         }
         catch (OperationCanceledException) when (app.Lifetime.ApplicationStopping.IsCancellationRequested) { }
     });
-    await app.RunAsync(); await Task.WhenAll(eventTask, quotaTask, statisticsTask);
+    await app.WaitForShutdownAsync(); await Task.WhenAll(eventTask, quotaTask, statisticsTask);
     // ApplicationStopping occurs before Kestrel drains its accepted requests.
     statistics.Flush(); return 0;
 }

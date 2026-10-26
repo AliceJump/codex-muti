@@ -75,13 +75,17 @@ internal static class PoolPresentation
                 tokenDetails += "\n累计每次请求的上下文与输出，不代表套餐额度扣减或费用。";
             }
             return new PoolAccountView(id, String(a, "name") ?? "账户", active, enabled, selectable && connected,
-                label, String(a, "plan") ?? "Plan 待确认", QuotaDisplay.Windows(quota), QuotaDisplay.State(quota), tokens, updated)
+                label, (String(a, "plan") ?? "Plan 待确认") + (String(a, "planState") == "historical" ? " · 待同步" : ""), QuotaDisplay.Windows(quota), QuotaDisplay.State(quota), tokens, updated)
                 { TokenDetails = tokenDetails, TokenCache = tokenCache, SubscriptionDeadline = SubscriptionDeadline(a) };
         }).ToArray();
     }
     internal static string? String(JsonElement element, string field) => element.ValueKind == JsonValueKind.Object
         && element.TryGetProperty(field, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
-    internal static string SubscriptionDeadline(JsonElement account) => account.TryGetProperty("subscriptionActiveUntil", out var value)
+    internal static string SubscriptionDeadline(JsonElement account) => String(account, "subscriptionState") == "stale"
+        ? "订阅截止时间待同步（" + (String(account, "subscriptionSyncReason") switch
+            { "deadline_in_past" => "上游仍返回旧日期", "id_token_expired" => "授权资料已过期", "id_token_not_refreshed" => "授权资料未更新", _ => "旧授权资料" }) + "）"
+        : String(account, "subscriptionState") == "not_reported"
+        ? "订阅截止时间未知（上游未提供）" : account.TryGetProperty("subscriptionActiveUntil", out var value)
         && value.ValueKind == JsonValueKind.String && value.TryGetDateTimeOffset(out var until)
         ? "订阅截止 " + until.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss '(UTC'zzz')'", System.Globalization.CultureInfo.InvariantCulture)
         : "订阅截止时间未知";

@@ -19,9 +19,12 @@ public sealed class AccountCredential
     public string ProviderKind { get; set; } = "siwc";
     public string? BackendAccountId { get; set; }
     public string? Plan { get; set; }
+    public string? PlanSource { get; set; }
+    public DateTimeOffset? PlanUpdatedAt { get; set; }
     public required string AccessToken { get; set; }
     public required string RefreshToken { get; set; }
     public required string IdToken { get; set; }
+    public bool IdTokenMetadataStale { get; set; }
     public required string Scope { get; set; }
     public bool Enabled { get; set; } = true;
     public bool Paused { get; set; }
@@ -34,14 +37,22 @@ public sealed class AccountCredential
     public DateTimeOffset? EarliestRefreshAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
     public override string ToString() => "AccountCredential [REDACTED]";
-    public object PublicView(bool active, string? authHealth = null, QuotaSnapshot? usage = null) => new { id = Id, name = Name, active,
+    public object PublicView(bool active, string? authHealth = null, QuotaSnapshot? usage = null)
+    {
+        var subscription = SubscriptionExpiry.Inspect(IdToken, IdTokenMetadataStale);
+        return new { id = Id, name = Name, active,
         enabled = Enabled, paused = Paused, drain = Draining, cooldownUntil = CooldownUntil,
         state = !Enabled ? "disabled" : Paused ? "paused" : Draining ? "draining" : CooldownUntil > DateTimeOffset.UtcNow ? "cooldown" : active ? "active" : "standby",
-        provider = ProviderKind, plan = Plan,
-        subscriptionActiveUntil = SubscriptionExpiry.ActiveUntil(IdToken, DateTimeOffset.UtcNow),
-        subscriptionDeadlineState = SubscriptionExpiry.DeadlineState(IdToken, DateTimeOffset.UtcNow),
+        provider = ProviderKind, plan = Plan, planSource = PlanSource ?? "legacy", planUpdatedAt = PlanUpdatedAt,
+        planState = (PlanSource is "validated_id_token" or "login_id_token") && subscription.TokenCurrent
+            || usage?.Plan == Plan && PlanUpdatedAt == usage?.UpdatedAt && usage?.Fresh(DateTimeOffset.UtcNow) == true ? "current" : "historical",
+        subscriptionActiveUntil = subscription.ActiveUntil, subscriptionState = subscription.State,
+        subscriptionSyncReason = subscription.Reason,
+        subscriptionDeadlineState = subscription.State switch { "current" => "reported", "not_reported" => "unknown", var status => status },
         planProvenance = usage?.Plan is not null && usage.Plan == Plan ? "quota" : Plan is not null ? "credential" : "unknown",
+        subscriptionSource = "validated_id_token", subscriptionObservedAt = subscription.ObservedAt,
         auth = authHealth ?? (AuthStatus != "ready" ? AuthStatus : ExpiresAt > DateTimeOffset.UtcNow ? "ready" : "refresh_needed"), quota = usage, quotaUpdatedAt = usage?.UpdatedAt, updatedAt = UpdatedAt };
+    }
 }
 
 public sealed class VaultDocument
@@ -165,7 +176,8 @@ public sealed class Vault
             var next = CloneDocument(document);
             var account = next.Accounts.Single(x => x.Id == snapshot.AccountId);
             next.Quotas.RemoveAll(x => x.AccountId == snapshot.AccountId); next.Quotas.Add(snapshot);
-            account.Plan = snapshot.Plan ?? account.Plan;
+            if (snapshot.Plan is not null)
+            { account.Plan = snapshot.Plan; account.PlanSource = snapshot.Source; account.PlanUpdatedAt = snapshot.UpdatedAt; }
             Persist(next); document = next;
         }
     }
@@ -203,7 +215,7 @@ public sealed class Vault
     public int DistinctUsers { get { lock (gate) return document.Accounts.Select(x => x.Subject).Distinct(StringComparer.Ordinal).Count(); } }
     public int NativeDistinctUsers { get { lock (gate) return document.Accounts.Where(x => x.ProviderKind == "native").Select(x => x.Subject).Distinct(StringComparer.Ordinal).Count(); } }
     public object[] PublicAccounts => Views(_ => null);
-    public object[] Views(Func<string, string?> authHealth) { lock (gate) return document.Accounts.Select(x => x.PublicView(x.Id == document.ActiveAccountId, authHealth(x.Id), document.Quotas.FirstOrDefault(q => q.AccountId == x.Id))).ToArray(); }
+    public object[] Views(Func<string, string?> authHealth, Func<string, QuotaSnapshot?>? quotaView = null) { lock (gate) return document.Accounts.Select(x => x.PublicView(x.Id == document.ActiveAccountId, authHealth(x.Id), quotaView is null ? document.Quotas.FirstOrDefault(q => q.AccountId == x.Id) : quotaView(x.Id))).ToArray(); }
     public AccountCredential? Selected { get { lock (gate) return Clone(document.Accounts.FirstOrDefault(x => x.Id == document.ActiveAccountId)); } }
     public AccountCredential? Find(string id) { lock (gate) return Clone(document.Accounts.FirstOrDefault(x => x.Id == id)); }
     public AccountCredential[] Accounts { get { lock (gate) return document.Accounts.Select(x => Clone(x)!).ToArray(); } }
@@ -211,6 +223,8 @@ public sealed class Vault
     {
         lock (gate)
         {
+            if (credential.Plan is not null)
+            { credential.PlanSource = "login_id_token"; credential.PlanUpdatedAt = credential.UpdatedAt; }
             var next = CloneDocument(document);
             var duplicate = next.Accounts.FindIndex(x => x.ProviderKind == credential.ProviderKind && x.ClientId == credential.ClientId
                 && (credential.ProviderKind != "native" || x.Subject == credential.Subject && x.BackendAccountId == credential.BackendAccountId));
@@ -223,7 +237,8 @@ public sealed class Vault
                     Scope = credential.Scope, ExpiresAt = credential.ExpiresAt, EarliestRefreshAt = credential.EarliestRefreshAt, UpdatedAt = credential.UpdatedAt,
                     Enabled = existing.Enabled, Paused = existing.Paused, Draining = existing.Draining, CooldownUntil = existing.CooldownUntil,
                     CooldownErrorCode = existing.CooldownErrorCode, CooldownObservedAt = existing.CooldownObservedAt,
-                    ProviderKind = credential.ProviderKind, BackendAccountId = credential.BackendAccountId, Plan = credential.Plan };
+                    ProviderKind = credential.ProviderKind, BackendAccountId = credential.BackendAccountId, Plan = credential.Plan,
+                    PlanSource = credential.PlanSource, PlanUpdatedAt = credential.PlanUpdatedAt };
                 next.Accounts[duplicate] = credential;
             }
             else next.Accounts.Add(credential);
@@ -329,9 +344,17 @@ public sealed class Vault
             if (!string.IsNullOrEmpty(tokens.IdToken))
             {
                 target.IdToken = tokens.IdToken;
-                // Fresh ID-token claims are trusted for plan display after renew/refresh.
-                if (SubscriptionExpiry.PlanFromIdToken(tokens.IdToken) is { } plan) target.Plan = plan;
+                var metadata = SubscriptionExpiry.Inspect(tokens.IdToken);
+                // A returned, validated ID token can update the plan independently
+                // of usage. Never let older claims overwrite a newer usage response.
+                if (metadata.ObservedAt is { } issuedAt && metadata.TokenCurrent
+                    && !(target.PlanSource == "native_codex_usage" && target.PlanUpdatedAt > issuedAt)
+                    && SubscriptionExpiry.PlanFromIdToken(tokens.IdToken) is { } plan)
+                { target.Plan = plan; target.PlanSource = "validated_id_token"; target.PlanUpdatedAt = issuedAt; }
             }
+            // A successful refresh may omit ID metadata. Keeping the old token for
+            // identity hints must not present its subscription claims as refreshed.
+            target.IdTokenMetadataStale = string.IsNullOrEmpty(tokens.IdToken);
             target.Scope = tokens.Scope; target.ExpiresAt = DateTimeOffset.UtcNow.AddSeconds(tokens.ExpiresIn);
             target.AuthStatus = "ready";
             target.EarliestRefreshAt = tokens.EarliestRefreshAt; target.UpdatedAt = DateTimeOffset.UtcNow;

@@ -59,6 +59,13 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Refresh timeouts distinguish discovery, exchange and identity validation", RefreshTimeoutStages),
     ("Malformed native rotations fail closed without reusing credentials", NativeMalformedRefresh),
     ("Quota batches isolate account IO and auth faults, recover, and preserve cancellation", QuotaBatchFailures),
+    ("Renewal quota recovers an unexpired rejected credential and synchronizes plan independently", () => RenewalQuotaTests.Recovery(root)),
+    ("Renewal quota classifies HTTP and transport errors, preserves history and never disables model access", () => RenewalQuotaTests.Failures(root)),
+    ("Renewal quota coalesces concurrent 401 recovery and uses a newer credential generation", () => RenewalQuotaTests.Concurrency(root)),
+    ("Renewal metadata marks omitted, expired and missing subscription claims without inventing dates", () => RenewalQuotaTests.Metadata(root)),
+    ("Renewal credential recovery preserves refresh backoff and permanent rejection without affecting B", () => RenewalQuotaTests.RecoveryFailure(root)),
+    ("Renewal quota cancellation retains rejected history while persisting the accepted rotation", () => RenewalQuotaTests.Cancellation(root)),
+    ("Renewal manual refresh updates expired subscription metadata and avoids repeating fresh upstream dates", () => RenewalQuotaTests.ExpiredMetadata(root)),
     ("Quota selection survives persistence faults without changing the owner", QuotaSelectionFailure),
     ("Quota recovery requires a new successful query and preserves independent restrictions", QuotaRecovery),
     ("Quota queries started before rejection cannot clear a newer cooldown", QuotaRecoveryRace),
@@ -775,7 +782,7 @@ async Task QuotaAuthRecovery()
     await stickyQuota.RefreshAsync("A", default, force: true);
     Check(issuer.RefreshCalls == stickyBefore + 1);
     Check(bearer.Count == 2);
-    Check(stickyQuota.RefreshErrors.Single().Code == "quota_auth_rejected");
+    Check(stickyQuota.RefreshErrors.Single().Code == "quota_unauthorized");
     Check(stickyQuota.Snapshot("A") is { Plan: "free" });
     // Sticky 401 arms a cooldown: another poll must not rotate credentials again.
     statuses.Clear(); statuses.Enqueue(HttpStatusCode.Unauthorized);
@@ -783,7 +790,7 @@ async Task QuotaAuthRecovery()
     await stickyQuota.RefreshAsync("A", default, force: true);
     Check(issuer.RefreshCalls == stickyAgain);
     Check(bearer.Count == 1);
-    Check(stickyQuota.RefreshErrors.Single().Code == "quota_auth_rejected");
+    Check(stickyQuota.RefreshErrors.Single().Code == "quota_unauthorized");
     Check(stickyQuota.Snapshot("A") is { Plan: "free" });
 
     // Concurrent callers share one in-flight recovery under the account lock.
@@ -852,8 +859,10 @@ async Task SubscriptionRenewalSync()
     // Omitting a replacement ID token must not invent a fresh deadline from the old claim.
     issuer.NativeResponseBody = JsonSerializer.Serialize(new { access_token = issuer.Token("native-access", "sub-A", null) });
     await auth.ReadyAsync("A", default, forceRefresh: true);
-    // Access-token-only refresh keeps the previous ID token; active deadline remains the renewed future value.
-    Check(JsonSerializer.SerializeToElement(vault.PublicAccounts[0]).GetProperty("subscriptionDeadlineState").GetString() == "reported");
+    // Keep the previous ID token for identity hints, but do not claim its deadline was refreshed.
+    var omitted = JsonSerializer.SerializeToElement(vault.PublicAccounts[0]);
+    Check(omitted.GetProperty("subscriptionDeadlineState").GetString() == "stale");
+    Check(omitted.GetProperty("subscriptionActiveUntil").ValueKind == JsonValueKind.Null);
 }
 Task SettingsRestoration()
 {
@@ -902,12 +911,25 @@ Task PoolRouting()
 }
 async Task DaemonShutdown()
 {
+    foreach (var inFlight in new[] { 0, 1 })
+        Check(LocalCommands.CanShutdown(JsonSerializer.SerializeToElement(new { inFlightRequests = new[] { new { value = inFlight } },
+            accounts = Array.Empty<object>(), nativeLoginAttempts = Array.Empty<object>() })) == (inFlight == 0));
+    Check(!LocalCommands.CanShutdown(JsonSerializer.SerializeToElement(new { inFlightRequests = Array.Empty<object>(),
+        accounts = Array.Empty<object>(), nativeLoginAttempts = new[] { new { state = "waiting_for_browser" } } })));
+    foreach (var reason in new[] { "auth_unavailable", "auth_temporarily_unavailable", "unknown" })
+    {
+        var status = JsonSerializer.SerializeToElement(new { inFlightRequests = Array.Empty<object>(), nativeLoginAttempts = Array.Empty<object>(),
+            accounts = new[] { new { id = "A", auth = "refresh_pending" } }, accountAvailability = new[] { new { accountId = "A", reason } } });
+        Check(LocalCommands.CanShutdown(status) == (reason == "auth_unavailable"));
+    }
+    Check(!LocalCommands.CanShutdown(JsonSerializer.SerializeToElement(new { accounts = Array.Empty<object>() })));
     var builder = WebApplication.CreateBuilder([]); builder.Logging.ClearProviders();
     builder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, 0));
     await using var app = builder.Build();
     var stopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var busy = true;
     const string key = "LOCAL-SHUTDOWN-CANARY";
-    DaemonControlEndpoints.Map(app, key, () => stopped.TrySetResult());
+    DaemonControlEndpoints.Map(app, key, () => stopped.TrySetResult(), () => !busy);
     await app.StartAsync();
     using var http = new HttpClient(new SocketsHttpHandler { UseProxy = false })
         { BaseAddress = new(app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single()) };
@@ -918,6 +940,8 @@ async Task DaemonShutdown()
     using (var browser = await http.PostAsJsonAsync("/control/shutdown", new { })) Check(browser.StatusCode == HttpStatusCode.Unauthorized);
     Check(!stopped.Task.IsCompleted);
     http.DefaultRequestHeaders.Authorization = new("Bearer", key);
+    using (var rejected = await http.PostAsJsonAsync("/control/shutdown", new { })) Check(rejected.StatusCode == HttpStatusCode.Conflict);
+    Check(!stopped.Task.IsCompleted); busy = false;
     using var response = await http.PostAsJsonAsync("/control/shutdown", new { });
     Check(response.StatusCode == HttpStatusCode.Accepted);
     using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
@@ -1395,6 +1419,7 @@ sealed class FakeIssuer : HttpMessageHandler
     public bool RejectRefreshAOnly { get; set; }
     public bool OmitNativeRefresh { get; set; }
     public string? NativeResponseBody { get; set; }
+    public HttpStatusCode NativeResponseStatus { get; set; } = HttpStatusCode.OK;
     public Func<CancellationToken, Task>? Barrier { get; set; }
     public Func<CancellationToken, Task>? DiscoveryBarrier { get; set; }
     public Func<CancellationToken, Task>? JwksBarrier { get; set; }
@@ -1402,7 +1427,7 @@ sealed class FakeIssuer : HttpMessageHandler
     public int CodeCalls { get; private set; }
     public bool ValidPkce { get; private set; }
     public List<string> UsedRefreshTokens { get; } = [];
-    public string Token(string audience, string subject, string? nonce, string issuer = "https://auth.openai.com", bool expired = false, bool forged = false, string? nativeAccountId = null, object? nativeMetadata = null)
+    public string Token(string audience, string subject, string? nonce, string issuer = "https://auth.openai.com", bool expired = false, bool forged = false, string? nativeAccountId = null, object? nativeMetadata = null, DateTimeOffset? issuedAt = null)
     {
         using var other = RSA.Create(2048); var key = new RsaSecurityKey(forged ? other : signing) { KeyId = "fixture-key" };
         var claims = new Dictionary<string, object> { ["sub"] = subject }; if (nonce is not null) claims["nonce"] = nonce;
@@ -1410,7 +1435,7 @@ sealed class FakeIssuer : HttpMessageHandler
         if (nativeMetadata is not null) claims["https://api.openai.com/auth"] = nativeMetadata;
         var now = DateTime.UtcNow;
         return new JsonWebTokenHandler().CreateToken(new SecurityTokenDescriptor { Issuer = issuer, Audience = audience, Claims = claims,
-            IssuedAt = now.AddHours(-2), NotBefore = now.AddHours(-2), Expires = expired ? now.AddMinutes(-10) : now.AddHours(1),
+            IssuedAt = issuedAt?.UtcDateTime ?? now.AddHours(-2), NotBefore = now.AddHours(-2), Expires = expired ? now.AddMinutes(-10) : now.AddHours(1),
             SigningCredentials = new(key, SecurityAlgorithms.RsaSha256) });
     }
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -1434,7 +1459,7 @@ sealed class FakeIssuer : HttpMessageHandler
             using var native = JsonDocument.Parse(await request.Content.ReadAsStringAsync(cancellationToken)); var nativeFields = native.RootElement;
             if (nativeFields.GetProperty("client_id").GetString() != NativeLogin.NativeClientId || nativeFields.TryGetProperty("resource", out _)) throw new InvalidOperationException();
             var old = nativeFields.GetProperty("refresh_token").GetString()!; UsedRefreshTokens.Add(old); RefreshCalls++;
-            if (NativeResponseBody is not null) return new(HttpStatusCode.OK) { Content = new StringContent(NativeResponseBody, Encoding.UTF8, "application/json") };
+            if (NativeResponseBody is not null) return new(NativeResponseStatus) { Content = new StringContent(NativeResponseBody, Encoding.UTF8, "application/json") };
             var id = old.Split('-').Last();
             return Json(new { access_token = Token("native-access", "sub-" + id, null),
                 refresh_token = OmitNativeRefresh ? "" : "native-refresh-" + RefreshCalls + "-" + id,
