@@ -777,6 +777,14 @@ async Task QuotaAuthRecovery()
     Check(bearer.Count == 2);
     Check(stickyQuota.RefreshErrors.Single().Code == "quota_auth_rejected");
     Check(stickyQuota.Snapshot("A") is { Plan: "free" });
+    // Sticky 401 arms a cooldown: another poll must not rotate credentials again.
+    statuses.Clear(); statuses.Enqueue(HttpStatusCode.Unauthorized);
+    var stickyAgain = issuer.RefreshCalls; bearer.Clear();
+    await stickyQuota.RefreshAsync("A", default, force: true);
+    Check(issuer.RefreshCalls == stickyAgain);
+    Check(bearer.Count == 1);
+    Check(stickyQuota.RefreshErrors.Single().Code == "quota_auth_rejected");
+    Check(stickyQuota.Snapshot("A") is { Plan: "free" });
 
     // Concurrent callers share one in-flight recovery under the account lock.
     // force:false so followers reuse the snapshot after the leader recovers (no thrash).

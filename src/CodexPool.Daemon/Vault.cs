@@ -40,7 +40,7 @@ public sealed class AccountCredential
         provider = ProviderKind, plan = Plan,
         subscriptionActiveUntil = SubscriptionExpiry.ActiveUntil(IdToken, DateTimeOffset.UtcNow),
         subscriptionDeadlineState = SubscriptionExpiry.DeadlineState(IdToken, DateTimeOffset.UtcNow),
-        planProvenance = usage?.Plan is not null ? "quota" : Plan is not null ? "credential" : "unknown",
+        planProvenance = usage?.Plan is not null && usage.Plan == Plan ? "quota" : Plan is not null ? "credential" : "unknown",
         auth = authHealth ?? (AuthStatus != "ready" ? AuthStatus : ExpiresAt > DateTimeOffset.UtcNow ? "ready" : "refresh_needed"), quota = usage, quotaUpdatedAt = usage?.UpdatedAt, updatedAt = UpdatedAt };
 }
 
