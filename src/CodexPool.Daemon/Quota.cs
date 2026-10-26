@@ -111,7 +111,7 @@ public sealed class Quota(HttpClient http, OAuth auth, Vault vault)
                     if (buffer.Length + count > 512 * 1024) throw new AuthFailure("oversized_quota_response"); buffer.Write(bytes, 0, count); }
                 var snapshot = Parse(id, buffer.ToArray()) with { RequestedAt = requestedAt }; vault.SaveQuota(snapshot); snapshots[id] = snapshot;
                 refreshFailures.TryRemove(id, out _); recoveryBackoff.TryRemove(id, out _); return snapshot;
-                }
+            }
             finally { response.Dispose(); }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
