@@ -21,6 +21,7 @@ var tests = new (string Name, Func<Task> Run)[]
 {
     ("Model-only keys survive storage, revoke immediately, redact and exclude management routes", ModelKeys),
     ("Daemon shutdown accepts only local bearer and acknowledges before requesting host shutdown", DaemonShutdown),
+    ("Local console opens without session and rejects simple cross-site control requests", LocalConsoleAccess),
     ("DPAPI storage never contains plaintext canaries; public views redact", Storage),
     ("OIDC rejects wrong signature, issuer, audience, nonce and expiry", IdToken),
     ("OAuth PKCE and state isolation; callback is one-use", Login),
@@ -108,6 +109,22 @@ Task ModelKeys()
     Check(vault.RevokeModelKey(issued.Id) && !vault.AcceptsModelKey(auth) && !new Vault(directory).AcceptsModelKey(auth));
     Check(!vault.RevokeModelKey(issued.Id));
     try { vault.CreateModelKey("\n"); throw new InvalidOperationException(); } catch (ArgumentException) { }
+    return Task.CompletedTask;
+}
+Task LocalConsoleAccess()
+{
+    var context = new Microsoft.AspNetCore.Http.DefaultHttpContext();
+    context.Request.Method = "POST"; context.Request.Path = "/settings";
+    Check(!LocalBrowserAccess.Allows(context.Request));
+    context.Request.Headers["Sec-Fetch-Site"] = "same-origin";
+    Check(!LocalBrowserAccess.Allows(context.Request));
+    context.Request.Headers[LocalBrowserAccess.Header] = "1";
+    Check(LocalBrowserAccess.Allows(context.Request));
+    context.Request.Headers.Remove(LocalBrowserAccess.Header);
+    context.Request.Path = "/events"; context.Request.Method = "GET";
+    Check(LocalBrowserAccess.Allows(context.Request));
+    context.Request.Headers["Sec-Fetch-Site"] = "cross-site";
+    Check(!LocalBrowserAccess.Allows(context.Request));
     return Task.CompletedTask;
 }
 static void Check(bool value) { if (!value) throw new InvalidOperationException(); }
@@ -1071,22 +1088,19 @@ async Task LocalApi()
         using var statistics = await http.GetAsync("http://127.0.0.1:3210/statistics");
         using var statsJson = JsonDocument.Parse(await statistics.Content.ReadAsStringAsync());
         Check(statistics.IsSuccessStatusCode && statsJson.RootElement.GetProperty("allTime").GetProperty("totals").GetProperty("requests").GetInt64() == 0);
-        using var ticketResponse = await http.PostAsync("http://127.0.0.1:3210/dashboard/session", null);
-        using var ticketJson = JsonDocument.Parse(await ticketResponse.Content.ReadAsStringAsync());
-        var ticketUrl = ticketJson.RootElement.GetProperty("url").GetString()!;
-        using var browser = new HttpClient(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false, UseCookies = true });
-        using var redeemed = await browser.GetAsync(ticketUrl); Check(redeemed.StatusCode == HttpStatusCode.Redirect);
-        using var replay = await browser.GetAsync(ticketUrl); Check(replay.StatusCode == HttpStatusCode.Unauthorized);
+        using var browser = new HttpClient(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false, UseCookies = false });
+        using var direct = await browser.GetAsync("http://127.0.0.1:3210/");
+        Check(direct.IsSuccessStatusCode && !direct.Headers.Contains("Set-Cookie"));
+        browser.DefaultRequestHeaders.Add("Sec-Fetch-Site", "same-origin");
+        using var simpleControl = await browser.PostAsJsonAsync("http://127.0.0.1:3210/settings", new { autoSwitch = false, windowThreshold = 90 });
+        Check(simpleControl.StatusCode == HttpStatusCode.Unauthorized);
+        browser.DefaultRequestHeaders.Add(LocalBrowserAccess.Header, "1");
         using var browserStatus = await browser.GetAsync("http://127.0.0.1:3210/status"); Check(browserStatus.IsSuccessStatusCode);
         using var browserRequests = await browser.GetAsync("http://127.0.0.1:3210/requests"); Check(browserRequests.IsSuccessStatusCode);
         using var browserStatistics = await browser.GetAsync("http://127.0.0.1:3210/statistics"); Check(browserStatistics.IsSuccessStatusCode);
-        using var noCsrf = await browser.PostAsJsonAsync("http://127.0.0.1:3210/settings", new { autoSwitch = false, fiveHourThreshold = 90, weeklyThreshold = 90 });
-        Check(noCsrf.StatusCode == HttpStatusCode.Forbidden);
-        using var keyNoCsrf = await browser.PostAsJsonAsync("http://127.0.0.1:3210/model-keys/create", new { name = "denied" });
-        Check(keyNoCsrf.StatusCode == HttpStatusCode.Forbidden);
-        using var sessionResponse = await browser.GetAsync("http://127.0.0.1:3210/browser-session");
-        using var sessionJson = JsonDocument.Parse(await sessionResponse.Content.ReadAsStringAsync());
-        browser.DefaultRequestHeaders.Add("X-Codex-Pool-CSRF", sessionJson.RootElement.GetProperty("csrf").GetString());
+        using var crossSiteRequest = new HttpRequestMessage(HttpMethod.Post, "http://127.0.0.1:3210/settings");
+        crossSiteRequest.Headers.Add("Origin", "https://evil.invalid");
+        using var crossSite = await browser.SendAsync(crossSiteRequest); Check(crossSite.StatusCode == HttpStatusCode.Forbidden);
         using var settings = await browser.PostAsJsonAsync("http://127.0.0.1:3210/settings", new { autoSwitch = false, fiveHourThreshold = 90, weeklyThreshold = 90 });
         Check(settings.IsSuccessStatusCode);
         using var genericSettings = await browser.PostAsJsonAsync("http://127.0.0.1:3210/settings", new { autoSwitch = false, windowThreshold = 88 });

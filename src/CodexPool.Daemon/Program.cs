@@ -47,23 +47,23 @@ try
     var inFlight = new ConcurrentDictionary<string, int>();
     var boundaryProbe = args.Contains("--live-boundary-probe", StringComparer.Ordinal);
     var pool = new PoolRuntime(vault, auth, quota, boundaryProbe, statistics.RecordSwitch);
-    var browsers = new BrowserSessions(); var events = new StateEvents();
+    var events = new StateEvents();
     var officialModelAuth = new OfficialModelAuth(Environment.GetEnvironmentVariable("CODEX_HOME")
         ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex"), vault);
     var sessionOwners = new ConcurrentDictionary<string, string>();
     app.Use(async (context, next) =>
     {
-        // No CORS. Only the exact local origin may use an authenticated browser session.
+        // No CORS. The local console opens directly without a browser login.
         if (context.Request.Scheme != "http" || context.Request.Host.Host != "127.0.0.1" || context.Request.Host.Port != 3210
-            || context.Request.Headers.TryGetValue("Origin", out var origin) && origin != "http://127.0.0.1:3210")
+            || context.Request.Headers.TryGetValue("Origin", out var origin) && origin != "http://127.0.0.1:3210"
+            || context.Request.Headers["Sec-Fetch-Site"] == "cross-site")
         { context.Response.StatusCode = 403; return; }
         context.Response.Headers.CacheControl = "no-store";
         context.Response.Headers.XContentTypeOptions = "nosniff";
         context.Response.Headers.ContentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
         context.Response.Headers["Referrer-Policy"] = "no-referrer";
         var path = context.Request.Path.Value ?? "";
-        var publicPath = path is "/" or "/health" or "/auth/callback" or "/dashboard.js" or "/dashboard.css"
-            || path.StartsWith("/dashboard/open/", StringComparison.Ordinal);
+        var publicPath = path is "/" or "/health" or "/auth/callback" or "/dashboard.js" or "/dashboard.css";
         var bearer = LocalCommands.EqualSecret(context.Request.Headers.Authorization.ToString(), "Bearer " + vault.LocalKey);
         var clientKey = vault.AcceptsModelKey(context.Request.Headers.Authorization.ToString());
         if (clientKey && !ModelAccess.IsModelRoute(context.Request.Method, path))
@@ -71,14 +71,10 @@ try
         context.Items["modelClient"] = clientKey;
         var modelBearer = !bearer && !clientKey && await officialModelAuth.AcceptsAsync(context.Request.Method, path,
             context.Request.Headers.Authorization.ToString(), context.RequestAborted);
-        var session = browsers.Find(context);
-        var mutating = context.Request.Method is not ("GET" or "HEAD");
         var bearerOnly = path.StartsWith("/v1/", StringComparison.Ordinal) || path.StartsWith("/api/v1/", StringComparison.Ordinal) || path.StartsWith("/control/", StringComparison.Ordinal)
-            || path is "/accounts/login" or "/dashboard/session";
-        if (!publicPath && !bearer && !modelBearer && !clientKey && (bearerOnly || session is null))
+            || path == "/accounts/login";
+        if (!publicPath && !bearer && !modelBearer && !clientKey && (bearerOnly || !LocalBrowserAccess.Allows(context.Request)))
         { context.Response.StatusCode = 401; return; }
-        if (!publicPath && !bearer && !modelBearer && !clientKey && mutating && !LocalCommands.EqualSecret(context.Request.Headers["X-Codex-Pool-CSRF"].ToString(), session!.Csrf))
-        { context.Response.StatusCode = 403; return; }
         try { await next(); }
         catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested) { }
         catch (AuthFailure ex)
@@ -112,10 +108,6 @@ try
     app.MapGet("/status", () => Status());
     UsageEndpoints.Map(app, statistics);
     app.MapGet("/events", (HttpContext context) => events.StreamAsync(context, Status));
-    app.MapGet("/browser-session", (HttpContext context) => browsers.Find(context) is { } session
-        ? Results.Ok(new { csrf = session.Csrf }) : Results.Unauthorized());
-    app.MapPost("/dashboard/session", () => Results.Ok(new { url = "http://127.0.0.1:3210/dashboard/open/" + browsers.Issue() }));
-    app.MapGet("/dashboard/open/{ticket}", (string ticket, HttpContext context) => browsers.Redeem(ticket, context) ? Results.Redirect("/") : Results.Unauthorized());
     foreach (var asset in new[] { (Path: "/", File: "index.html", Type: "text/html"), (Path: "/dashboard.js", File: "dashboard.js", Type: "text/javascript"), (Path: "/dashboard.css", File: "dashboard.css", Type: "text/css") })
         app.MapGet(asset.Path, () => Results.Stream(typeof(Vault).Assembly.GetManifestResourceStream("CodexPool.Daemon.Dashboard." + asset.File)!, asset.Type));
     app.MapGet("/settings", () => pool.Settings);

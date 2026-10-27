@@ -91,12 +91,8 @@ public static class LocalCommands
         }
         if (command == "dashboard")
         {
-            using var response = await client.PostAsync("http://127.0.0.1:3210/dashboard/session", null); response.EnsureSuccessStatusCode();
-            using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
-            var url = json.RootElement.GetProperty("url").GetString()!;
-            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || uri.Scheme != "http" || uri.Host != "127.0.0.1" || uri.Port != 3210
-                || !uri.AbsolutePath.StartsWith("/dashboard/open/", StringComparison.Ordinal)) throw new InvalidOperationException();
-            Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); Console.WriteLine("Dashboard opened in your system browser."); return 0;
+            Process.Start(new ProcessStartInfo("http://127.0.0.1:3210/") { UseShellExecute = true });
+            Console.WriteLine("Dashboard opened in your system browser."); return 0;
         }
         if (command is "status" or "models" or "usage" or "statistics" or "requests")
         {

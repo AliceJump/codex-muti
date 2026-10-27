@@ -27,7 +27,7 @@ async function setup() {
     let current = state(), history = page([3, 2], 2), statistics = stats();
     let intercept = null;
     w.setInterval = () => 0;
-    w.EventSource = class { addEventListener() {} };
+    w.EventSource = class { addEventListener() {} close() {} };
     w.fetch = async (url, options) => {
         calls.push({ url, options });
         if (intercept) { const reply = intercept(url, options); if (reply) return reply; }
@@ -67,7 +67,7 @@ test('renewal separates fresh plan from unavailable subscription dates and faile
         assert.match(cards[0].textContent, /上游仍返回旧日期/);
     } finally { h.dom.window.close(); }
 });
-test('model key lifecycle requires CSRF, renders names as text, and clears the one-time secret', async () => {
+test('model key lifecycle works without a session, renders names as text, and clears the one-time secret', async () => {
     const h = await setup(), { w } = h;
     try {
         let keys = [{ id: 'previous-key', name: 'Existing key' }], copied = '';
@@ -85,7 +85,8 @@ test('model key lifecycle requires CSRF, renders names as text, and clears the o
         form.dispatchEvent(new w.SubmitEvent('submit', { cancelable: true, submitter: form.querySelector('button') }));
         await tick();
         const creation = h.calls.find(x => x.url === '/model-keys/create');
-        assert.equal(creation.options.headers['X-Codex-Pool-CSRF'], 'fixture');
+        assert.equal(creation.options.headers['X-Codex-Pool-Local'], '1');
+        assert.ok(!h.calls.some(x => x.url === '/browser-session' || x.url === '/dashboard/session'));
         assert.equal(JSON.parse(creation.options.body).name, 'AstrBot');
         assert.equal(w.document.getElementById('model-key-secret').value, 'SYNTHETIC-KEY-CANARY');
         assert.equal(w.document.querySelector('#model-keys img'), null);
@@ -194,5 +195,75 @@ test('a changed date range discards stale in-flight results and resets paginatio
         w.document.getElementById('history-range').dispatchEvent(new w.Event('submit', { cancelable: true })); await tick();
         finish(); await pending;
         assert.deepEqual(Array.from(api.getItems(), x => x.sequence), [1]);
+    } finally { h.dom.window.close(); }
+});
+
+test('switch history is bounded, filterable and does not jump when live records arrive', async () => {
+    const h = await setup(), { w, api } = h;
+    try {
+        const s = state();
+        s.recentSwitches = Array.from({ length: 100 }, (_, i) => ({ at: new Date(Date.parse(now) + i * 1000).toISOString(), from: 'a', to: 'b', reason: i % 2 ? 'manual' : 'quota_threshold', epoch: i }));
+        api.render(s);
+        assert.equal(w.document.querySelectorAll('#switch-preview .switch').length, 3);
+        assert.equal(w.document.querySelectorAll('#switches .switch').length, 8);
+        assert.equal(w.document.getElementById('switch-page').textContent, '1 / 13');
+        assert.equal(w.document.getElementById('switch-prev').disabled, true);
+        w.document.getElementById('switch-next').click();
+        const first = w.document.querySelector('#switches .switch');
+        const key = first.dataset.key;
+        s.recentSwitches.push({ ...s.recentSwitches[99], at: new Date(Date.parse(now) + 100000).toISOString(), epoch: 100 });
+        s.recentSwitches.shift(); api.render(s);
+        assert.equal(w.document.querySelector('#switches .switch'), first);
+        assert.equal(first.dataset.key, key);
+        assert.match(w.document.getElementById('switch-count').textContent, /1 条新记录/);
+        w.document.getElementById('switch-prev').click();
+        assert.equal(w.document.getElementById('switch-page').textContent, '1 / 13');
+        assert.notEqual(w.document.querySelector('#switches .switch').dataset.key, key);
+        const filter = w.document.getElementById('switch-filter');
+        filter.value = 'manual'; filter.dispatchEvent(new w.Event('change'));
+        assert.ok([...w.document.querySelectorAll('#switches .switch-reason')].every(row => row.textContent === '手动切换'));
+        filter.value = 'automatic'; filter.dispatchEvent(new w.Event('change'));
+        assert.ok([...w.document.querySelectorAll('#switches .switch-reason')].every(row => row.textContent === '达到额度窗口阈值'));
+        for (let i = 0; i < 6; i++) w.document.getElementById('switch-next').click();
+        assert.equal(w.document.getElementById('switch-next').disabled, true);
+        assert.equal(w.document.getElementById('switch-page').textContent, '7 / 7');
+        assert.ok(w.document.querySelector('#switches time').getAttribute('datetime'));
+    } finally { h.dom.window.close(); }
+});
+
+test('navigation retains edited settings and expanded account details across live updates', async () => {
+    const h = await setup(), { w, api } = h;
+    try {
+        const s = state(); api.render(s);
+        const details = w.document.querySelector('#accounts details'); details.open = true;
+        api.render(s); assert.equal(details.open, true);
+        const input = w.document.querySelector('[name=windowThreshold]'); input.value = '72'; input.dispatchEvent(new w.Event('input', { bubbles: true }));
+        w.location.hash = '#settings'; w.dispatchEvent(new w.HashChangeEvent('hashchange'));
+        assert.equal(w.document.getElementById('view-settings').hidden, false);
+        assert.equal(w.document.getElementById('view-accounts').hidden, true);
+        assert.equal(w.document.querySelector('[data-view=settings]').getAttribute('aria-current'), 'page');
+        api.render(s); assert.equal(input.value, '72');
+        w.location.hash = '#activity'; w.dispatchEvent(new w.HashChangeEvent('hashchange'));
+        w.document.querySelector('[data-activity=requests]').click();
+        assert.equal(w.document.getElementById('request-history').hidden, false);
+        assert.equal(w.document.getElementById('switch-history').hidden, true);
+        w.location.hash = '#unknown'; w.dispatchEvent(new w.HashChangeEvent('hashchange'));
+        assert.equal(w.document.getElementById('view-accounts').hidden, false);
+        assert.equal(w.document.querySelector('#accounts details'), details);
+    } finally { h.dom.window.close(); }
+});
+
+test('an offline console retries directly without a login or cookie handshake', async () => {
+    const h = await setup(), { w } = h;
+    try {
+        h.intercept(url => url === '/status' ? Promise.reject(new Error('offline')) : null);
+        w.document.getElementById('retry').click(); await tick();
+        assert.equal(w.document.getElementById('locked').hidden, false);
+        assert.equal(w.document.getElementById('workspace').hidden, true);
+        h.intercept(null); w.document.getElementById('retry').click(); await tick();
+        assert.equal(w.document.getElementById('locked').hidden, true);
+        assert.equal(w.document.getElementById('workspace').hidden, false);
+        assert.ok(h.calls.every(x => x.options.headers['X-Codex-Pool-Local'] === '1'));
+        assert.ok(!h.calls.some(x => x.url.includes('session')));
     } finally { h.dom.window.close(); }
 });
