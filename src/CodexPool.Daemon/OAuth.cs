@@ -19,9 +19,21 @@ public sealed class OAuth(HttpClient http, Vault vault)
     private readonly ConcurrentDictionary<string, SemaphoreSlim> refreshLocks = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> health = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, DateTimeOffset> refreshBackoff = new(StringComparer.Ordinal);
+    private readonly object refreshStateGate = new();
     private Metadata? metadata;
     public string? Health(string accountId) => health.TryGetValue(accountId, out var value) ? value : null;
     public bool IsRefreshing(string accountId) => refreshLocks.TryGetValue(accountId, out var singleFlight) && singleFlight.CurrentCount == 0;
+    // Routing may wait on a live single-flight refresh. A durable marker left by a
+    // stopped process is still unavailable and must never authorize token reuse.
+    public string RoutingStatus(string accountId)
+    {
+        lock (refreshStateGate)
+        {
+            var account = vault.Find(accountId);
+            if (account is null || account.AuthStatus == "reauth_required" || Health(accountId) == "reauth_required") return "reauth_required";
+            return account.AuthStatus == "refresh_pending" ? IsRefreshing(accountId) ? "refreshing" : "reauth_required" : account.AuthStatus;
+        }
+    }
 
     public async Task<string> BeginAsync(string name, string? accountId, CancellationToken cancellationToken)
     {
@@ -134,7 +146,9 @@ public sealed class OAuth(HttpClient http, Vault vault)
             cancellationToken.ThrowIfCancellationRequested();
             return vault.Find(id)!;
         }
-        finally { refreshLock.Release(); }
+        // Pair the final release with RoutingStatus's snapshot, so it cannot
+        // mistake an old pending snapshot for an abandoned rotation.
+        finally { lock (refreshStateGate) refreshLock.Release(); }
     }
 
     public async Task<string> ValidateIdTokenAsync(string token, string clientId, string? nonce, CancellationToken cancellationToken)

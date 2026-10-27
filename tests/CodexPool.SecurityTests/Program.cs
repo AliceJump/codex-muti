@@ -27,6 +27,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Returning login retains registration and host identity", Reauthorize),
     ("Missing plan grant and swapped registration are rejected", Grant),
     ("A/B refresh rotation and concurrent single-flight are independent", Refresh),
+    ("Routing waits for an active refresh without switching healthy accounts", RefreshRouting),
+    ("Waiting routing preserves permanent and uncertain refresh failures", RefreshRoutingFailures),
     ("Permanent refresh failure suppresses subsequent refresh attempts", InvalidGrant),
     ("Tampered ciphertext never falls back to plaintext", Tamper),
     ("Local API authenticates controls, rejects Origin/Host, enforces one daemon", LocalApi),
@@ -1125,6 +1127,102 @@ Task PoolErrors()
     Check(PoolAvailability.Aggregate([new("A", "auth_temporarily_unavailable"), new("B", "auth_temporarily_unavailable")]).RetryAfter == "30");
     Check(PoolAvailability.Auth("reauth_required").Status == 400 && PoolAvailability.Auth("auth_temporarily_unavailable").Status == 503);
     return Task.CompletedTask;
+}
+async Task RefreshRouting()
+{
+    foreach (var automatic in new[] { true, false })
+    {
+        var vault = Store("refresh-routing-" + automatic);
+        foreach (var id in new[] { "A", "B" }) { var account = Account(id); account.ExpiresAt = DateTimeOffset.UtcNow.AddHours(1); vault.Add(account); }
+        using var issuer = new FakeIssuer(); using var http = new HttpClient(issuer);
+        var auth = new OAuth(http, vault); var quota = new Quota(http, auth, vault);
+        var pool = new PoolRuntime(vault, auth, quota, true); pool.UpdateSettings(new(automatic));
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        issuer.Barrier = async ct => { entered.TrySetResult(); await release.Task.WaitAsync(ct); };
+        var refresh = auth.ReadyAsync("A", default, forceRefresh: true);
+        Task<ModelLease[]>? preparation = null;
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            Check(vault.Find("A")!.AuthStatus == "refresh_pending" && auth.IsRefreshing("A"));
+            Check(pool.Availability().Single(x => x.AccountId == "A").Reason == "auth_temporarily_unavailable");
+            pool.SelectAfterQuotaRefresh();
+            using var reservation = pool.ReserveModelRequest();
+            Check(reservation.Selection.AccountId == "A" && reservation.CandidateIds[0] == "A");
+            preparation = pool.PrepareAsync(reservation, default);
+            Check(!preparation.IsCompleted && pool.Active == "A" && pool.History.Length == 0);
+            release.TrySetResult(); await refresh;
+            var leases = await preparation;
+            Check(leases[0].AccountId == "A" && issuer.RefreshCalls == 1 && pool.Active == "A" && vault.ActiveId == "A");
+            Check(vault.Find("A")!.Enabled && pool.Availability().All(x => x.Available));
+        }
+        finally { release.TrySetResult(); await refresh; if (preparation is not null) await preparation; }
+        if (automatic)
+        {
+            entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            var standbyRefresh = auth.ReadyAsync("B", default, forceRefresh: true);
+            try
+            {
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                vault.Control("A", "pause");
+                using var reservation = pool.ReserveModelRequest();
+                Check(reservation.Selection.AccountId == "B" && vault.ActiveId == "B");
+            }
+            finally { release.TrySetResult(); await standbyRefresh; }
+            vault.Control("A", "resume"); pool.Activate("A");
+        }
+        // An orphaned pending marker still requires reauthorization, including after restart.
+        vault.SetAuthStatus("A", "refresh_pending");
+        var restartedAuth = new OAuth(http, vault);
+        var restartedPool = new PoolRuntime(vault, restartedAuth, new Quota(http, restartedAuth, vault), true);
+        Check(restartedPool.Availability().Single(x => x.AccountId == "A").Reason == "auth_unavailable");
+        if (automatic) Check(restartedPool.Select().AccountId == "B");
+        else { try { restartedPool.Select(); Check(false); } catch (NoEligibleAccountException) { } }
+    }
+}
+async Task RefreshRoutingFailures()
+{
+    foreach (var uncertain in new[] { false, true })
+    {
+        var vault = Store("refresh-routing-failure-" + uncertain);
+        vault.Add(Account("A"));
+        var standby = Account("B"); standby.ExpiresAt = DateTimeOffset.UtcNow.AddHours(1); vault.Add(standby);
+        using var issuer = new FakeIssuer { RejectRefreshAOnly = true }; using var http = new HttpClient(issuer);
+        var auth = new OAuth(http, vault); var pool = new PoolRuntime(vault, auth, new Quota(http, auth, vault), true); pool.UpdateSettings(new(true));
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        issuer.Barrier = async ct =>
+        {
+            entered.TrySetResult(); await release.Task.WaitAsync(ct);
+            if (uncertain) throw new HttpRequestException("SYNTHETIC-NETWORK-CANARY");
+        };
+        using var reservation = pool.ReserveModelRequest();
+        // The first model request owns the rotation; concurrent routing waits for it.
+        var preparing = pool.PrepareAsync(reservation, default);
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            pool.SelectAfterQuotaRefresh();
+            using var waiting = pool.ReserveModelRequest();
+            Check(pool.Active == "A" && waiting.Selection.AccountId == "A" && pool.History.Length == 0);
+        }
+        finally { release.TrySetResult(); }
+        if (uncertain)
+        {
+            try { await preparing; Check(false); } catch (AuthFailure ex) { Check(ex.Code == "refresh_outcome_unknown"); }
+            Check(pool.Active == "A" && pool.History.Length == 0);
+        }
+        else
+        {
+            var leases = await preparing;
+            Check(leases.Length == 1 && leases[0].AccountId == "B");
+            pool.Complete(reservation.Selection, new("B", 200, 1, true, "stream_forwarded"));
+            Check(pool.Active == "B");
+        }
+        Check(vault.Find("A")!.AuthStatus == "reauth_required" && vault.Find("B")!.RefreshToken == "REFRESH-CANARY-B");
+    }
 }
 async Task PreparedPoolErrors()
 {
