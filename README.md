@@ -38,6 +38,8 @@
 | **Widget** | 可固定和拖动的托盘账户面板 | `pool.ps1 widget` / `Ctrl+Alt+W` |
 | **代理控制托盘** | 独立图标，启动／关闭代理、打开账户浮窗 | `scripts/start-proxy-tray.ps1` |
 
+网页完整功能、固定入口与记录分页见 [网页控制台](docs/web-console.md)。
+
 Daemon 本身不依赖 Node。协议基准为官方 Codex CLI `0.157.1`（Node 22 仅用于验证脚本/MCP 夹具）。
 
 ## 快速开始
@@ -162,7 +164,7 @@ pwsh -NoProfile -File .\scripts\deploy-local.ps1 -Target Core -Dashboard
 - 数据：`%LOCALAPPDATA%\CodexPool`，DPAPI CurrentUser；无明文凭据回退。
 - 单 Daemon 独占锁；刷新按注册单飞，成功后原子替换凭据。
 - 默认仅 loopback；Host/Origin 和同源请求检查保护控制 API；网页无需 Cookie、登录或会话链接。
-- `/health` 公开；`/status`、`/accounts`、`/usage`、`/models` 与控制/模型请求需本地鉴权。
+- 网页直接访问 `http://127.0.0.1:3210/`；管理接口要求本地网页请求标记或本地密钥，模型与服务停止接口仍要求对应密钥。
 - 原生 `/usage` 按真实窗口时长展示；SIWC 为未知。Token 统计见 [docs/usage-statistics.md](docs/usage-statistics.md)。
 
 ## 验证
