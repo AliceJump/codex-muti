@@ -6,7 +6,8 @@ using System.Text.Json.Serialization;
 namespace CodexPool.Core;
 
 // A lease is fixed for one attempt. Control commands cannot mutate its target or token.
-public sealed record ModelLease(string AccountId, Uri Endpoint, [property: JsonIgnore] string AccessToken, [property: JsonIgnore] string? BackendAccountId = null)
+public sealed record ModelLease(string AccountId, Uri Endpoint, [property: JsonIgnore] string AccessToken, [property: JsonIgnore] string? BackendAccountId = null,
+    [property: JsonIgnore] Guid? AuthorizationVersion = null)
 {
     public override string ToString() => $"ModelLease {{ AccountId = {AccountId}, AccessToken = [REDACTED] }}";
 }

@@ -14,6 +14,7 @@ public static class QuotaLabels
         "quota_refresh_timeout" => "额度查询超时",
         "invalid_quota_response" => "额度响应格式异常",
         "quota_auth_unavailable" => "额度凭据恢复失败",
+        "quota_refresh_required" => "授权已更新，等待重新查询额度",
         "quota_storage_or_io_failed" => "额度保存或读取失败",
         _ => "额度查询失败"
     };
