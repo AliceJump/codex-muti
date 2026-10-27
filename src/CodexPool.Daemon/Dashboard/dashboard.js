@@ -1,6 +1,6 @@
 'use strict';
 const $ = id => document.getElementById(id);
-let csrf = '', state = null, busy = false, lastActiveId = null, switchReady = false;
+let state = null, busy = false, lastActiveId = null, switchReady = false;
 let statisticsPeriod = 'allTime', historyKey = '', historyRevision = 0, nextBefore = null, historyLoading = false;
 let historyItems = [], historyStats = null, historyPage = null;
 let historyRange = null;
@@ -54,7 +54,7 @@ function subscriptionDeadline(value, status, reason) {
 }
 const quotaFailureLabel=code=>({quota_unauthorized:'额度接口认证失败（401）',quota_forbidden:'额度接口拒绝访问（403）',quota_rate_limited:'额度接口限流（429）',quota_upstream_unavailable:'额度上游服务异常',quota_network_unavailable:'额度网络连接失败',quota_refresh_timeout:'额度查询超时',invalid_quota_response:'额度响应格式异常',quota_auth_unavailable:'额度凭据恢复失败',quota_storage_or_io_failed:'额度保存或读取失败'}[code]||'额度查询失败');
 function remainingTone(remaining){ if(remaining==null||!Number.isFinite(remaining)) return ''; if(remaining<15) return 'danger'; if(remaining<30) return 'warn'; return 'ok'; }
-async function api(path, data) { const response=await fetch(path,{method:data===undefined?'GET':'POST',headers:data===undefined?{}:{'Content-Type':'application/json','X-Codex-Pool-CSRF':csrf},body:data===undefined?undefined:JSON.stringify(data)}); if(!response.ok){let code='操作未完成';try{code=(await response.json()).error?.code||code;}catch{}throw new Error(code);} return response.json(); }
+async function api(path, data) { const response=await fetch(path,{method:data===undefined?'GET':'POST',headers:{'X-Codex-Pool-Local':'1',...(data===undefined?{}:{'Content-Type':'application/json'})},body:data===undefined?undefined:JSON.stringify(data)}); if(!response.ok){let code='操作未完成';try{code=(await response.json()).error?.code||code;}catch{}throw new Error(code);} return response.json(); }
 async function action(path, data={}, success='已应用，下一个模型请求使用更新后的账户设置。') { if(busy)return false; busy=true; try{await api(path,data);notice(success);render(await api('/status'));return true;}catch(e){notice(e.message); if(state)render(state);return false;}finally{busy=false;} }
 function notifySwitch(s){
   const id=s.activeAccountId||null;
@@ -205,5 +205,5 @@ $('model-key-create').onsubmit=async e=>{
 $('model-key-copy').onclick=async()=>{try{await navigator.clipboard.writeText($('model-key-secret').value);notice('密钥已复制。');}catch{notice('复制未完成，请允许浏览器访问剪贴板后重试。');}};
 $('model-key-dismiss').onclick=clearIssuedModelKey;
 window.addEventListener('pagehide',clearIssuedModelKey);
-async function start(){try{csrf=(await api('/browser-session')).csrf;$('workspace').hidden=false;render(await api('/status'));refreshModelKeys().catch(()=>notice('模型密钥列表读取失败。'));const events=new EventSource('/events');events.addEventListener('status',e=>{render(JSON.parse(e.data));$('connection').textContent='服务在线';});events.onerror=()=>{$('connection').textContent='正在重新连接';};}catch{$('locked').hidden=false;$('connection').textContent='等待安全会话';}}
+async function start(){try{render(await api('/status'));$('workspace').hidden=false;$('locked').hidden=true;$('connection').textContent='服务在线';refreshModelKeys().catch(()=>notice('模型密钥列表读取失败。'));const events=new EventSource('/events');events.addEventListener('status',e=>{render(JSON.parse(e.data));$('connection').textContent='服务在线';});events.onerror=()=>{$('connection').textContent='正在重新连接';};}catch{$('locked').hidden=false;$('connection').textContent='服务未连接';}}
 start();setInterval(()=>{if(state)render(state);},30000);

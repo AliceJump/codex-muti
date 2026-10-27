@@ -34,7 +34,7 @@
 | 组件 | 作用 | 默认地址 / 入口 |
 |------|------|-----------------|
 | **Daemon** | 模型代理、账户、额度、本地 API、Dashboard 静态页 | `http://127.0.0.1:3210`（仅 loopback） |
-| **Dashboard** | 浏览器账户/额度/阈值控制台 | 同端口；`pool.ps1 dashboard` 建立短期安全会话 |
+| **Dashboard** | 浏览器账户/额度/阈值控制台 | 直接访问 `http://127.0.0.1:3210/`，无需登录或会话链接 |
 | **Widget** | 可固定和拖动的托盘账户面板 | `pool.ps1 widget` / `Ctrl+Alt+W` |
 | **代理控制托盘** | 独立图标，启动／关闭代理、打开账户浮窗 | `scripts/start-proxy-tray.ps1` |
 
@@ -161,7 +161,7 @@ pwsh -NoProfile -File .\scripts\deploy-local.ps1 -Target Core -Dashboard
 
 - 数据：`%LOCALAPPDATA%\CodexPool`，DPAPI CurrentUser；无明文凭据回退。
 - 单 Daemon 独占锁；刷新按注册单飞，成功后原子替换凭据。
-- 默认仅 loopback；Host/Origin、HttpOnly 会话与 CSRF 保护控制 API。
+- 默认仅 loopback；Host/Origin 和同源请求检查保护控制 API；网页无需 Cookie、登录或会话链接。
 - `/health` 公开；`/status`、`/accounts`、`/usage`、`/models` 与控制/模型请求需本地鉴权。
 - 原生 `/usage` 按真实窗口时长展示；SIWC 为未知。Token 统计见 [docs/usage-statistics.md](docs/usage-statistics.md)。
 

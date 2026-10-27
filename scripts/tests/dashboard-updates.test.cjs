@@ -67,7 +67,7 @@ test('renewal separates fresh plan from unavailable subscription dates and faile
         assert.match(cards[0].textContent, /上游仍返回旧日期/);
     } finally { h.dom.window.close(); }
 });
-test('model key lifecycle requires CSRF, renders names as text, and clears the one-time secret', async () => {
+test('model key lifecycle works without a session, renders names as text, and clears the one-time secret', async () => {
     const h = await setup(), { w } = h;
     try {
         let keys = [{ id: 'previous-key', name: 'Existing key' }], copied = '';
@@ -85,7 +85,8 @@ test('model key lifecycle requires CSRF, renders names as text, and clears the o
         form.dispatchEvent(new w.SubmitEvent('submit', { cancelable: true, submitter: form.querySelector('button') }));
         await tick();
         const creation = h.calls.find(x => x.url === '/model-keys/create');
-        assert.equal(creation.options.headers['X-Codex-Pool-CSRF'], 'fixture');
+        assert.equal(creation.options.headers['X-Codex-Pool-Local'], '1');
+        assert.ok(!h.calls.some(x => x.url === '/browser-session' || x.url === '/dashboard/session'));
         assert.equal(JSON.parse(creation.options.body).name, 'AstrBot');
         assert.equal(w.document.getElementById('model-key-secret').value, 'SYNTHETIC-KEY-CANARY');
         assert.equal(w.document.querySelector('#model-keys img'), null);

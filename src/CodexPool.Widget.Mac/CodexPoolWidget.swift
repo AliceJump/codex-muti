@@ -168,16 +168,8 @@ final class LocalTransport: NSObject, URLSessionTaskDelegate, @unchecked Sendabl
         await refresh()
     }
     func dashboard() async {
-        guard !preview else { return }
-        do {
-            let data = try await request("/dashboard/session", post: true)
-            struct Ticket: Decodable { let url: String }
-            let ticket = try decoder.decode(Ticket.self, from: data)
-            guard let url = URL(string: ticket.url), url.scheme == "http", url.host == "127.0.0.1", url.port == 3210,
-                  url.user == nil, url.password == nil, url.query == nil, url.fragment == nil,
-                  url.path.hasPrefix("/dashboard/open/") else { return }
-            NSWorkspace.shared.open(url)
-        } catch { message = "Web 面板打开失败，请检查代理状态" }
+        guard !preview, let url = URL(string: "http://127.0.0.1:3210/") else { return }
+        NSWorkspace.shared.open(url)
     }
 }
 

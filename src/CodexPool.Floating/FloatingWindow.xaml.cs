@@ -283,17 +283,14 @@ public partial class FloatingWindow : Window
         }
         catch { }
     }
-    private async Task DashboardAsync()
+    private Task DashboardAsync()
     {
         try
         {
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token); timeout.CancelAfter(TimeSpan.FromSeconds(10));
-            using var response = await http.PostAsync("/dashboard/session", null, timeout.Token); response.EnsureSuccessStatusCode();
-            using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(timeout.Token)); var url = json.RootElement.GetProperty("url").GetString()!;
-            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || uri.Host != "127.0.0.1" || uri.Port != 3210 || uri.Scheme != "http" || !uri.AbsolutePath.StartsWith("/dashboard/open/", StringComparison.Ordinal)) return;
-            Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+            Process.Start(new ProcessStartInfo("http://127.0.0.1:3210/") { UseShellExecute = true });
         }
         catch { OperationNotice("无法打开 Dashboard，请检查本地服务。"); }
+        return Task.CompletedTask;
     }
     private async Task ToggleSwitchAsync()
     {
