@@ -18,6 +18,8 @@ Codex 仍负责重试、任务恢复和工具执行。代理只管理模型入�
 
 自动切换关闭时仍尊重用户选择：当前账户不可用但有正常 standby 时，提示 `account_auto_switch_disabled`，由用户手动选择或开启自动切换，不伪称全池额度耗尽。
 
+正常令牌刷新期间，`refresh_pending` 只表示刷新正在进行。新模型请求保留当前账户并等待同一次刷新完成，不因后台额度查询或并发请求而自动切换。状态接口仍显示 `auth_temporarily_unavailable`，用于识别正在刷新的账户；刷新明确失败或进程重启后遗留的 `refresh_pending` 仍按需要重新授权处理，不重用结果不确定的刷新令牌。
+
 ## 对 Codex 的响应
 
 | 全池/请求状态 | HTTP | type / code | Codex 0.162.1 行为 |

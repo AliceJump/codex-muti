@@ -246,11 +246,12 @@ public sealed class Vault
             Persist(next); document = next; return credential.Id;
         }
     }
-    public bool ActivateForProbe(string id)
+    public bool ActivateForProbe(string id, bool allowRefreshing = false)
     {
         lock (gate)
         {
-            if (!document.Accounts.Any(x => x.Id == id && IsEligible(x))) return false;
+            if (!document.Accounts.Any(x => x.Id == id && (IsEligible(x)
+                || allowRefreshing && x.AuthStatus == "refresh_pending" && x.Enabled && !x.Paused && !x.Draining && !(x.CooldownUntil > DateTimeOffset.UtcNow)))) return false;
             var next = CloneDocument(document); next.ActiveAccountId = id; Persist(next); document = next; return true;
         }
     }
