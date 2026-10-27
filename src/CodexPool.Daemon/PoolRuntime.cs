@@ -9,7 +9,7 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
     private long requestsStarted;
     private string? quotaSelectionError;
     public string? QuotaSelectionError { get { lock (gate) return quotaSelectionError; } }
-    private readonly Dictionary<string, (ModelError Error, DateTimeOffset Until, DateTimeOffset ObservedAt)> failures = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (ModelError Error, DateTimeOffset Until, DateTimeOffset ObservedAt, Guid AuthorizationVersion)> failures = new(StringComparer.Ordinal);
     // Pre-metadata versions persisted quota/auth cooldowns without their cause. Retain the
     // old 30-second auth backoff, then require a successful query begun after this boundary.
     private readonly DateTimeOffset legacyRecoveryAfter = DateTimeOffset.UtcNow.AddSeconds(30);
@@ -32,6 +32,8 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
             {
                 var usage = quota.Snapshot(x.Id);
                 var authStatus = auth.RoutingStatus(x.Id);
+                if (failures.TryGetValue(x.Id, out var previous) && previous.AuthorizationVersion != x.AuthorizationVersion
+                    && previous.Error.FailoverReason is null or "auth_rejected") failures.Remove(x.Id);
                 var fresh = usage?.Fresh(now) == true;
                 var exhausted = fresh ? usage!.RoutingWindows(model, now).Where(w => w.UsedPercent >= 100).OrderByDescending(w => w.ResetAt).FirstOrDefault() : null;
                 var allowanceCurrent = fresh && !usage!.Windows.Any(w => w.LimitId == "codex" && w.ResetAt <= now);
@@ -83,12 +85,14 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
             return aggregate;
         }
     }
-    public void RecordFailure(string id, ModelError error)
+    public void RecordFailure(string id, ModelError error, Guid? authorizationVersion = null)
     {
         if (error.FailoverReason is null) return;
         lock (gate)
         {
             var now = DateTimeOffset.UtcNow;
+            var account = vault.Find(id);
+            if (account is null || error.FailoverReason == "auth_rejected" && authorizationVersion is { } version && account.AuthorizationVersion != version) return;
             legacyCooldowns.Remove(id);
             var until = error.ResetsAt is { } reset ? DateTimeOffset.FromUnixTimeSeconds(reset) : now.AddMinutes(1);
             var usage = quota.Snapshot(id);
@@ -97,8 +101,8 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
                     .Select(x => x.ResetAt).Max() ?? until
                 : now.AddSeconds(30);
             // Keep the classification and durable cooldown atomic relative to quota reconciliation.
-            failures[id] = (error, until, now);
-            vault.Cooldown(id, cooldown, error.Code, now);
+            if (vault.Cooldown(id, cooldown, error.Code, now, error.FailoverReason == "auth_rejected" ? account.AuthorizationVersion : null))
+                failures[id] = (error, until, now, account.AuthorizationVersion);
         }
     }
     public void RecordSuccess(string id) { lock (gate) failures.Remove(id); }
@@ -196,10 +200,11 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
         foreach (var id in reservation.CandidateIds)
         {
             token.ThrowIfCancellationRequested();
+            var version = vault.Find(id)?.AuthorizationVersion;
             try
             {
                 var credential = await auth.ReadyAsync(id, token);
-                ready.Add(new(id, new(credential.ProviderKind == "native" ? "https://chatgpt.com/backend-api/codex/responses" : "https://api.openai.com/v1/responses"), credential.AccessToken, credential.BackendAccountId));
+                ready.Add(new(id, new(credential.ProviderKind == "native" ? "https://chatgpt.com/backend-api/codex/responses" : "https://api.openai.com/v1/responses"), credential.AccessToken, credential.BackendAccountId, credential.AuthorizationVersion));
             }
             catch (AuthFailure ex)
             {
@@ -213,9 +218,9 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
                     throw;
                 }
                 if (ex.Code is "auth_temporarily_unavailable" or "refresh_not_yet_allowed")
-                { lock (gate) failures[id] = (PoolAvailability.Auth(ex.Code), DateTimeOffset.UtcNow.AddSeconds(30), DateTimeOffset.UtcNow); }
+                { lock (gate) failures[id] = (PoolAvailability.Auth(ex.Code), DateTimeOffset.UtcNow.AddSeconds(30), DateTimeOffset.UtcNow, version ?? Guid.Empty); }
                 else if (vault.Find(id)?.AuthStatus == "reauth_required" || ex.Code is "reauth_required" or "account_identity_mismatch" or "rotated_token_persistence_failed")
-                    RecordFailure(id, PoolAvailability.Auth("reauth_required") with { FailoverReason = "auth_rejected" });
+                    RecordFailure(id, PoolAvailability.Auth("reauth_required") with { FailoverReason = "auth_rejected" }, version);
                 else throw;
             }
         }

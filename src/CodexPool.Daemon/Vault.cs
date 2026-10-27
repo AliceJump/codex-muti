@@ -33,6 +33,8 @@ public sealed class AccountCredential
     public string? CooldownErrorCode { get; set; }
     public DateTimeOffset? CooldownObservedAt { get; set; }
     public string AuthStatus { get; set; } = "ready";
+    // Changes only when a validated login replaces the grant, not on refresh.
+    public Guid AuthorizationVersion { get; set; }
     public DateTimeOffset ExpiresAt { get; set; }
     public DateTimeOffset? EarliestRefreshAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
@@ -169,25 +171,27 @@ public sealed class Vault
         StickyScheduler.Validate(settings);
         lock (gate) { var next = CloneDocument(document); next.Settings = settings; Persist(next); document = next; }
     }
-    public void SaveQuota(QuotaSnapshot snapshot)
+    public bool SaveQuota(QuotaSnapshot snapshot, Guid? authorizationVersion = null)
     {
         lock (gate)
         {
             var next = CloneDocument(document);
             var account = next.Accounts.Single(x => x.Id == snapshot.AccountId);
+            if (authorizationVersion is { } expected && account.AuthorizationVersion != expected) return false;
             next.Quotas.RemoveAll(x => x.AccountId == snapshot.AccountId); next.Quotas.Add(snapshot);
             if (snapshot.Plan is not null)
             { account.Plan = snapshot.Plan; account.PlanSource = snapshot.Source; account.PlanUpdatedAt = snapshot.UpdatedAt; }
-            Persist(next); document = next;
+            Persist(next); document = next; return true;
         }
     }
-    public void Cooldown(string id, DateTimeOffset until, string? errorCode = null, DateTimeOffset? observedAt = null)
+    public bool Cooldown(string id, DateTimeOffset until, string? errorCode = null, DateTimeOffset? observedAt = null, Guid? authorizationVersion = null)
     {
         lock (gate)
         {
             var next = CloneDocument(document); var account = next.Accounts.Single(x => x.Id == id);
+            if (authorizationVersion is { } expected && account.AuthorizationVersion != expected) return false;
             account.CooldownUntil = until; account.CooldownErrorCode = errorCode; account.CooldownObservedAt = observedAt;
-            Persist(next); document = next;
+            Persist(next); document = next; return true;
         }
     }
     public void ClearQuotaCooldown(string id, DateTimeOffset observedAt)
@@ -219,6 +223,11 @@ public sealed class Vault
     public AccountCredential? Selected { get { lock (gate) return Clone(document.Accounts.FirstOrDefault(x => x.Id == document.ActiveAccountId)); } }
     public AccountCredential? Find(string id) { lock (gate) return Clone(document.Accounts.FirstOrDefault(x => x.Id == id)); }
     public AccountCredential[] Accounts { get { lock (gate) return document.Accounts.Select(x => Clone(x)!).ToArray(); } }
+    private static bool SameRegistration(AccountCredential existing, AccountCredential incoming) =>
+        existing.ProviderKind == incoming.ProviderKind && existing.ClientId == incoming.ClientId
+        && (incoming.ProviderKind != "native" || existing.Subject == incoming.Subject && existing.BackendAccountId == incoming.BackendAccountId);
+    public string? RegistrationId(AccountCredential credential)
+    { lock (gate) return document.Accounts.FirstOrDefault(x => SameRegistration(x, credential))?.Id; }
     public string Add(AccountCredential credential)
     {
         lock (gate)
@@ -226,8 +235,8 @@ public sealed class Vault
             if (credential.Plan is not null)
             { credential.PlanSource = "login_id_token"; credential.PlanUpdatedAt = credential.UpdatedAt; }
             var next = CloneDocument(document);
-            var duplicate = next.Accounts.FindIndex(x => x.ProviderKind == credential.ProviderKind && x.ClientId == credential.ClientId
-                && (credential.ProviderKind != "native" || x.Subject == credential.Subject && x.BackendAccountId == credential.BackendAccountId));
+            credential.AuthorizationVersion = Guid.NewGuid();
+            var duplicate = next.Accounts.FindIndex(x => SameRegistration(x, credential));
             if (duplicate >= 0)
             {
                 var existing = next.Accounts[duplicate];
@@ -238,7 +247,11 @@ public sealed class Vault
                     Enabled = existing.Enabled, Paused = existing.Paused, Draining = existing.Draining, CooldownUntil = existing.CooldownUntil,
                     CooldownErrorCode = existing.CooldownErrorCode, CooldownObservedAt = existing.CooldownObservedAt,
                     ProviderKind = credential.ProviderKind, BackendAccountId = credential.BackendAccountId, Plan = credential.Plan,
+                    AuthorizationVersion = credential.AuthorizationVersion,
                     PlanSource = credential.PlanSource, PlanUpdatedAt = credential.PlanUpdatedAt };
+                // A new grant proves authentication recovery, not quota or model access.
+                if (ModelErrors.IsAuthCode(credential.CooldownErrorCode))
+                { credential.CooldownUntil = null; credential.CooldownErrorCode = null; credential.CooldownObservedAt = null; }
                 next.Accounts[duplicate] = credential;
             }
             else next.Accounts.Add(credential);

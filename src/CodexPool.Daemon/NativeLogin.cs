@@ -7,7 +7,7 @@ using Microsoft.IdentityModel.JsonWebTokens;
 namespace CodexPool.Daemon;
 
 // Compatibility adapter for official CLI login. Never opens the user's default CODEX_HOME.
-public sealed class NativeLogin(Vault vault, OAuth auth, string dataDirectory)
+public sealed class NativeLogin(OAuth auth, string dataDirectory)
 {
     public const string NativeClientId = "app_EMoamEEZ73f0CkXaXp7hrann";
     private readonly SemaphoreSlim loginLock = new(1, 1);
@@ -61,11 +61,11 @@ public sealed class NativeLogin(Vault vault, OAuth auth, string dataDirectory)
                 // Remove the helper's durable copy before publishing a daemon-owned copy.
                 // A crash here loses this fresh grant and requires login again; it cannot race refresh.
                 File.Delete(source);
-                vault.Add(new() { Id = Guid.NewGuid().ToString("N"), Name = name, Subject = subject, ClientId = NativeClientId,
+                await auth.SaveValidatedLoginAsync(new() { Id = Guid.NewGuid().ToString("N"), Name = name, Subject = subject, ClientId = NativeClientId,
                     ProviderKind = "native", BackendAccountId = backendId,
                     Plan = claims.RootElement.TryGetProperty("chatgpt_plan_type", out var plan) ? plan.GetString() : null,
                     AccessToken = accessToken, RefreshToken = refreshToken, IdToken = idToken, Scope = "native_codex",
-                    ExpiresAt = new DateTimeOffset(DateTime.SpecifyKind(expiry, DateTimeKind.Utc)), UpdatedAt = DateTimeOffset.UtcNow });
+                    ExpiresAt = new DateTimeOffset(DateTime.SpecifyKind(expiry, DateTimeKind.Utc)), UpdatedAt = DateTimeOffset.UtcNow }, timeout.Token);
                 attempts[attemptId] = "completed";
             }
             finally { CryptographicOperations.ZeroMemory(credentialBytes); }

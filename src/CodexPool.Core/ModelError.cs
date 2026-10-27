@@ -55,6 +55,7 @@ public static class ModelErrors
         ? "quota_rejected" : code == "usage_not_included" ? "access_rejected" : code is not null && AuthCodes.Contains(code) ? "auth_rejected" : null;
     public static bool IsBalanceCode(string? code) => code is not null && BalanceCodes.Contains(code);
     public static bool IsUsageCode(string? code) => code is not null && UsageCodes.Contains(code);
+    public static bool IsAuthCode(string? code) => code is not null && (AuthCodes.Contains(code) || code == "account_auth_required");
 
     public static ModelError FromUpstream(HttpStatusCode status, ReadOnlyMemory<byte> body, string? retryAfter)
     {

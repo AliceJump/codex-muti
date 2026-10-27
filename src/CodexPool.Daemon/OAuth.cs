@@ -20,6 +20,7 @@ public sealed class OAuth(HttpClient http, Vault vault)
     private readonly ConcurrentDictionary<string, string> health = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, DateTimeOffset> refreshBackoff = new(StringComparer.Ordinal);
     private readonly object refreshStateGate = new();
+    private readonly SemaphoreSlim loginPublication = new(1, 1);
     private Metadata? metadata;
     public string? Health(string accountId) => health.TryGetValue(accountId, out var value) ? value : null;
     public bool IsRefreshing(string accountId) => refreshLocks.TryGetValue(accountId, out var singleFlight) && singleFlight.CurrentCount == 0;
@@ -72,11 +73,35 @@ public sealed class OAuth(HttpClient http, Vault vault)
             ["code"] = code, ["code_verifier"] = login.Verifier, ["redirect_uri"] = Redirect, ["resource"] = Resource }, cancellationToken);
         var subject = await ValidateIdTokenAsync(token.IdToken, clientId, login.Nonce, cancellationToken);
         if (login.AccountId is not null && vault.Find(login.AccountId)?.Subject != subject) throw new AuthFailure("account_identity_mismatch");
-        var savedId = vault.Add(new() { Id = login.AccountId ?? Guid.NewGuid().ToString("N"), Name = login.Name, Subject = subject,
+        return await SaveValidatedLoginAsync(new() { Id = login.AccountId ?? Guid.NewGuid().ToString("N"), Name = login.Name, Subject = subject,
             ClientId = clientId, AccessToken = token.AccessToken, RefreshToken = token.RefreshToken, IdToken = token.IdToken,
             Scope = token.Scope, ExpiresAt = DateTimeOffset.UtcNow.AddSeconds(token.ExpiresIn),
-            EarliestRefreshAt = token.EarliestRefreshAt, UpdatedAt = DateTimeOffset.UtcNow });
-        health.TryRemove(savedId, out _); refreshBackoff.TryRemove(savedId, out _); return savedId;
+            EarliestRefreshAt = token.EarliestRefreshAt, UpdatedAt = DateTimeOffset.UtcNow }, cancellationToken);
+    }
+
+    // Both login adapters publish through the same boundary. Wait for any old
+    // rotation to settle before replacing its grant and clearing cached auth state.
+    public async Task<string> SaveValidatedLoginAsync(AccountCredential credential, CancellationToken cancellationToken)
+    {
+        await loginPublication.WaitAsync(cancellationToken);
+        try
+        {
+            var existingId = vault.RegistrationId(credential);
+            using var use = existingId is null ? null : vault.AcquireUse(existingId);
+            var refreshLock = refreshLocks.GetOrAdd(existingId ?? credential.Id, _ => new(1, 1));
+            await refreshLock.WaitAsync(cancellationToken);
+            try
+            {
+                lock (refreshStateGate)
+                {
+                    var id = vault.Add(credential);
+                    health.TryRemove(id, out _); refreshBackoff.TryRemove(id, out _);
+                    return id;
+                }
+            }
+            finally { lock (refreshStateGate) refreshLock.Release(); }
+        }
+        finally { loginPublication.Release(); }
     }
 
     public async Task<AccountCredential> ReadyAsync(string id, CancellationToken cancellationToken, bool forceRefresh = false,
@@ -91,7 +116,8 @@ public sealed class OAuth(HttpClient http, Vault vault)
             // Compare under the rotation lock: a concurrent refresh/login may already
             // have replaced the rejected generation. Never rotate that new grant again.
             if (rejectedCredential is not null && (account.AccessToken != rejectedCredential.AccessToken
-                || account.RefreshToken != rejectedCredential.RefreshToken || account.UpdatedAt != rejectedCredential.UpdatedAt)) return account;
+                || account.RefreshToken != rejectedCredential.RefreshToken || account.UpdatedAt != rejectedCredential.UpdatedAt
+                || account.AuthorizationVersion != rejectedCredential.AuthorizationVersion)) return account;
             if (!forceRefresh && account.ExpiresAt > DateTimeOffset.UtcNow.AddMinutes(2)) return account;
             if (refreshBackoff.TryGetValue(id, out var retryAt) && retryAt > DateTimeOffset.UtcNow) throw new AuthFailure("auth_temporarily_unavailable");
             if (account.EarliestRefreshAt > DateTimeOffset.UtcNow) throw new AuthFailure("refresh_not_yet_allowed");

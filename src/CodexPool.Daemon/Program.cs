@@ -41,7 +41,7 @@ try
         AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate })
         { Timeout = TimeSpan.FromMinutes(10) };
     var auth = new OAuth(http, vault); var relay = new ResponsesRelay(modelHttp);
-    var nativeLogin = new NativeLogin(vault, auth, directory);
+    var nativeLogin = new NativeLogin(auth, directory);
     var quota = new Quota(http, auth, vault);
     using var statistics = new UsageStatistics(directory);
     var inFlight = new ConcurrentDictionary<string, int>();
@@ -158,7 +158,7 @@ try
             if (!response.IsSuccessStatusCode)
             {
                 var error = await ModelErrors.FromResponseAsync(response, context.RequestAborted);
-                pool.RecordFailure(account.AccountId, error);
+                pool.RecordFailure(account.AccountId, error, account.AuthorizationVersion);
                 if (error.FailoverReason is not null && index + 1 < candidates.Length) continue;
                 if (error.FailoverReason is not null) error = pool.Unavailable(error, reservation.CandidateIds.ToArray(), reservation.AutoSwitch);
                 if (error.RetryAfter is not null) context.Response.Headers["Retry-After"] = error.RetryAfter;
@@ -305,7 +305,7 @@ try
                     if (entering) { attemptedAccount = lease.AccountId; attemptCount++; }
                     inFlight.AddOrUpdate(lease.AccountId, entering ? 1 : 0, (_, count) => Math.Max(0, count + (entering ? 1 : -1)));
                 }, lease => { upstreamCompleted = true; pool.RecordSuccess(lease.AccountId); },
-                (lease, error) => pool.RecordFailure(lease.AccountId, error), error => pool.Unavailable(error, reservation.CandidateIds.ToArray(), reservation.AutoSwitch, requestedModel),
+                (lease, error) => pool.RecordFailure(lease.AccountId, error, lease.AuthorizationVersion), error => pool.Unavailable(error, reservation.CandidateIds.ToArray(), reservation.AutoSwitch, requestedModel),
                 (_, value) => tokenUsage = value);
             if (converter is not null && result.Outcome is "stream_forwarded" or "empty_stream")
             {
