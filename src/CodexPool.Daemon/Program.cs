@@ -41,7 +41,8 @@ try
         AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate })
         { Timeout = TimeSpan.FromMinutes(10) };
     var auth = new OAuth(http, vault); var relay = new ResponsesRelay(modelHttp);
-    var nativeLogin = new NativeLogin(auth, directory);
+    await using var nativeLogin = new NativeLogin(auth, directory);
+    using var stopLogin = app.Lifetime.ApplicationStopping.Register(() => { _ = nativeLogin.StopAsync(); });
     var quota = new Quota(http, auth, vault);
     using var statistics = new UsageStatistics(directory);
     var inFlight = new ConcurrentDictionary<string, int>();
@@ -112,7 +113,7 @@ try
         app.MapGet(asset.Path, () => Results.Stream(typeof(Vault).Assembly.GetManifestResourceStream("CodexPool.Daemon.Dashboard." + asset.File)!, asset.Type));
     app.MapGet("/settings", () => pool.Settings);
     DaemonControlEndpoints.Map(app, vault.LocalKey, app.Lifetime.StopApplication,
-        () => inFlight.Values.All(x => x == 0) && vault.Accounts.All(x => !auth.IsRefreshing(x.Id)));
+        () => !nativeLogin.IsRunning && inFlight.Values.All(x => x == 0) && vault.Accounts.All(x => !auth.IsRefreshing(x.Id)));
     app.MapPost("/settings", async (HttpContext context) =>
     {
         var settings = await context.Request.ReadFromJsonAsync<PoolSettings>(context.RequestAborted) ?? throw new AuthFailure("invalid_settings");
@@ -143,43 +144,26 @@ try
             otherAccountCredentialsUnchanged = before.Where(x => x.Id != id).All(x => vault.Find(x.Id) is { } current
                 && current.AccessToken == x.AccessToken && current.RefreshToken == x.RefreshToken) });
     });
+    var modelCatalog = new ModelCatalog(http, pool);
     async Task<IResult> ModelCatalog(HttpContext context)
     {
-        using var reservation = pool.ReserveCatalog();
-        var candidates = await pool.PrepareAsync(reservation, context.RequestAborted);
-        // Forward Codex's client_version so the picker catalog matches the installed CLI (e.g. gpt-6.1-sol).
-        var catalogVersion = CodexClientVersion.FromQueryOrFallback(context.Request.Query["client_version"], modelClientVersion);
-        for (var index = 0; index < candidates.Length; index++)
+        try
         {
-            var account = candidates[index]; var native = account.Endpoint.Host == "chatgpt.com";
-            using var request = new HttpRequestMessage(HttpMethod.Get, native
-                ? $"https://chatgpt.com/backend-api/codex/models?client_version={Uri.EscapeDataString(catalogVersion)}" : "https://api.openai.com/v1/models");
-            request.Headers.Authorization = new("Bearer", account.AccessToken);
-            if (native) request.Headers.TryAddWithoutValidation("ChatGPT-Account-Id", account.BackendAccountId);
-            using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, context.RequestAborted);
-            if (!response.IsSuccessStatusCode)
-            {
-                var error = await ModelErrors.FromResponseAsync(response, context.RequestAborted);
-                pool.RecordFailure(account.AccountId, error, account.AuthorizationVersion);
-                if (error.FailoverReason is not null && index + 1 < candidates.Length) continue;
-                if (error.FailoverReason is not null) error = pool.Unavailable(error, reservation.CandidateIds.ToArray(), reservation.AutoSwitch);
-                if (error.RetryAfter is not null) context.Response.Headers["Retry-After"] = error.RetryAfter;
-                return Results.Content(Encoding.UTF8.GetString(error.Body()), "application/json", statusCode: error.Status);
-            }
-            await using var stream = await response.Content.ReadAsStreamAsync(context.RequestAborted);
-            using var content = new MemoryStream(); var buffer = new byte[8192];
-            while (true) { var count = await stream.ReadAsync(buffer, context.RequestAborted); if (count == 0) break; if (content.Length + count > 2 * 1024 * 1024) throw new AuthFailure("oversized_model_catalog"); content.Write(buffer, 0, count); }
-            using var json = JsonDocument.Parse(content.ToArray());
-            if (json.RootElement.ValueKind != JsonValueKind.Object || !json.RootElement.TryGetProperty("models", out var models) || models.ValueKind != JsonValueKind.Array)
-                throw new AuthFailure("unrecognized_model_catalog");
+            var version = CodexClientVersion.FromQueryOrFallback(context.Request.Query["client_version"], modelClientVersion);
+            var view = await modelCatalog.ReadAsync(version, context.RequestAborted);
             if (context.Request.Path == "/api/v1/models" || context.Items["modelClient"] is true)
-                return Results.Json(CompatibilityCatalog.Models(json.RootElement));
-            if (context.Request.Path == "/v1/models") return Results.Json(json.RootElement.Clone());
-            var visible = models.EnumerateArray().Where(x => x.TryGetProperty("visibility", out var visibility) && visibility.GetString() == "list")
+                return Results.Json(CompatibilityCatalog.Models(view.Catalog));
+            if (context.Request.Path == "/v1/models") return Results.Json(view.Catalog);
+            var visible = view.Catalog.GetProperty("models").EnumerateArray()
+                .Where(x => x.TryGetProperty("visibility", out var visibility) && visibility.GetString() == "list")
                 .Select(x => new { slug = x.GetProperty("slug").GetString(), displayName = x.GetProperty("display_name").GetString() }).ToArray();
-            return Results.Json(new { accountId = account.AccountId, models = visible });
+            return Results.Json(new { accountId = view.AccountId, models = visible });
         }
-        throw new NoEligibleAccountException();
+        catch (ModelCatalogFailure ex)
+        {
+            if (ex.Error.RetryAfter is not null) context.Response.Headers["Retry-After"] = ex.Error.RetryAfter;
+            return Results.Content(Encoding.UTF8.GetString(ex.Error.Body()), "application/json", statusCode: ex.Error.Status);
+        }
     }
     app.MapGet("/models", (Func<HttpContext, Task<IResult>>)ModelCatalog);
     app.MapGet("/v1/models", (Func<HttpContext, Task<IResult>>)ModelCatalog);

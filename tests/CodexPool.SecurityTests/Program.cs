@@ -20,6 +20,9 @@ if (args.FirstOrDefault() == "--native-login-helper") return await NativeLoginTe
 var root = Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, ".research", "security-" + Guid.NewGuid().ToString("N")));
 var tests = new (string Name, Func<Task> Run)[]
 {
+    ("Upstream deadline bounds quota bodies, releases the account lock and continues the batch", () => UpstreamDeadlineTests.QuotaBody(root)),
+    ("Upstream deadline bounds catalog bodies and preserves caller cancellation", () => UpstreamDeadlineTests.CatalogBody(root)),
+    ("Native login host shutdown awaits helper cleanup and rejects new starts", () => NativeLoginTests.Shutdown(root)),
     ("Native login coalesces duplicate starts and cancels only the requested helper before retry", () => NativeLoginTests.Lifecycle(root)),
     ("Native login releases its slot after timeout, failed launch, invalid path or missing credentials", () => NativeLoginTests.Failures(root)),
     ("Native login bounds inherited output pipes by the same deadline", () => NativeLoginTests.InheritedPipe(root)),

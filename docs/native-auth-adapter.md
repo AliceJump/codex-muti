@@ -19,6 +19,8 @@ SIWC token **不会**发往私有 Codex 端点。
 
 若浏览器已关闭或需要换账户，可在 Dashboard 取消，或执行 `native-login-cancel <attempt-id>`（ID 来自 `status`）。取消接口为 `POST /accounts/native-login/{attempt-id}/cancel`，完成 helper 与临时目录清理后才返回。登录和输出排空统一受 5 分钟超时约束，超时后可重新登录；清理异常也不会遗留登录锁。
 
+普通停服在登录进行时返回 busy；宿主开始退出后拒绝新登录，并取消、等待既有 helper 清理。额度查询与模型目录查询的 30 秒期限覆盖响应头和完整正文，避免上游保持连接却不发送正文时阻塞后续更新。调用者取消仍会向上传递；已经接受的 refresh 轮换继续完成凭据持久化。
+
 ## 额度
 
 原生用量读取固定官方源码中的 endpoint 与字段（`chatgpt.com/backend-api/wham/usage`）。窗口时长区分 5h、weekly 等；缺失保持未知。每账户快照独立缓存，过期后界面可见陈旧，不伪装成 0%。该私有接口版本敏感，不是公开 API 承诺。

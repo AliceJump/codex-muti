@@ -7,7 +7,7 @@ using Microsoft.IdentityModel.JsonWebTokens;
 namespace CodexPool.Daemon;
 
 // Compatibility adapter for official CLI login. Never opens the user's default CODEX_HOME.
-public sealed class NativeLogin
+public sealed class NativeLogin : IAsyncDisposable
 {
     public const string NativeClientId = "app_EMoamEEZ73f0CkXaXp7hrann";
     private readonly OAuth auth;
@@ -16,18 +16,21 @@ public sealed class NativeLogin
     private readonly TimeSpan loginTimeout;
     private readonly object gate = new();
     private Attempt? active;
+    private bool stopping;
     private readonly ConcurrentDictionary<string, string> attempts = new();
     public NativeLogin(OAuth auth, string dataDirectory)
         : this(auth, dataDirectory, Process.Start, TimeSpan.FromMinutes(5)) { }
     internal NativeLogin(OAuth auth, string dataDirectory, Func<ProcessStartInfo, Process?> startHelper, TimeSpan loginTimeout)
     { this.auth = auth; this.dataDirectory = dataDirectory; this.startHelper = startHelper; this.loginTimeout = loginTimeout; }
     public object[] PublicAttempts => attempts.Select(x => (object)new { id = x.Key, state = x.Value }).ToArray();
+    public bool IsRunning { get { lock (gate) return active is not null; } }
     public Task<string> StartAsync(string name)
     {
         if (string.IsNullOrWhiteSpace(name) || name.Length > 80 || name.Any(char.IsControl)) throw new AuthFailure("invalid_account_name");
         Attempt attempt;
         lock (gate)
         {
+            if (stopping) throw new AuthFailure("native_login_stopping");
             // Duplicate clicks/retries attach to the same browser flow instead of failing.
             if (active is not null)
             {
@@ -49,6 +52,18 @@ public sealed class NativeLogin
         // Acknowledge only after the helper and its isolated profile have been cleaned up.
         await completion; return true;
     }
+    public Task StopAsync()
+    {
+        lock (gate)
+        {
+            stopping = true;
+            if (active is null) return Task.CompletedTask;
+            var completion = active.Completion.Task;
+            active.Cancellation.Cancel();
+            return completion;
+        }
+    }
+    public ValueTask DisposeAsync() => new(StopAsync());
     private async Task FinishAsync(Attempt attempt)
     {
         // A fresh native grant is minted, transferred once to DPAPI, and never refreshed by helper.

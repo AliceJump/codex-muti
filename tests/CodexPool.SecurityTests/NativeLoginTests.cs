@@ -140,6 +140,25 @@ internal static class NativeLoginTests
         }
         finally { foreach (var pid in launches) StopFixture(pid); }
     }
+    public static async Task Shutdown(string root)
+    {
+        var directory = Path.Combine(root, "native-login-shutdown");
+        using var http = new HttpClient(); var auth = new OAuth(http, new Vault(directory));
+        var launches = new List<int>();
+        await using var login = new NativeLogin(auth, directory, info =>
+        {
+            var process = StartFixture("wait", info.Environment["CODEX_HOME"]!); launches.Add(process.Id); return process;
+        }, TimeSpan.FromSeconds(20));
+        try
+        {
+            var id = await login.StartAsync("A"); Check(login.IsRunning);
+            await Task.WhenAll(login.StopAsync(), login.StopAsync()).WaitAsync(TimeSpan.FromSeconds(8));
+            Check(!login.IsRunning && State(login, id) == "native_login_cancelled");
+            Check(!Directory.Exists(Path.Combine(directory, "native-login-" + id)));
+            try { await login.StartAsync("B"); Check(false); } catch (AuthFailure ex) { Check(ex.Code == "native_login_stopping"); }
+        }
+        finally { foreach (var pid in launches) StopFixture(pid); }
+    }
     private static void StopFixture(int pid)
     {
         try { using var process = Process.GetProcessById(pid); if (!process.HasExited) process.Kill(true); }
