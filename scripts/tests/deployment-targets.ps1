@@ -93,6 +93,7 @@ function New-TestProcess([int]$Id, [string]$Path, [bool]$Exited = $false) {
     $taskProcess = [pscustomobject]@{Id=$Id;Path=$Path;ProcessName=[IO.Path]::GetFileNameWithoutExtension($Path);StartTime=[DateTime]::UtcNow.AddSeconds($Id);HasExited=$Exited}
     $taskProcess | Add-Member ScriptMethod Refresh { }
     $taskProcess | Add-Member ScriptMethod WaitForExit { param($Milliseconds) return $this.HasExited }
+    $taskProcess | Add-Member ScriptMethod Kill { param($Tree) $taskTestState.Trace.Add("kill-tree:$($this.Id):$Tree"); $this.HasExited = $true }
     $taskTestState.Processes[$Id] = $taskProcess
     return $taskProcess
 }
@@ -131,13 +132,15 @@ function script:Start-Process {
     return $taskTestState.Core
 }
 function script:Invoke-RestMethod { param($Uri,[switch]$NoProxy,$TimeoutSec) [pscustomobject]@{status='running'} }
-foreach ($taskCase in @('All','Core','Components','FailCore','FailAllCore','FailComponents','FailComponentsOffline','FailProxy','FailCoreNoListener','FailCoreListenerUnknown')) {
+foreach ($taskCase in @('All','Core','Components','FailCore','FailAllCore','FailComponents','FailComponentsOffline','FailProxy','FailCoreNoListener','FailCoreListenerUnknown','ForceCore','ForceAll','ForceComponents','ForceUnknownStatus','FailForceCore','FailForceForeign','FailForceIdentity')) {
     $taskTestState.Sandbox = New-TestRoot "deploy-$taskCase"
     $taskTestState.Trace = [Collections.Generic.List[string]]::new()
     $taskTestState.Processes = @{}
-    $taskTestState.Failure = if ($taskCase -eq 'FailCoreNoListener') {'NoListener'} elseif ($taskCase -eq 'FailCoreListenerUnknown') {'ListenerUnknown'} elseif ($taskCase -in @('FailCore','FailAllCore')) {'Core'} elseif ($taskCase.StartsWith('FailComponents')) {'Components'} elseif ($taskCase -eq 'FailProxy') {'Proxy'} else {''}
-    $taskTarget = if ($taskCase -in @('FailComponentsOffline','FailProxy')) {'Components'} elseif ($taskCase -eq 'FailAllCore') {'All'} elseif ($taskCase.StartsWith('FailCore')) {'Core'} else {$taskCase.Replace('Fail','')}
+    $taskTestState.Failure = if ($taskCase -eq 'FailCoreNoListener') {'NoListener'} elseif ($taskCase -eq 'FailCoreListenerUnknown') {'ListenerUnknown'} elseif ($taskCase -in @('FailCore','FailAllCore','FailForceCore')) {'Core'} elseif ($taskCase.StartsWith('FailComponents')) {'Components'} elseif ($taskCase -eq 'FailProxy') {'Proxy'} elseif ($taskCase -eq 'ForceUnknownStatus') {'StatusUnknown'} elseif ($taskCase -eq 'FailForceIdentity') {'Identity'} else {''}
+    $taskUseForce = $taskCase -match 'Force'
+    $taskTarget = if ($taskCase -in @('ForceUnknownStatus','FailForceForeign','FailForceIdentity')) {'Core'} elseif ($taskCase -in @('FailComponentsOffline','FailProxy')) {'Components'} elseif ($taskCase -eq 'FailAllCore') {'All'} elseif ($taskCase.StartsWith('FailCore')) {'Core'} else {$taskCase.Replace('Fail','').Replace('Force','')}
     $taskTestState.Core = New-TestProcess 101 (Join-Path $taskTestState.Sandbox '.local/base/Daemon/CodexPool.Daemon.exe') ($taskCase -eq 'FailComponentsOffline')
+    if ($taskCase -eq 'FailForceForeign') { $taskTestState.Core.Path = Join-Path $taskFixtures 'unrelated/CodexPool.Daemon.exe' }
     foreach ($taskId in @(201,202)) {
         $taskKind = if ($taskId -eq 201) {'Widget'} else {'Floating'}
         $null = New-TestProcess $taskId (Join-Path $taskTestState.Sandbox ".local/desktop/$taskKind/CodexPool.Floating.exe")
@@ -147,7 +150,11 @@ foreach ($taskCase in @('All','Core','Components','FailCore','FailAllCore','Fail
     New-TestFile (Join-Path $taskTestState.Sandbox '.local/desktop/Proxy/source-build.txt') (Join-Path $taskTestState.Sandbox '.local/base')
     $taskStatusStub = @'
 function Get-PoolStatus([string]$Path) {
-    [pscustomobject]@{boundaryProbe=$true;accounts=@();nativeLoginAttempts=@();inFlightRequests=@();settings=[pscustomobject]@{autoSwitch=$false;fiveHourThreshold=95;weeklyThreshold=95;windowThreshold=$null}}
+    if ($taskTestState.Core.Path -match '[\\/]base[\\/]') {
+        if ($taskTestState.Failure -eq 'StatusUnknown') { throw 'Synthetic status unavailable.' }
+        if ($taskTestState.Failure -eq 'Identity') { $taskTestState.Core.StartTime = $taskTestState.Core.StartTime.AddSeconds(1) }
+    }
+    [pscustomobject]@{boundaryProbe=$true;accounts=@();nativeLoginAttempts=@(if ($Force) {@{state='waiting_for_browser'}});inFlightRequests=@(if ($Force) {@{value=3}});settings=[pscustomobject]@{autoSwitch=$false;fiveHourThreshold=95;weeklyThreshold=95;windowThreshold=$null}}
 }
 '@
     $taskSourcePath = Join-Path $taskTestState.Sandbox 'scripts/deploy-local.ps1'
@@ -157,7 +164,7 @@ function Get-PoolStatus([string]$Path) {
     $taskSource = $taskSource.Remove($taskStatusFunction.Extent.StartOffset,$taskStatusFunction.Extent.EndOffset-$taskStatusFunction.Extent.StartOffset).Insert($taskStatusFunction.Extent.StartOffset,$taskStatusStub)
     $taskAst = [Management.Automation.Language.Parser]::ParseInput($taskSource,[ref]$null,[ref]$null)
     $taskStopFunction = $taskAst.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Stop-IdlePoolDaemon'},$true)
-    $taskStopStub = 'function Stop-IdlePoolDaemon($ProcessInfo, [string]$CommandPath) { Stop-OwnedProcess $ProcessInfo }'
+    $taskStopStub = 'function Stop-IdlePoolDaemon($ProcessInfo, [string]$CommandPath, [switch]$ForceStop) { Stop-OwnedProcess $ProcessInfo -Tree:$ForceStop }'
     $taskSource = $taskSource.Remove($taskStopFunction.Extent.StartOffset,$taskStopFunction.Extent.EndOffset-$taskStopFunction.Extent.StartOffset).Insert($taskStopFunction.Extent.StartOffset,$taskStopStub)
     [IO.File]::WriteAllText($taskSourcePath,$taskSource)
     New-TestFile (Join-Path $taskTestState.Sandbox 'scripts/desktop-client.ps1') @'
@@ -171,15 +178,20 @@ function Start-PoolDesktopClient {
 }
 '@
     $taskFailed = $false
-    try { & $taskSourcePath -Target $taskTarget }
+    try { & $taskSourcePath -Target $taskTarget -Force:$taskUseForce }
     catch { $taskFailed = $true; $taskFailureMessage = $_.Exception.Message }
     Assert-Test ($taskFailed -eq $taskCase.StartsWith('Fail')) "Unexpected result for ${taskCase}: $taskFailureMessage"
+    if ($taskCase -in @('FailForceForeign','FailForceIdentity')) {
+        Assert-Test (-not $taskTestState.Core.HasExited -and -not ($taskTestState.Trace | Where-Object { $_ -match 'kill-tree|stop:101|start:core' })) 'Force must not bypass path or process identity checks.'
+        Write-Output "PASS force preserves unrelated or replaced processes: $taskCase"
+        continue
+    }
     Assert-Test ($taskTestState.Processes[203].HasExited -eq ($taskTarget -ne 'Core')) 'Desktop deployment must update both tray clients; core-only deployment must preserve both.'
     $taskPointer = Get-Content -LiteralPath (Join-Path $taskTestState.Sandbox '.local/current-build.json') -Raw | ConvertFrom-Json
     if ($taskTarget -eq 'Core') {
         Assert-Test (-not ($taskTestState.Trace | Where-Object {$_ -match 'ui|proxy|stop:20'})) 'Core deployment touched UI.'
     } elseif ($taskTarget -eq 'Components') {
-        Assert-Test (-not ($taskTestState.Trace | Where-Object {$_ -match 'start:core|stop:101'})) 'Component deployment touched core.'
+        Assert-Test (-not ($taskTestState.Trace | Where-Object {$_ -match 'start:core|stop:101|kill-tree:101'})) 'Component deployment touched core.'
         Assert-Test (-not ($taskTestState.Trace | Where-Object {$_ -eq 'start:ui:False'})) 'Component UI may start the core.'
         Assert-Test (-not ($taskTestState.Trace | Where-Object {$_ -eq 'start:proxy:False'})) 'Proxy tray may start the core.'
     }
@@ -196,17 +208,30 @@ function Start-PoolDesktopClient {
         if ($taskTarget -ne 'Core') { Assert-Test (@($taskTestState.Trace | Where-Object { $_ -match '^start:ui:' }).Count -eq 1) 'Unified tray panel must start only one UI.' }
         if ($taskTarget -ne 'Core') { Assert-Test (@($taskTestState.Trace | Where-Object { $_ -eq 'start:proxy:True' }).Count -eq 1) 'Existing proxy tray must update from the same build without starting core.' }
     }
+    if ($taskUseForce -and $taskTarget -ne 'Components') { Assert-Test ($taskTestState.Trace -contains 'kill-tree:101:True') 'Force must stop the checked daemon and its helper tree.' }
     Write-Output "PASS deployment isolation and recovery: $taskCase"
 }
 $taskMenuRoot = New-TestRoot 'cmd-entry'
 Copy-Item -LiteralPath (Join-Path $taskRepository 'deploy.cmd') -Destination $taskMenuRoot
 Copy-Item -LiteralPath (Join-Path $taskRepository 'scripts/deploy-menu.ps1') -Destination (Join-Path $taskMenuRoot 'scripts')
-New-TestFile (Join-Path $taskMenuRoot 'scripts/deploy-local.ps1') 'param([string]$Target,[switch]$Dashboard); Write-Output ("ACTUAL_TARGET=" + $Target)'
+New-TestFile (Join-Path $taskMenuRoot 'scripts/deploy-local.ps1') 'param([string]$Target,[switch]$Dashboard,[switch]$Force); Write-Output ("ACTUAL_TARGET=" + $Target); Write-Output ("ACTUAL_FORCE=" + $Force)'
 foreach ($taskTarget in @('All','Core','Components')) {
     $taskCommand = 'call "{0}" {1} <nul' -f (Join-Path $taskMenuRoot 'deploy.cmd'),$taskTarget
     $taskOutput = & $env:ComSpec /d /c $taskCommand 2>&1
     Assert-Test ($LASTEXITCODE -eq 0 -and ($taskOutput -join "`n") -match ('ACTUAL_TARGET=' + $taskTarget)) "CMD forwarded the wrong scope: $taskTarget"
     Write-Output "PASS actual CMD entry: $taskTarget"
+}
+foreach ($taskTarget in @('All','Core','Components')) {
+    $taskCommand = 'call "{0}" {1} -Force <nul' -f (Join-Path $taskMenuRoot 'deploy.cmd'),$taskTarget
+    $taskOutput = & $env:ComSpec /d /c $taskCommand 2>&1
+    Assert-Test ($LASTEXITCODE -eq 0 -and ($taskOutput -join "`n") -match ('ACTUAL_TARGET=' + $taskTarget) -and ($taskOutput -join "`n") -match 'ACTUAL_FORCE=True') "CMD lost force mode: $taskTarget"
+    Write-Output "PASS actual CMD force entry: $taskTarget"
+}
+foreach ($taskChoice in @('4','5')) {
+    $taskOutput = $taskChoice | & pwsh -NoProfile -File (Join-Path $taskMenuRoot 'scripts/deploy-menu.ps1') 2>&1
+    $taskExpected = if ($taskChoice -eq '4') { 'All' } else { 'Core' }
+    Assert-Test ($LASTEXITCODE -eq 0 -and ($taskOutput -join "`n") -match ('ACTUAL_TARGET=' + $taskExpected) -and ($taskOutput -join "`n") -match 'ACTUAL_FORCE=True') "Interactive force choice lost its mode: $taskChoice"
+    Write-Output "PASS interactive force choice: $taskChoice"
 }
 $taskOutput = & $env:ComSpec /d /c ('call "{0}" InvalidTarget <nul' -f (Join-Path $taskMenuRoot 'deploy.cmd')) 2>&1
 Assert-Test ($LASTEXITCODE -ne 0 -and ($taskOutput -join "`n") -notmatch 'ACTUAL_TARGET=') 'Invalid CMD target fell back to All.'
@@ -214,7 +239,7 @@ Write-Output 'PASS invalid CMD target cannot deploy All'
 $taskBatchBytes = [IO.File]::ReadAllBytes((Join-Path $taskRepository 'deploy.cmd'))
 Assert-Test (@($taskBatchBytes | Where-Object { $_ -gt 127 }).Count -eq 0) 'Batch wrapper must remain ASCII.'
 Assert-Test ([IO.File]::ReadAllText((Join-Path $taskRepository 'deploy.cmd')) -notmatch '(?<!\r)\n') 'Batch wrapper must use CRLF.'
-Write-Output '21/21 deployment target checks passed; simulated publishing/processes only'
+Write-Output 'Deployment scope, force and rollback checks passed; simulated publishing/processes only'
 # The invalid-target CMD check deliberately leaves a nonzero native exit code.
 # Assertions above already checked that rejection; successful callers must receive success.
 $global:LASTEXITCODE = 0

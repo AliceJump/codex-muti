@@ -1,5 +1,5 @@
 #requires -Version 7.0
-param([switch]$SelfContained, [switch]$Dashboard,
+param([switch]$SelfContained, [switch]$Dashboard, [switch]$Force,
     [ValidateSet('All','Core','Components')][string]$Target = 'All')
 $ErrorActionPreference = 'Stop'
 $taskRoot = [IO.Path]::GetFullPath((Split-Path $PSScriptRoot -Parent))
@@ -24,11 +24,12 @@ function Test-PoolPath([string]$Path) {
     }
     return $false
 }
-function Stop-OwnedProcess($ProcessInfo) {
+function Stop-OwnedProcess($ProcessInfo, [switch]$Tree) {
     $taskProcess = Get-Process -Id $ProcessInfo.Id -ErrorAction SilentlyContinue
     if (-not $taskProcess) { return }
     if ($taskProcess.Path -ne $ProcessInfo.Path -or $taskProcess.StartTime.ToUniversalTime().Ticks -ne $ProcessInfo.StartTicks) { throw '进程身份已变化，拒绝停止。' }
-    Stop-Process -InputObject $taskProcess -Force
+    if ($Tree) { $taskProcess.Kill($true) }
+    else { Stop-Process -InputObject $taskProcess -Force }
     if (-not $taskProcess.WaitForExit(10000)) { throw '进程尚未退出，停止部署。' }
 }
 function Start-PoolDaemon([string]$Path, [bool]$BoundaryProbe) {
@@ -51,9 +52,15 @@ function Assert-PoolIdle($Status) {
         throw '授权操作仍在进行，保留现有代理；完成后再部署。'
     }
 }
-function Stop-IdlePoolDaemon($ProcessInfo, [string]$CommandPath) {
+function Stop-IdlePoolDaemon($ProcessInfo, [string]$CommandPath, [switch]$ForceStop) {
     $taskProcess = Get-Process -Id $ProcessInfo.Id -ErrorAction Stop
     if ($taskProcess.Path -ne $ProcessInfo.Path -or $taskProcess.StartTime.ToUniversalTime().Ticks -ne $ProcessInfo.StartTicks) { throw '进程身份已变化，拒绝停止。' }
+    if ($ForceStop) {
+        # A checked process object fixes identity before terminating its owned helper tree.
+        # Durable refresh_pending is preserved; an interrupted rotation requires login again.
+        Stop-OwnedProcess $ProcessInfo -Tree
+        return
+    }
     Assert-PoolIdle (Get-PoolStatus $CommandPath)
     & $CommandPath shutdown
     if ($LASTEXITCODE -ne 0) { throw '代理未接受安全停止，未强制结束进程。' }
@@ -106,6 +113,7 @@ function Start-PoolUi([string]$Path, [bool]$Tray, [bool]$Proxy = $false) {
 try {
     try { $taskOwned = $taskMutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $taskOwned = $true }
     if (-not $taskOwned) { throw '已有部署在运行。' }
+    if ($Force -and $taskDeployCore) { Write-Warning '强制部署会中断本仓库代理的当前请求和登录。若令牌正在刷新，相关账户可能需要重新登录。' }
     . (Join-Path $PSScriptRoot 'desktop-client.ps1')
     $taskWorktrees = & git -C $taskRoot worktree list --porcelain
     if ($LASTEXITCODE -ne 0) { throw '无法确认本仓库工作树，停止部署。' }
@@ -126,18 +134,22 @@ try {
         if ($taskProcess.ProcessName -ne 'CodexPool.Daemon' -or -not (Test-PoolPath $taskProcess.Path)) { throw '3210 不属于本仓库发布的 Codex Pool，未停止任何进程。' }
         $taskOld = [pscustomobject]@{Id=$taskProcess.Id;Path=$taskProcess.Path;StartTicks=$taskProcess.StartTime.ToUniversalTime().Ticks;Boundary=$false}
         # A successful signed control request also proves that the launch environment uses the same local vault.
-        $taskStatus = Get-PoolStatus $taskNewExe
-        if (@($taskStatus.nativeLoginAttempts | Where-Object state -EQ 'waiting_for_browser').Count) { throw '账户正在登录，请完成或取消登录后再部署。' }
-        $taskRefreshGuard = Get-PoolRefreshGuard $taskStatus
-        for ($taskAttempt=0; $taskRefreshGuard.Active.Count -gt 0 -and $taskAttempt -lt 20; $taskAttempt++) {
-            Start-Sleep -Milliseconds 500
-            $taskStatus = Get-PoolStatus $taskNewExe
+        $taskStatus = $null
+        try { $taskStatus = Get-PoolStatus $taskNewExe }
+        catch { if (-not $Force) { throw }; Write-Warning '旧代理状态不可用，按已核对的进程身份强制部署；账户存储保持原样。' }
+        if (-not $Force) {
+            if (@($taskStatus.nativeLoginAttempts | Where-Object state -EQ 'waiting_for_browser').Count) { throw '账户正在登录，请完成或取消登录后再部署。' }
             $taskRefreshGuard = Get-PoolRefreshGuard $taskStatus
+            for ($taskAttempt=0; $taskRefreshGuard.Active.Count -gt 0 -and $taskAttempt -lt 20; $taskAttempt++) {
+                Start-Sleep -Milliseconds 500
+                $taskStatus = Get-PoolStatus $taskNewExe
+                $taskRefreshGuard = Get-PoolRefreshGuard $taskStatus
+            }
+            if ($taskRefreshGuard.Active.Count) { throw 'Token 仍在主动刷新，未中止它；刷新完成后再部署。' }
+            if ($taskRefreshGuard.Unknown.Count) { throw '旧代理未提供可确认的刷新状态，无法安全停止；请先处理账户授权状态。' }
+            if ($taskRefreshGuard.Reauthorize.Count) { Write-Host '检测到持久 refresh_pending：这些账户需要重新授权；部署会保留其状态，不重用旧刷新令牌。' }
         }
-        if ($taskRefreshGuard.Active.Count) { throw 'Token 仍在主动刷新，未中止它；刷新完成后再部署。' }
-        if ($taskRefreshGuard.Unknown.Count) { throw '旧代理未提供可确认的刷新状态，无法安全停止；请先处理账户授权状态。' }
-        if ($taskRefreshGuard.Reauthorize.Count) { Write-Host '检测到持久 refresh_pending：这些账户需要重新授权；部署会保留其状态，不重用旧刷新令牌。' }
-        $taskBoundary = [bool]$taskStatus.boundaryProbe; $taskOld.Boundary = $taskBoundary
+        $taskBoundary = if ($taskStatus) { [bool]$taskStatus.boundaryProbe } else { $false }; $taskOld.Boundary = $taskBoundary
     }
     if ($taskDeployUi) { $taskOldUi = @(Get-CimInstance Win32_Process -Filter "Name='CodexPool.Floating.exe'" | Where-Object { Test-PoolPath $_.ExecutablePath } | ForEach-Object {
         $taskUiProcess = Get-Process -Id $_.ProcessId
@@ -149,15 +161,15 @@ try {
         [pscustomobject]@{Id=$_.ProcessId;Path=$_.ExecutablePath;StartTicks=$taskUiProcess.StartTime.ToUniversalTime().Ticks;Tray=($_.CommandLine -match '(?:^|\s)--(?:tray|widget)(?:\s|$)');Proxy=($_.CommandLine -match '(?:^|\s)--proxy-tray(?:\s|$)');Source=$taskOldSource}
     }) }
     Write-Host "2/4 仅停止所选范围：$Target。"
-    if ($taskOld) { Assert-PoolIdle (Get-PoolStatus $taskNewExe) }
+    if ($taskOld -and -not $Force) { Assert-PoolIdle (Get-PoolStatus $taskNewExe) }
     foreach ($taskUi in $taskOldUi) { Stop-OwnedProcess $taskUi; $taskUiStopped += $taskUi }
-    if ($taskOld) { Stop-IdlePoolDaemon $taskOld $taskNewExe; $taskStopped = $true }
+    if ($taskOld) { Stop-IdlePoolDaemon $taskOld $taskNewExe -ForceStop:$Force; $taskStopped = $true }
     Write-Host '3/4 启动所选版本并验证状态…'
     if ($taskDeployCore) {
         if (Get-NetTCPConnection -LocalPort 3210 -State Listen -ErrorAction SilentlyContinue) { throw '3210 仍被占用。' }
         $taskNew = Start-PoolDaemon $taskNewExe $taskBoundary
         $taskNewStatus = Wait-PoolDaemon $taskNew $taskNewExe $taskNewReadiness
-        if ($taskOld -and (Get-PoolSettingsSnapshot $taskNewStatus.settings) -ne (Get-PoolSettingsSnapshot $taskStatus.settings)) { throw '账户池设置校验失败。' }
+        if ($taskOld -and $taskStatus -and (Get-PoolSettingsSnapshot $taskNewStatus.settings) -ne (Get-PoolSettingsSnapshot $taskStatus.settings)) { throw '账户池设置校验失败。' }
     }
     if ($taskDeployUi) {
         $taskClient = Start-PoolDesktopClient -BuildDirectory $taskBuild -Tray -PassThru -NoDaemonStart:($Target -eq 'Components')
@@ -194,7 +206,7 @@ try {
                     $taskListenersNow = @(Get-NetTCPConnection -State Listen -ErrorAction Stop | Where-Object LocalPort -EQ 3210)
                     if ($taskListenersNow.Count) { throw '新代理可能已监听，保留进程。' }
                     Stop-OwnedProcess $taskNewIdentity
-                } else { Stop-IdlePoolDaemon $taskNewIdentity $taskNewExe }
+                } else { Stop-IdlePoolDaemon $taskNewIdentity $taskNewExe -ForceStop:$Force }
             }
             catch { $taskCanRestoreCore = $false; Write-Warning '新代理仍在工作或无法确认安全停止，保留进程；未强制回滚核心。' }
         }

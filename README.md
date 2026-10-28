@@ -122,6 +122,10 @@ pwsh -NoProfile -File .\scripts\deploy-local.ps1 -Target Components
 pwsh -NoProfile -File .\scripts\deploy-local.ps1 -Target Core -Dashboard
 # 命令行一键入口也可指定：
 .\deploy.cmd Components
+# 强制更新核心，立即中断本仓库代理的请求和登录：
+.\deploy.cmd Core -Force
+# 创建桌面的启动和部署快捷方式：
+pwsh -NoProfile -File .\scripts\install-pool-shortcuts.ps1
 ```
 
 只构建并启动、保留已有 Daemon：
@@ -137,6 +141,8 @@ pwsh -NoProfile -File .\scripts\deploy-local.ps1 -Target Core -Dashboard
 - 全部或核心部署会中断经过代理的当前请求；仅组件部署不停止、启动或替换核心。首次安装需选择全部。
 - 部分部署只发布所选项目，未选组件从现有完整版本保留；成功后记录完整组合版本。所选新进程启动失败时尝试恢复旧版，并保留原版本指针。
 - 本机运行版本以实际部署构建为准；更新源码不会自动替换已经运行的 Daemon。
+- `-Force` 先构建成功，再绕过空闲检查，结束已核对路径、PID 和启动时间的代理及其 helper 进程树；不会结束其他 Codex 进程。若中断 refresh，保留的 `refresh_pending` 会要求相关账户重新登录。强制模式仍保留进程归属检查、部署范围和启动失败回滚；仅组件部署始终保留核心。
+- `deploy.cmd` 菜单的 4/5 项分别是强制全部/核心部署；默认 1–3 项保持普通部署。`start-pool.cmd` 启动本机代理、托盘与网页控制台；桌面的“Codex Pool 控制台”和“Codex Pool 部署”分别指向启动与部署入口，自动使用当前构建。
 - #6 / #7 / #8 已分别合入 `master`，无需组合草稿分支。
 
 账户改名：`pool.ps1 rename <account-id> "新名称"` 或 Dashboard 卡片操作，见 [docs/account-rename.md](docs/account-rename.md)。
