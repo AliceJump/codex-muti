@@ -194,38 +194,43 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
             catch { foreach (var use in uses) use.Dispose(); throw; }
         }
     }
-    public async Task<ModelLease[]> PrepareAsync(ModelReservation reservation, CancellationToken token)
+    internal async Task<ModelLease[]> PrepareAsync(ModelReservation reservation, CancellationToken token)
     {
         var ready = new List<ModelLease>();
+        await foreach (var lease in PrepareCandidatesAsync(reservation, token)) ready.Add(lease);
+        return ready.ToArray();
+    }
+    // Prepare a standby only after transport explicitly rejects the preceding attempt.
+    public async IAsyncEnumerable<ModelLease> PrepareCandidatesAsync(ModelReservation reservation,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken token)
+    {
+        var yielded = false;
         foreach (var id in reservation.CandidateIds)
         {
             token.ThrowIfCancellationRequested();
             var version = vault.Find(id)?.AuthorizationVersion;
+            AccountCredential credential;
             try
             {
-                var credential = await auth.ReadyAsync(id, token);
-                ready.Add(new(id, new(credential.ProviderKind == "native" ? "https://chatgpt.com/backend-api/codex/responses" : "https://api.openai.com/v1/responses"), credential.AccessToken, credential.BackendAccountId, credential.AuthorizationVersion));
+                credential = await auth.ReadyAsync(id, token);
             }
             catch (AuthFailure ex)
             {
                 token.ThrowIfCancellationRequested();
                 // An uncertain refresh outcome must remain visible, not authorize a request replay.
-                if (ex.Code == "refresh_outcome_unknown")
-                {
-                    // A broken standby must not prevent an already-ready account from serving.
-                    // With no ready account, the ambiguous failure does not permit failover.
-                    if (ready.Count > 0) break;
-                    throw;
-                }
+                if (ex.Code == "refresh_outcome_unknown") throw;
                 if (ex.Code is "auth_temporarily_unavailable" or "refresh_not_yet_allowed")
                 { lock (gate) failures[id] = (PoolAvailability.Auth(ex.Code), DateTimeOffset.UtcNow.AddSeconds(30), DateTimeOffset.UtcNow, version ?? Guid.Empty); }
                 else if (vault.Find(id)?.AuthStatus == "reauth_required" || ex.Code is "reauth_required" or "account_identity_mismatch" or "rotated_token_persistence_failed")
                     RecordFailure(id, PoolAvailability.Auth("reauth_required") with { FailoverReason = "auth_rejected" }, version);
                 else throw;
+                continue;
             }
+            yielded = true;
+            yield return new(id, new(credential.ProviderKind == "native" ? "https://chatgpt.com/backend-api/codex/responses" : "https://api.openai.com/v1/responses"),
+                credential.AccessToken, credential.BackendAccountId, credential.AuthorizationVersion);
         }
-        if (ready.Count == 0) throw new NoEligibleAccountException();
-        return ready.ToArray();
+        if (!yielded) throw new NoEligibleAccountException();
     }
     public ModelReservation ReserveCatalog()
     {

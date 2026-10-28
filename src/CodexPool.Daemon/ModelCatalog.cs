@@ -19,10 +19,10 @@ public sealed class ModelCatalog(HttpClient http, PoolRuntime pool, TimeSpan? re
         try
         {
             using var reservation = pool.ReserveCatalog();
-            var candidates = await pool.PrepareAsync(reservation, token);
-            for (var index = 0; index < candidates.Length; index++)
+            ModelError? lastError = null;
+            await foreach (var account in pool.PrepareCandidatesAsync(reservation, token))
             {
-                var account = candidates[index]; var native = account.Endpoint.Host == "chatgpt.com";
+                var native = account.Endpoint.Host == "chatgpt.com";
                 using var request = new HttpRequestMessage(HttpMethod.Get, native
                     ? $"https://chatgpt.com/backend-api/codex/models?client_version={Uri.EscapeDataString(clientVersion)}" : "https://api.openai.com/v1/models");
                 request.Headers.Authorization = new("Bearer", account.AccessToken);
@@ -32,8 +32,7 @@ public sealed class ModelCatalog(HttpClient http, PoolRuntime pool, TimeSpan? re
                 {
                     var error = await ModelErrors.FromResponseAsync(response, token);
                     pool.RecordFailure(account.AccountId, error, account.AuthorizationVersion);
-                    if (error.FailoverReason is not null && index + 1 < candidates.Length) continue;
-                    if (error.FailoverReason is not null) error = pool.Unavailable(error, reservation.CandidateIds.ToArray(), reservation.AutoSwitch);
+                    if (error.FailoverReason is not null) { lastError = error; continue; }
                     throw new ModelCatalogFailure(error);
                 }
                 await using var stream = await response.Content.ReadAsStreamAsync(token);
@@ -49,6 +48,7 @@ public sealed class ModelCatalog(HttpClient http, PoolRuntime pool, TimeSpan? re
                     throw new AuthFailure("unrecognized_model_catalog");
                 return new(account.AccountId, json.RootElement.Clone());
             }
+            if (lastError is not null) throw new ModelCatalogFailure(pool.Unavailable(lastError, reservation.CandidateIds.ToArray(), reservation.AutoSwitch));
             throw new NoEligibleAccountException();
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && deadline.IsCancellationRequested)

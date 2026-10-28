@@ -20,6 +20,9 @@ if (args.FirstOrDefault() == "--native-login-helper") return await NativeLoginTe
 var root = Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, ".research", "security-" + Guid.NewGuid().ToString("N")));
 var tests = new (string Name, Func<Task> Run)[]
 {
+    ("Lazy preparation serves healthy model and catalog requests without touching expired standbys", () => LazyPreparationTests.Healthy(root)),
+    ("Lazy preparation refreshes the next account only after an explicit rejection", () => LazyPreparationTests.Failover(root)),
+    ("Lazy preparation stops on an uncertain standby refresh without trying another account", () => LazyPreparationTests.Unknown(root)),
     ("Upstream deadline bounds quota bodies, releases the account lock and continues the batch", () => UpstreamDeadlineTests.QuotaBody(root)),
     ("Upstream deadline bounds catalog bodies and preserves caller cancellation", () => UpstreamDeadlineTests.CatalogBody(root)),
     ("Native login host shutdown awaits helper cleanup and rejects new starts", () => NativeLoginTests.Shutdown(root)),
@@ -1318,8 +1321,11 @@ async Task PreparedPoolErrors()
     var standby = Store("unknown-standby-refresh"); var healthy = Account("A"); healthy.ExpiresAt = DateTimeOffset.UtcNow.AddHours(1); standby.Add(healthy); standby.Add(Account("B"));
     var standbyAuth = new OAuth(uncertainHttp, standby); var standbyPool = new PoolRuntime(standby, standbyAuth, new Quota(uncertainHttp, standbyAuth, standby), true); standbyPool.UpdateSettings(new(true));
     using var protectedReady = standbyPool.ReserveModelRequest();
-    var preserved = await standbyPool.PrepareAsync(protectedReady, default);
-    Check(preserved.Length == 1 && preserved[0].AccountId == "A" && standbyPool.Active == "A" && standby.Find("B")!.AuthStatus == "reauth_required");
+    await using (var preserved = standbyPool.PrepareCandidatesAsync(protectedReady, default).GetAsyncEnumerator())
+    {
+        Check(await preserved.MoveNextAsync() && preserved.Current.AccountId == "A" && standbyPool.Active == "A");
+        Check(standby.Find("B")!.AuthStatus == "ready"); // Serving A never starts the uncertain standby refresh.
+    }
     var excluded = Store("preexcluded-account-summary"); excluded.Add(Account("A")); excluded.Add(Account("B")); excluded.RequireReauthorization("A");
     var excludedAuth = new OAuth(authHttp, excluded); var excludedPool = new PoolRuntime(excluded, excludedAuth, new Quota(authHttp, excludedAuth, excluded), true); excludedPool.UpdateSettings(new(true));
     using var onlyB = excludedPool.ReserveModelRequest(); Check(onlyB.CandidateIds.SequenceEqual(new[]{"B"}));

@@ -262,23 +262,21 @@ try
             requestedModel = modelValue.GetString()!;
         }
         context.Items["quotaModel"] = requestedModel;
+        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted); lifetime.CancelAfter(TimeSpan.FromMinutes(10));
         using var reservation = pool.ReserveModelRequest(requestedModel);
         var selection = reservation.Selection;
-        var candidates = await pool.PrepareAsync(reservation, context.RequestAborted);
-        if (translation?.Kind == CompatibilityKind.Image && candidates.Any(x => x.Endpoint.Host != "chatgpt.com"))
+        var candidates = pool.PrepareCandidatesAsync(reservation, lifetime.Token);
+        if (translation?.Kind == CompatibilityKind.Image && vault.Find(selection.AccountId)?.ProviderKind != "native")
             throw new CompatibilityFailure("image_requires_native_account");
-        var account = candidates[0];
         var headers = context.Request.Headers.ToDictionary(x => x.Key, x => x.Value.ToString(), StringComparer.OrdinalIgnoreCase);
         headers.Remove("ChatGPT-Account-Id"); // Backend account routing is supplied only by validated credentials.
         // Global sticky selection is unchanged. This only decides whether account-bound turn state still belongs here.
-        ResponsesHeaders.BindTurnState(headers, sessionOwners, account.AccountId);
         var started = Stopwatch.GetTimestamp();
-        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted); lifetime.CancelAfter(TimeSpan.FromMinutes(10));
-        RelayResult result = new(account.AccountId, 500, 0, false, "transport_error");
+        RelayResult result = new(selection.AccountId, 500, 0, false, "transport_error");
         var sink = new WebSink(context);
         using var converter = translation is null ? null : new CompatibilitySink(sink, translation);
         IResponseSink responseSink = converter is null ? sink : converter;
-        var attemptedAccount = account.AccountId; var attemptCount = 0;
+        var attemptedAccount = selection.AccountId; var attemptCount = 0;
         var upstreamCompleted = false;
         ResponseTokenUsage? tokenUsage = null;
         string? failoverReason = null;
@@ -288,7 +286,11 @@ try
                 (_, reason) => failoverReason = reason,
                 (lease, entering) =>
                 {
-                    if (entering) { attemptedAccount = lease.AccountId; attemptCount++; }
+                    if (entering)
+                    {
+                        if (attemptCount == 0) ResponsesHeaders.BindTurnState(headers, sessionOwners, lease.AccountId);
+                        attemptedAccount = lease.AccountId; attemptCount++;
+                    }
                     inFlight.AddOrUpdate(lease.AccountId, entering ? 1 : 0, (_, count) => Math.Max(0, count + (entering ? 1 : -1)));
                 }, lease => { upstreamCompleted = true; pool.RecordSuccess(lease.AccountId); },
                 (lease, error) => pool.RecordFailure(lease.AccountId, error, lease.AuthorizationVersion), error => pool.Unavailable(error, reservation.CandidateIds.ToArray(), reservation.AutoSwitch, requestedModel),
