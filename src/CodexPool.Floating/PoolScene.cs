@@ -90,7 +90,7 @@ public sealed partial class PoolScene : Canvas
             ButtonBase b = action == "pin" ? new ToggleButton { FontFamily = new("Segoe Fluent Icons, Segoe MDL2 Assets") } : new Button();
             b.Content = label; b.Height = 24; b.Width = action is "mode" or "theme" or "pin" or "close" ? 26 : 84;
             b.Padding = new(2); b.FontSize = 10; b.BorderThickness = new(0); b.Background = Brushes.Transparent; b.Cursor = Cursors.Hand;
-            var help = action switch { "mode" => "完整 / 紧凑 / 胶囊（Ctrl+M）", "theme" => "自动 / 浅色 / 深色", "close" => "关闭或隐藏窗口", _ => label };
+            var help = action switch { "mode" => "完整 / 紧凑 / 胶囊（Ctrl+M）", "theme" => "切换浅色 / 深色", "close" => "关闭或隐藏窗口", _ => label };
             InfoTip.Set(b, help);
             AutomationProperties.SetName(b, help);
             if (b is ToggleButton pin)
@@ -120,6 +120,10 @@ public sealed partial class PoolScene : Canvas
     {
         light = useLight; highContrast = contrast; text.Clear();
         InfoTip.SetTheme(this, light, highContrast);
+        var themeButton = actions.First(a => a.Action == "theme").Button;
+        var themeHelp = light ? "切换到深色" : "切换到浅色";
+        InfoTip.Set(themeButton, themeHelp);
+        AutomationProperties.SetName(themeButton, themeHelp);
         if (highContrast || !SystemParameters.ClientAreaAnimation) { Stop(); SnapMotion(); }
         var fg = Foreground;
         foreach (var (b, _) in actions) b.Foreground = fg;

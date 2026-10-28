@@ -29,6 +29,7 @@ public partial class FloatingWindow : Window
     private WindowPreferences preferences = new();
     private JsonElement? snapshot;
     private bool exiting, busy, connected;
+    private bool lightTheme;
     private readonly bool startServices;
     private const string PreferencesFile = "widget.json";
     private Forms.Screen? flyoutScreen;
@@ -123,8 +124,8 @@ public partial class FloatingWindow : Window
     }
     private void ApplyTheme()
     {
-        var light = preferences.Theme == 1 || preferences.Theme == 0 && Registry.GetValue(@"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "AppsUseLightTheme", 0) is int value && value == 1;
-        Scene.SetTheme(light, SystemParameters.HighContrast);
+        lightTheme = preferences.Theme == 1 || preferences.Theme == 0 && Registry.GetValue(@"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "AppsUseLightTheme", 0) is int value && value == 1;
+        Scene.SetTheme(lightTheme, SystemParameters.HighContrast);
     }
     private async Task WatchAsync()
     {
@@ -345,7 +346,7 @@ public partial class FloatingWindow : Window
         if (snapshot is { } state) Render(state);
         SavePosition();
     }
-    private void CycleTheme(object sender, RoutedEventArgs e) { preferences = preferences with { Theme = (preferences.Theme + 1) % 3 }; ApplyTheme(); if (snapshot is { } state) Render(state); SavePosition(); }
+    private void CycleTheme(object sender, RoutedEventArgs e) { preferences = preferences with { Theme = lightTheme ? 2 : 1 }; ApplyTheme(); if (snapshot is { } state) Render(state); SavePosition(); }
     private void DismissWindow(object sender, RoutedEventArgs e) { SavePosition(); Hide(); }
     private async void OpenDashboard(object sender, RoutedEventArgs e) => await DashboardAsync();
     private async void RefreshQuota(object sender, RoutedEventArgs e) => await RefreshQuotaAsync(notify: true);
