@@ -6,7 +6,7 @@ let historyItems = [], historyStats = null, historyPage = null;
 let historyRange = null;
 let filterFrom = '', filterTo = '', presetDay = '';
 let settingsEditVersion = 0, settingsSavedVersion = 0;
-let switchPage = 0, switchSnapshot = null, eventStream = null, starting = false;
+let switchPage = 0, switchSnapshot = null, eventStream = null, starting = false, loginSubmitting = false;
 const switchPageSize = 8;
 const views = {
   accounts: ['账户与额度','查看可用额度，选择接下来使用的账户。'],
@@ -75,8 +75,9 @@ function subscriptionDeadline(value, status, reason) {
 }
 const quotaFailureLabel=code=>({quota_unauthorized:'额度接口认证失败（401）',quota_forbidden:'额度接口拒绝访问（403）',quota_rate_limited:'额度接口限流（429）',quota_upstream_unavailable:'额度上游服务异常',quota_network_unavailable:'额度网络连接失败',quota_refresh_timeout:'额度查询超时',invalid_quota_response:'额度响应格式异常',quota_auth_unavailable:'额度凭据恢复失败',quota_refresh_required:'授权已更新，等待重新查询额度',quota_storage_or_io_failed:'额度保存或读取失败'}[code]||'额度查询失败');
 function remainingTone(remaining){ if(remaining==null||!Number.isFinite(remaining)) return ''; if(remaining<15) return 'danger'; if(remaining<30) return 'warn'; return 'ok'; }
-async function api(path, data) { const response=await fetch(path,{method:data===undefined?'GET':'POST',headers:{'X-Codex-Pool-Local':'1',...(data===undefined?{}:{'Content-Type':'application/json'})},body:data===undefined?undefined:JSON.stringify(data)}); if(!response.ok){let code='操作未完成';try{code=(await response.json()).error?.code||code;}catch{}throw new Error(code);} return response.json(); }
-async function action(path, data={}, success='已应用，下一个模型请求使用更新后的账户设置。') { if(busy)return false; busy=true; try{await api(path,data);notice(success);render(await api('/status'));return true;}catch(e){notice(e.message); if(state)render(state);return false;}finally{busy=false;} }
+const loginMessages={native_login_already_running:'已有登录正在等待浏览器授权，请完成授权或取消后重试。',native_login_cancelled:'登录已取消，可重新发起。',native_login_timed_out:'登录已超时，请重新发起。',native_login_failed:'登录未完成，请重试。',native_login_not_completed:'浏览器授权未完成，请重试。',native_login_helper_unavailable:'无法启动官方 Codex，请确认已安装 Codex CLI。',credential_cleanup_required:'登录临时文件未能清理，请检查本机文件访问权限。'};
+async function api(path, data) { const response=await fetch(path,{method:data===undefined?'GET':'POST',headers:{'X-Codex-Pool-Local':'1',...(data===undefined?{}:{'Content-Type':'application/json'})},body:data===undefined?undefined:JSON.stringify(data)}); if(!response.ok){let code='操作未完成';try{code=(await response.json()).error?.code||code;}catch{}throw new Error(loginMessages[code]||code);} return response.json(); }
+async function action(path, data={}, success='已应用，下一个模型请求使用更新后的账户设置。') { if(busy)return false; busy=true; try{await api(path,data);notice(success);render(await api('/status'));return true;}catch(e){notice(e.message);if(path==='/accounts/native-login'){try{render(await api('/status'));}catch{if(state)render(state);}}else if(state)render(state);return false;}finally{busy=false;} }
 function notifySwitch(s){
   const id=s.activeAccountId||null;
   const name=(s.accounts.find(a=>a.id===id)||{}).name;
@@ -149,7 +150,17 @@ function render(s) {
     else {const choose=text('button',a.auth==='reauth_required'?'重新登录':'使用此账户',canActivate?'primary':'');choose.disabled=!canActivate&&a.auth!=='reauth_required';choose.onclick=()=>a.auth==='reauth_required'?openLogin(a.name):action(`/accounts/${a.id}/activate`);actions.append(choose);}
     card.append(actions);return card;}));
   renderSwitches();
-  patchChildren($('logins'),s.nativeLoginAttempts.map(x=>keyed(text('p',x.state==='completed'?'账户已添加':x.state==='waiting_for_browser'?'等待浏览器授权…':x.state),x.attemptId??x.id)));
+  renderLogins(s.nativeLoginAttempts);
+}
+function renderLogins(attempts=[]){
+  const waiting=attempts.some(x=>x.state==='waiting_for_browser'),submit=$('login').querySelector('button[type="submit"]');
+  submit.disabled=waiting||loginSubmitting;submit.textContent=waiting?'等待浏览器授权…':'使用官方 Codex 登录 ↗';
+  patchChildren($('logins'),attempts.map(x=>{
+    const id=x.attemptId??x.id,row=keyed(text('div','','login-attempt'),id);
+    row.append(keyed(text('p',x.state==='completed'?'账户已添加':x.state==='waiting_for_browser'?'等待浏览器授权…':loginMessages[x.state]||x.state),'state'));
+    if(x.state==='waiting_for_browser'){const cancel=keyed(text('button','取消登录'),'cancel');cancel.type='button';cancel.onclick=()=>action(`/accounts/native-login/${encodeURIComponent(id)}/cancel`,{},'登录已结束，可重新发起。');row.append(cancel);}
+    return row;
+  }));
 }
 const switchKey=x=>JSON.stringify([x.at,x.from,x.to,x.reason,x.epoch]);
 function switchRow(x,names){
@@ -187,7 +198,7 @@ $('login-close').onclick=()=>$('login-dialog').close();
 $('notice-close').onclick=()=>notice('');
 $('settings').oninput=()=>settingsEditVersion++;
 $('settings').onsubmit=async e=>{e.preventDefault();const f=e.target,version=settingsEditVersion;if(await action('/settings',{autoSwitch:f.elements.autoSwitch.checked,windowThreshold:Number(f.elements.windowThreshold.value)}))settingsSavedVersion=version;};
-$('login').onsubmit=e=>{e.preventDefault();action('/accounts/native-login',{name:e.target.elements.name.value});};
+$('login').onsubmit=async e=>{e.preventDefault();if(loginSubmitting||state?.nativeLoginAttempts.some(x=>x.state==='waiting_for_browser'))return;loginSubmitting=true;renderLogins(state?.nativeLoginAttempts);try{await action('/accounts/native-login',{name:e.target.elements.name.value},'已启动官方 Codex 登录，请在浏览器中完成授权。');}finally{loginSubmitting=false;renderLogins(state?.nativeLoginAttempts);}};
 $('refresh').onclick=async()=>{try{await api('/usage');const s=await api('/status');render(s);const failed=s.quotaRefreshErrors?.length||0;notice(failed?`${failed} 个账户额度更新失败，保留上次数据`:'额度已更新');}catch(e){notice(e.message);}};
 const dateText = date => [date.getUTCFullYear(),String(date.getUTCMonth()+1).padStart(2,'0'),String(date.getUTCDate()).padStart(2,'0')].join('-');
 function historyQuery() {

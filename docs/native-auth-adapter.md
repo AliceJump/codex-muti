@@ -15,6 +15,10 @@ SIWC token **不会**发往私有 Codex 端点。
 
 这是**授权适配**，不是 session / agent 适配。
 
+同一名称的重复登录请求会复用当前授权流程，避免重复点击时报 `native_login_already_running`。官方登录一次只运行一个；等待期间 Dashboard 禁用提交按钮，并提供“取消登录”。关闭对话框仅隐藏界面，不会取消授权。
+
+若浏览器已关闭或需要换账户，可在 Dashboard 取消，或执行 `native-login-cancel <attempt-id>`（ID 来自 `status`）。取消接口为 `POST /accounts/native-login/{attempt-id}/cancel`，完成 helper 与临时目录清理后才返回。登录和输出排空统一受 5 分钟超时约束，超时后可重新登录；清理异常也不会遗留登录锁。
+
 ## 额度
 
 原生用量读取固定官方源码中的 endpoint 与字段（`chatgpt.com/backend-api/wham/usage`）。窗口时长区分 5h、weekly 等；缺失保持未知。每账户快照独立缓存，过期后界面可见陈旧，不伪装成 0%。该私有接口版本敏感，不是公开 API 承诺。

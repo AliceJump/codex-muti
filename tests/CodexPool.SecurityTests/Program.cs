@@ -16,9 +16,14 @@ using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
+if (args.FirstOrDefault() == "--native-login-helper") return await NativeLoginTests.RunHelperAsync(args.Skip(1).ToArray());
 var root = Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, ".research", "security-" + Guid.NewGuid().ToString("N")));
 var tests = new (string Name, Func<Task> Run)[]
 {
+    ("Native login coalesces duplicate starts and cancels only the requested helper before retry", () => NativeLoginTests.Lifecycle(root)),
+    ("Native login releases its slot after timeout, failed launch, invalid path or missing credentials", () => NativeLoginTests.Failures(root)),
+    ("Native login bounds inherited output pipes by the same deadline", () => NativeLoginTests.InheritedPipe(root)),
+    ("Native login cleanup failure remains visible and cannot strand the login slot", () => NativeLoginTests.CleanupFailure(root)),
     ("Model-only keys survive storage, revoke immediately, redact and exclude management routes", ModelKeys),
     ("Daemon shutdown accepts only local bearer and acknowledges before requesting host shutdown", DaemonShutdown),
     ("Local console opens without session and rejects simple cross-site control requests", LocalConsoleAccess),

@@ -40,6 +40,56 @@ async function setup() {
     return { dom, w, calls, api: w.testApi, setState(value) { current = value; }, setPage(value) { history = value; },
         intercept(value) { intercept = value; }, setStats(value) { statistics = value; } };
 }
+test('pending native login disables duplicate submissions and offers cancellation across live updates', async () => {
+    const h = await setup(), { w, api } = h;
+    try {
+        const s = state(), form = w.document.getElementById('login'), submit = form.querySelector('button[type="submit"]');
+        s.nativeLoginAttempts = [{ id: 'pending-login', state: 'waiting_for_browser' }];
+        h.setState(s); api.render(s);
+        assert.equal(submit.disabled, true);
+        form.elements.name.value = 'Another account';
+        form.dispatchEvent(new w.SubmitEvent('submit', { cancelable: true })); await tick();
+        assert.ok(!h.calls.some(x => x.url === '/accounts/native-login'));
+        const cancel = w.document.querySelector('#logins button'); cancel.focus();
+        api.render(s); assert.equal(w.document.activeElement, cancel);
+        h.intercept(url => {
+            if (url !== '/accounts/native-login/pending-login/cancel') return null;
+            s.nativeLoginAttempts[0].state = 'native_login_cancelled';
+            return { ok: true, json: async () => ({ cancelled: true }) };
+        });
+        cancel.click(); await tick();
+        const request = h.calls.find(x => x.url === '/accounts/native-login/pending-login/cancel');
+        assert.equal(request.options.method, 'POST');
+        assert.equal(request.options.headers['X-Codex-Pool-Local'], '1');
+        assert.equal(submit.disabled, false);
+        assert.equal(w.document.querySelector('#logins button'), null);
+        assert.match(w.document.getElementById('logins').textContent, /登录已取消/);
+        s.nativeLoginAttempts[0].state = 'native_login_timed_out'; api.render(s);
+        assert.match(w.document.getElementById('logins').textContent, /登录已超时/);
+        assert.equal(submit.disabled, false);
+    } finally { h.dom.window.close(); }
+});
+
+test('native login prevents double submission before status arrives and translates concurrent-login errors', async () => {
+    const h = await setup(), { w } = h;
+    try {
+        let release;
+        h.intercept(url => url === '/accounts/native-login' ? new Promise(resolve => { release = resolve; }) : null);
+        const form = w.document.getElementById('login'), submit = form.querySelector('button[type="submit"]');
+        form.elements.name.value = 'A';
+        form.dispatchEvent(new w.SubmitEvent('submit', { cancelable: true }));
+        assert.equal(submit.disabled, true);
+        form.dispatchEvent(new w.SubmitEvent('submit', { cancelable: true }));
+        assert.equal(h.calls.filter(x => x.url === '/accounts/native-login').length, 1);
+        const concurrent = state(); concurrent.nativeLoginAttempts = [{ id: 'other-client', state: 'waiting_for_browser' }]; h.setState(concurrent);
+        release({ ok: false, json: async () => ({ error: { code: 'native_login_already_running' } }) }); await tick();
+        assert.equal(submit.disabled, true);
+        assert.match(w.document.getElementById('logins').textContent, /取消登录/);
+        assert.match(w.document.getElementById('notice-message').textContent, /已有登录正在等待浏览器授权/);
+        assert.doesNotMatch(w.document.getElementById('notice-message').textContent, /native_login_already_running/);
+    } finally { h.dom.window.close(); }
+});
+
 test('renewal separates fresh plan from unavailable subscription dates and failed quota history', async () => {
     const h = await setup(), { w, api } = h;
     try {

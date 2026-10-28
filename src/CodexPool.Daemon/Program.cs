@@ -132,6 +132,8 @@ try
         var input = await context.Request.ReadFromJsonAsync<LoginInput>(context.RequestAborted) ?? throw new AuthFailure("invalid_login_request");
         return Results.Json(new { attemptId = await nativeLogin.StartAsync(input.Name), state = "waiting_for_browser" });
     });
+    app.MapPost("/accounts/native-login/{attemptId}/cancel", async (string attemptId) =>
+        Results.Ok(new { cancelled = await nativeLogin.CancelAsync(attemptId) }));
     app.MapPost("/accounts/{id}/refresh", async (string id, HttpContext context) =>
     {
         var before = vault.Accounts; var original = before.FirstOrDefault(x => x.Id == id) ?? throw new AuthFailure("account_not_found");
