@@ -332,7 +332,7 @@ internal static class Program
                 new("当前账户：主账户", Children: new GlassMenuItem[] {
                     new("主账户", Enabled:false, IsChecked:true),
                     new("备用账户", () => { Check(closed && child is not null && !child.IsVisible); invoked=true; }) }),
-                new("打开账户管理与用量", () => { }), new("关闭自动切换", () => { }), new("刷新额度", () => { }), new("显示账户面板", () => { }), new("退出账户面板", () => { }) }, () => closed=true);
+                new("打开账户管理与用量", () => { }), new("关闭自动切换", () => { }), new("刷新额度", () => { }), new("显示账户面板", () => { }), new("退出账户面板", () => { }) }, () => closed=true, touchMode: false);
             try
             {
                 var work = System.Windows.Forms.Screen.PrimaryScreen!.WorkingArea;
@@ -417,6 +417,7 @@ internal static class Program
         });
         DesktopStartupTests.Run(Run);
         SceneTests.Run(Run);
+        TouchTests.Run(Run);
         Console.WriteLine($"{total - failed}/{total} UI tests passed; isolated native windows, no credentials or proxy processes");
         application.Shutdown();
         return failed == 0 && total > 0 ? 0 : 1;

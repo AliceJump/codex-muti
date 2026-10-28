@@ -29,6 +29,8 @@ internal sealed class GlassTrayMenu : Window
     private bool closing;
     private readonly Action? onClosed;
     private readonly int theme;
+    private readonly bool touchLayout;
+    private bool touchNavigation;
     private System.Drawing.Point placementCursor;
     private System.Drawing.Rectangle? placementAnchor;
     private bool positioning;
@@ -42,10 +44,12 @@ internal sealed class GlassTrayMenu : Window
     public GlassTrayMenu(IReadOnlyList<(string Label, Action Invoke)> items, Action? onClosed = null, int theme = 0)
         : this(items.Select(x => new GlassMenuItem(x.Label, x.Invoke)).ToArray(), onClosed, theme) { }
 
-    internal GlassTrayMenu(IReadOnlyList<GlassMenuItem> items, Action? onClosed = null, int theme = 0)
+    internal GlassTrayMenu(IReadOnlyList<GlassMenuItem> items, Action? onClosed = null, int theme = 0, bool? touchMode = null)
     {
         this.onClosed = onClosed;
         this.theme = theme;
+        touchLayout = touchMode ?? GetSystemMetrics(95) > 0; // SM_MAXIMUMTOUCHES
+        Stylus.SetIsPressAndHoldEnabled(this, false);
         Title = "Codex Pool · 托盘菜单";
         WindowStyle = WindowStyle.None;
         ResizeMode = ResizeMode.NoResize;
@@ -84,15 +88,15 @@ internal sealed class GlassTrayMenu : Window
                 HorizontalContentAlignment = System.Windows.HorizontalAlignment.Stretch,
                 Padding = new Thickness(7, 3, 7, 3),
                 Margin = new Thickness(0),
-                MinHeight = 26,
+                MinHeight = touchLayout ? 40 : 26,
                 MinWidth = 172,
                 MaxWidth = 244,
                 IsEnabled = capture.Enabled,
-                ToolTip = capture.Children?.Count > 0 ? null : capture.Label,
                 BorderThickness = new Thickness(0),
                 Background = MediaBrushes.Transparent,
                 Cursor = MediaCursors.Hand
             };
+            if (capture.Children?.Count is not > 0) InfoTip.Set(button, capture.Label);
             // Actions may activate another window or shut down the application.
             // Release this popup before handing control to them.
             System.Windows.Automation.AutomationProperties.SetName(button, capture.Label);
@@ -102,8 +106,9 @@ internal sealed class GlassTrayMenu : Window
                 if (capture.Children?.Count > 0) { OpenSubmenu(button, capture.Children); return; }
                 CloseGroup(); capture.Invoke?.Invoke();
             };
-            button.MouseEnter += (_, _) =>
+            button.MouseEnter += (_, e) =>
             {
+                if (!capture.Enabled || e.StylusDevice is not null || RootMenu().touchNavigation) return;
                 if (capture.Children?.Count > 0) OpenSubmenu(button, capture.Children);
                 else ScheduleSubmenuClose();
             };
@@ -113,7 +118,7 @@ internal sealed class GlassTrayMenu : Window
 
         var surface = new Border
         {
-            Child = items.Count > 8 ? new ScrollViewer { Content = list, MaxHeight = 260, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled } : list,
+            Child = items.Count > 8 ? new ScrollViewer { Content = list, MaxHeight = touchLayout ? 400 : 260, PanningMode = PanningMode.VerticalOnly, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled } : list,
             CornerRadius = new CornerRadius(8),
             BorderThickness = new Thickness(1),
             Padding = new Thickness(1)
@@ -121,6 +126,12 @@ internal sealed class GlassTrayMenu : Window
         surface.SetResourceReference(Border.BackgroundProperty, "SurfaceBrush");
         surface.SetResourceReference(Border.BorderBrushProperty, "EdgeBrush");
         Content = surface;
+        PreviewTouchDown += (_, _) =>
+        {
+            RootMenu().touchNavigation = true;
+            for (var menu = RootMenu(); menu is not null; menu = menu.submenu) menu.hoverTimer.Stop();
+        };
+        PreviewMouseMove += (_, e) => { if (e.StylusDevice is null) RootMenu().touchNavigation = false; };
         Resources["ForegroundBrush"] = new Brush(MediaColor.FromRgb(237, 242, 249));
         Resources["SurfaceBrush"] = new Brush(MediaColor.FromArgb(200, 24, 30, 39));
         Resources["EdgeBrush"] = new Brush(MediaColor.FromArgb(70, 170, 187, 210));
@@ -142,7 +153,7 @@ internal sealed class GlassTrayMenu : Window
         hoverTimer.Tick += (_, _) =>
         {
             hoverTimer.Stop();
-            if (submenuOwner?.IsMouseOver != true && submenu?.IsMouseOver != true) CloseSubmenu();
+            if (!RootMenu().touchNavigation && submenuOwner?.IsMouseOver != true && submenu?.IsMouseOver != true) CloseSubmenu();
         };
         MouseEnter += (_, _) => parentMenu?.hoverTimer.Stop();
         MouseLeave += (_, _) => parentMenu?.ScheduleSubmenuClose();
@@ -197,7 +208,7 @@ internal sealed class GlassTrayMenu : Window
     private GlassTrayMenu RootMenu() => parentMenu?.RootMenu() ?? this;
     private bool GroupActive() => IsActive || handle != 0 && GetForegroundWindow() == handle || submenu?.GroupActive() == true;
     private void CloseGroup() => RootMenu().Close();
-    private void ScheduleSubmenuClose() { hoverTimer.Stop(); if (submenu is not null) hoverTimer.Start(); }
+    private void ScheduleSubmenuClose() { hoverTimer.Stop(); if (submenu is not null && !RootMenu().touchNavigation) hoverTimer.Start(); }
     private void CloseSubmenu() { hoverTimer.Stop(); submenu?.Close(); submenu = null; submenuOwner = null; }
     private void OpenSubmenu(Button owner, IReadOnlyList<GlassMenuItem> children)
     {
@@ -210,7 +221,7 @@ internal sealed class GlassTrayMenu : Window
         var dpi = VisualTreeHelper.GetDpi(owner);
         var anchor = new System.Drawing.Rectangle(parentRect.Left, (int)Math.Round(top.Y), parentRect.Right - parentRect.Left, (int)Math.Ceiling(owner.ActualHeight * dpi.DpiScaleY));
         GlassTrayMenu? child = null;
-        child = new GlassTrayMenu(children, () => { if (ReferenceEquals(submenu, child)) { submenu = null; submenuOwner = null; } }, theme)
+        child = new GlassTrayMenu(children, () => { if (ReferenceEquals(submenu, child)) { submenu = null; submenuOwner = null; } }, theme, touchLayout || RootMenu().touchNavigation)
             { Owner = this, parentMenu = this, beside = true };
         submenu = child; submenuOwner = owner;
         child.ShowNear(new System.Drawing.Point(anchor.Left + anchor.Width / 2, anchor.Top), anchor, activate: false);
@@ -238,6 +249,7 @@ internal sealed class GlassTrayMenu : Window
     {
         var light = theme == 1 || theme == 0 && Registry.GetValue(@"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "AppsUseLightTheme", 0) is int value && value == 1;
         var highContrast = SystemParameters.HighContrast;
+        InfoTip.SetTheme(this, light, highContrast);
         Resources["ForegroundBrush"] = highContrast ? SystemColors.WindowTextBrush : new Brush(light ? MediaColor.FromRgb(26, 38, 53) : MediaColor.FromRgb(237, 242, 249));
         Resources["SurfaceBrush"] = highContrast ? SystemColors.WindowBrush : new Brush(light ? MediaColor.FromArgb(backdrop ? (byte)190 : (byte)255, 245, 248, 253) : MediaColor.FromArgb(backdrop ? (byte)185 : (byte)255, 24, 30, 39));
         Resources["EdgeBrush"] = new Brush(light ? MediaColor.FromArgb(70, 130, 145, 165) : MediaColor.FromArgb(70, 170, 187, 210));
@@ -251,5 +263,6 @@ internal sealed class GlassTrayMenu : Window
     [StructLayout(LayoutKind.Sequential)] private struct WindowPosition { public nint Window, After; public int X, Y, Width, Height; public uint Flags; }
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetWindowRect(nint hwnd, out WindowRect rect);
     [DllImport("user32.dll")] private static extern nint GetForegroundWindow();
+    [DllImport("user32.dll")] private static extern int GetSystemMetrics(int index);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool SetWindowPos(nint hwnd, nint after, int x, int y, int cx, int cy, uint flags);
 }

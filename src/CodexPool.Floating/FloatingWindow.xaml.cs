@@ -71,6 +71,13 @@ public partial class FloatingWindow : Window
             }
         };
         Scene.DragRequested = () => { if (Pinned) { DragMove(); ConstrainPinnedScene(IsVisible); SavePosition(); } };
+        Scene.TouchDragRequested = delta => { if (Pinned) { Left += delta.X; Top += delta.Y; } };
+        Scene.TouchDragCompleted = () => { if (Pinned) { ConstrainPinnedScene(IsVisible); SavePosition(); } };
+        Scene.ContextRequested = point =>
+        {
+            var screen = Scene.PointToScreen(point);
+            ShowSceneMenu(new System.Drawing.Point((int)Math.Round(screen.X), (int)Math.Round(screen.Y)));
+        };
         if (startServices)
         {
             tray = new StableTrayIcon(CreateIcon(), "Codex Pool · 账户状态 · Ctrl+Alt+W");
@@ -351,6 +358,13 @@ public partial class FloatingWindow : Window
         var cursor = Forms.Cursor.Position;
         glassMenu = new GlassTrayMenu(BuildTrayMenu(), () => glassMenu = null, preferences.Theme) { Title = "Codex Pool · 账户与浮窗" };
         glassMenu.ShowNear(cursor, bounds);
+    }
+
+    private void ShowSceneMenu(System.Drawing.Point point)
+    {
+        glassMenu?.Close();
+        glassMenu = new GlassTrayMenu(BuildTrayMenu(), () => glassMenu = null, preferences.Theme);
+        glassMenu.ShowNear(point, null);
     }
 
     internal IReadOnlyList<GlassMenuItem> BuildTrayMenu()

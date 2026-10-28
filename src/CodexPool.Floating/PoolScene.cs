@@ -25,7 +25,7 @@ namespace CodexPool.Floating;
 
 // One scene owns all pixels. Native controls above it supply keyboard, focus,
 // tooltips and automation, but never lay out the text or scale the native HWND.
-public sealed class PoolScene : Canvas
+public sealed partial class PoolScene : Canvas
 {
     private const double TokenSectionHeight = 52;
     private static readonly ConcurrentDictionary<string, SolidColorBrush> brushes = new();
@@ -90,8 +90,9 @@ public sealed class PoolScene : Canvas
             ButtonBase b = action == "pin" ? new ToggleButton { FontFamily = new("Segoe Fluent Icons, Segoe MDL2 Assets") } : new Button();
             b.Content = label; b.Height = 24; b.Width = action is "mode" or "theme" or "pin" or "close" ? 26 : 84;
             b.Padding = new(2); b.FontSize = 10; b.BorderThickness = new(0); b.Background = Brushes.Transparent; b.Cursor = Cursors.Hand;
-            b.ToolTip = action switch { "mode" => "完整 / 紧凑 / 胶囊（Ctrl+M）", "theme" => "自动 / 浅色 / 深色", "close" => "关闭或隐藏窗口", _ => label };
-            AutomationProperties.SetName(b, b.ToolTip.ToString());
+            var help = action switch { "mode" => "完整 / 紧凑 / 胶囊（Ctrl+M）", "theme" => "自动 / 浅色 / 深色", "close" => "关闭或隐藏窗口", _ => label };
+            InfoTip.Set(b, help);
+            AutomationProperties.SetName(b, help);
             if (b is ToggleButton pin)
             {
                 pin.Checked += (_, _) => { if (!settingPin) InvokeAction?.Invoke("pin"); };
@@ -110,6 +111,7 @@ public sealed class PoolScene : Canvas
             SetScroll(next); Present(); e.Handled = true;
         };
         MouseLeftButtonDown += (_, e) => { if (SurfaceBounds.Contains(e.GetPosition(this)) && e.OriginalSource == this) DragRequested?.Invoke(); };
+        InitializeTouch();
         Unloaded += (_, _) => Stop();
         IsVisibleChanged += (_, _) => { if (!IsVisible) { Stop(); SnapMotion(); Present(); } };
     }
@@ -117,6 +119,7 @@ public sealed class PoolScene : Canvas
     internal void SetTheme(bool useLight, bool contrast)
     {
         light = useLight; highContrast = contrast; text.Clear();
+        InfoTip.SetTheme(this, light, highContrast);
         if (highContrast || !SystemParameters.ClientAreaAnimation) { Stop(); SnapMotion(); }
         var fg = Foreground;
         foreach (var (b, _) in actions) b.Foreground = fg;
@@ -127,8 +130,9 @@ public sealed class PoolScene : Canvas
         var pin = PinTarget;
         settingPin = true;
         try { pin.IsChecked = value; } finally { settingPin = false; }
-        pin.ToolTip = value ? "取消固定，恢复托盘弹窗" : "固定面板，保持显示并允许拖动";
-        AutomationProperties.SetName(pin, pin.ToolTip.ToString());
+        var help = value ? "取消固定，恢复托盘弹窗" : "固定面板，保持显示并允许拖动";
+        InfoTip.Set(pin, help);
+        AutomationProperties.SetName(pin, help);
         Present();
     }
     internal void SetNotice(string value) { notice = value; UpdateTip(); Present(); }
@@ -179,7 +183,7 @@ public sealed class PoolScene : Canvas
             card.Model = model; card.Pose.Aim(x, cardY, w, h);
             card.Hit.IsEnabled = model.Selectable && !busy;
             AutomationProperties.SetName(card.Hit, model.Name + (model.Active ? "，当前账户" : "，选择账户"));
-            AutomationProperties.SetHelpText(card.Hit, model.Description); card.Hit.ToolTip = model.Description;
+            AutomationProperties.SetHelpText(card.Hit, model.Description); InfoTip.Set(card.Hit, model.Description);
         }
         if (visible.Length == 0) y = header + 64;
         contentHeight = y - header;
@@ -201,7 +205,7 @@ public sealed class PoolScene : Canvas
         // 12px padding on either side, a 25px bar and an 8px name/bar gap.
         return Math.Clamp(Math.Ceiling(name.WidthIncludingTrailingWhitespace) + 57, 64, 135);
     }
-    private void UpdateTip() => ToolTip = notice.Length > 0 ? notice : automatic ? "自动切换已开启 · Ctrl+M 切换布局" : "自动切换已关闭 · Ctrl+M 切换布局";
+    private void UpdateTip() => InfoTip.Set(this, notice.Length > 0 ? notice : automatic ? "自动切换已开启 · Ctrl+M 切换布局" : "自动切换已关闭 · Ctrl+M 切换布局");
     private static bool ShowQuotaState(PoolAccountView a) => a.Windows.Length == 0 || a.QuotaState.StartsWith("Credits", StringComparison.Ordinal);
     private void EnsureVisible(string id)
     {
