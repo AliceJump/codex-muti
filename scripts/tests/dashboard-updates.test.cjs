@@ -90,6 +90,27 @@ test('native login prevents double submission before status arrives and translat
     } finally { h.dom.window.close(); }
 });
 
+test('native credential failures have Chinese messages in submissions and live attempts', async () => {
+    const h = await setup(), { w, api } = h;
+    try {
+        for (const [code, expected] of [
+            ['native_credential_file_missing', /未生成登录凭据/],
+            ['native_account_metadata_missing', /缺少账户信息/],
+            ['native_account_identity_mismatch', /身份校验失败/],
+            ['native_credential_invalid', /登录凭据无效/],
+            ['native_login_stopping', /代理正在停止/]
+        ]) {
+            h.intercept(url => url === '/accounts/native-login' ? { ok: false, json: async () => ({ error: { code } }) } : null);
+            const form = w.document.getElementById('login'); form.elements.name.value = 'Fixture';
+            form.dispatchEvent(new w.SubmitEvent('submit', { cancelable: true })); await tick();
+            assert.match(w.document.getElementById('notice-message').textContent, expected);
+            const s = state(); s.nativeLoginAttempts = [{ id: 'fixture', state: code }]; api.render(s);
+            assert.match(w.document.getElementById('logins').textContent, expected);
+            assert.ok(!w.document.getElementById('logins').textContent.includes(code));
+        }
+    } finally { h.dom.window.close(); }
+});
+
 test('renewal separates fresh plan from unavailable subscription dates and failed quota history', async () => {
     const h = await setup(), { w, api } = h;
     try {

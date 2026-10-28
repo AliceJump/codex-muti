@@ -73,10 +73,13 @@ public sealed class Quota(HttpClient http, OAuth auth, Vault vault, TimeSpan? re
         var account = vault.Find(id) ?? throw new AuthFailure("account_not_found");
         if (account.ProviderKind != "native") return View(id); // Do not use SIWC grants against backend-api.
         var startedAt = DateTimeOffset.UtcNow;
-        var singleFlight = locks.GetOrAdd(id, _ => new(1, 1)); await singleFlight.WaitAsync(operationToken);
+        var singleFlight = locks.GetOrAdd(id, _ => new(1, 1));
+        var acquired = false;
         int? status = null; var recovering = false;
         try
         {
+            await singleFlight.WaitAsync(operationToken);
+            acquired = true;
             // Concurrent callers share the result completed after they arrived.
             // A later explicit read can retry a failed query immediately.
             account = vault.Find(id) ?? throw new AuthFailure("account_not_found");
@@ -182,7 +185,7 @@ public sealed class Quota(HttpClient http, OAuth auth, Vault vault, TimeSpan? re
             refreshFailures[id] = new(id, code, DateTimeOffset.UtcNow, status, recoveryCode, account.AuthorizationVersion);
             throw;
         }
-        finally { singleFlight.Release(); }
+        finally { if (acquired) singleFlight.Release(); }
     }
     public static QuotaSnapshot Parse(string id, ReadOnlyMemory<byte> payload)
     {

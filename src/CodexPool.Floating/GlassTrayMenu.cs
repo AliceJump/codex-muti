@@ -131,7 +131,7 @@ internal sealed class GlassTrayMenu : Window
             RootMenu().touchNavigation = true;
             for (var menu = RootMenu(); menu is not null; menu = menu.submenu) menu.hoverTimer.Stop();
         };
-        PreviewMouseMove += (_, e) => { if (e.StylusDevice is null) RootMenu().touchNavigation = false; };
+        PreviewMouseMove += (_, e) => { if (e.StylusDevice is null && !PoolScene.IsTouchMouseMessage()) RootMenu().touchNavigation = false; };
         Resources["ForegroundBrush"] = new Brush(MediaColor.FromRgb(237, 242, 249));
         Resources["SurfaceBrush"] = new Brush(MediaColor.FromArgb(200, 24, 30, 39));
         Resources["EdgeBrush"] = new Brush(MediaColor.FromArgb(70, 170, 187, 210));

@@ -30,7 +30,9 @@ internal static class NativeLoginTests
             child.ArgumentList.Add(typeof(NativeLoginTests).Assembly.Location);
             child.ArgumentList.Add("--native-login-helper"); child.ArgumentList.Add("wait"); child.ArgumentList.Add(args[1]);
             using var process = Process.Start(child)!;
-            await File.WriteAllTextAsync(Path.Combine(args[1], "fixture-child.pid"), process.Id.ToString());
+            var marker = Path.Combine(args[1], "fixture-child.pid");
+            await File.WriteAllTextAsync(marker + ".tmp", process.Id.ToString());
+            File.Move(marker + ".tmp", marker);
             return 1;
         }
         if (args[0] == "cleanup")
@@ -144,6 +146,44 @@ internal static class NativeLoginTests
             var next = await login.StartAsync("B"); Check(await login.CancelAsync(next));
         }
         finally { foreach (var pid in launches) StopFixture(pid); }
+    }
+    public static Task StartupCleanup(string root)
+    {
+        var directory = Path.GetFullPath(Path.Combine(root, "native-startup-cleanup"));
+        Directory.CreateDirectory(directory);
+        string Fixture(string parent, string name)
+        {
+            var path = Path.Combine(parent, name); Directory.CreateDirectory(path);
+            File.WriteAllText(Path.Combine(path, "synthetic-fixture"), "synthetic"); return path;
+        }
+        var orphan = Fixture(directory, "native-login-" + Guid.NewGuid().ToString("N"));
+        var unrelated = Fixture(directory, "native-login-not-an-attempt");
+        var suffixed = Fixture(directory, "native-login-" + Guid.NewGuid().ToString("N") + "-backup");
+        var external = Fixture(root, "native-startup-external");
+        var link = Path.Combine(directory, "native-login-" + Guid.NewGuid().ToString("N"));
+        void Junction(string path)
+        {
+            var start = new ProcessStartInfo("cmd.exe") { UseShellExecute = false, CreateNoWindow = true,
+                RedirectStandardOutput = true, RedirectStandardError = true };
+            foreach (var arg in new[] { "/c", "mklink", "/J", path, external }) start.ArgumentList.Add(arg);
+            using var process = Process.Start(start)!;
+            Check(process.WaitForExit(5000) && process.ExitCode == 0);
+        }
+        Junction(link);
+        Junction(Path.Combine(orphan, "linked-fixture"));
+        Check((File.GetAttributes(link) & FileAttributes.ReparsePoint) != 0);
+        NativeLogin.CleanupAbandonedProfiles(directory);
+        Check(!Directory.Exists(orphan) && Directory.Exists(unrelated) && Directory.Exists(suffixed));
+        Check(Directory.Exists(link) && File.Exists(Path.Combine(external, "synthetic-fixture")));
+        Directory.Delete(link); // Remove only the owned junction, never its target.
+        var locked = Fixture(directory, "native-login-" + Guid.NewGuid().ToString("N"));
+        using (var held = new FileStream(Path.Combine(locked, "synthetic-fixture"), FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            try { NativeLogin.CleanupAbandonedProfiles(directory); Check(false); }
+            catch (IOException) { }
+        }
+        NativeLogin.CleanupAbandonedProfiles(directory); Check(!Directory.Exists(locked));
+        return Task.CompletedTask;
     }
     public static async Task Shutdown(string root)
     {

@@ -64,6 +64,41 @@ public sealed class NativeLogin : IAsyncDisposable
         }
     }
     public ValueTask DisposeAsync() => new(StopAsync());
+    // Called only after the daemon's exclusive lifetime lock is acquired, before
+    // any login helper can start. Never read or import an abandoned credential.
+    internal static void CleanupAbandonedProfiles(string dataDirectory)
+    {
+        var parent = Path.TrimEndingDirectorySeparator(Path.GetFullPath(dataDirectory));
+        const string prefix = "native-login-";
+        foreach (var candidate in Directory.EnumerateDirectories(parent, prefix + "*", SearchOption.TopDirectoryOnly))
+        {
+            var profile = Path.GetFullPath(candidate);
+            var name = Path.GetFileName(profile);
+            if (!string.Equals(Path.GetDirectoryName(profile), parent, StringComparison.OrdinalIgnoreCase)
+                || !name.StartsWith(prefix, StringComparison.Ordinal)
+                || !Guid.TryParseExact(name[prefix.Length..], "N", out _)
+                || (File.GetAttributes(profile) & FileAttributes.ReparsePoint) != 0) continue;
+            DeleteAbandonedProfile(profile);
+        }
+    }
+    private static void DeleteAbandonedProfile(string profile)
+    {
+        // Remove nested junctions themselves, never enumerate their targets.
+        // A locked/unremovable owned profile fails startup rather than silently
+        // leaving credentials behind and accepting new login requests.
+        if ((File.GetAttributes(profile) & FileAttributes.ReparsePoint) == 0)
+            foreach (var entry in Directory.EnumerateFileSystemEntries(profile))
+            {
+                var attributes = File.GetAttributes(entry);
+                if ((attributes & FileAttributes.Directory) != 0)
+                {
+                    if ((attributes & FileAttributes.ReparsePoint) != 0) Directory.Delete(entry);
+                    else DeleteAbandonedProfile(entry);
+                }
+                else File.Delete(entry);
+            }
+        Directory.Delete(profile);
+    }
     private async Task FinishAsync(Attempt attempt)
     {
         // A fresh native grant is minted, transferred once to DPAPI, and never refreshed by helper.

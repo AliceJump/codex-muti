@@ -44,6 +44,38 @@ internal static class UpstreamDeadlineTests
         try { await catalog.ReadAsync("0.162.1", caller.Token); Check(false); }
         catch (OperationCanceledException) when (caller.IsCancellationRequested) { }
     }
+    public static async Task QuotaLock(string root)
+    {
+        var vault = Store(root, "quota-lock-deadline");
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var requests = 0;
+        using var http = new HttpClient(new AsyncHandler(async (_, _) =>
+        {
+            if (Interlocked.Increment(ref requests) == 1) { entered.SetResult(); await release.Task; }
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"plan_type\":\"plus\",\"rate_limit\":{\"allowed\":true}}") };
+        }));
+        var quota = new Quota(http, new OAuth(http, vault), vault, TimeSpan.FromMilliseconds(250));
+        var first = quota.RefreshAsync("A", default, force: true);
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            try { await quota.RefreshAsync("A", default, force: true); Check(false); }
+            catch (OperationCanceledException) { }
+            Check(requests == 1 && quota.RefreshErrors.Single().Code == "quota_refresh_timeout");
+            using var caller = new CancellationTokenSource(); caller.Cancel();
+            try { await quota.RefreshAsync("A", caller.Token, force: true); Check(false); }
+            catch (OperationCanceledException) when (caller.IsCancellationRequested) { }
+            Check(quota.RefreshErrors.Single().Code == "quota_refresh_timeout");
+        }
+        finally
+        {
+            release.TrySetResult();
+            try { await first; } catch (OperationCanceledException) { }
+        }
+        await quota.RefreshAsync("A", default, force: true);
+        Check(requests == 2 && quota.RefreshErrors.Length == 0);
+    }
     private sealed class BlockingBody : Stream
     {
         public bool Disposed { get; private set; }

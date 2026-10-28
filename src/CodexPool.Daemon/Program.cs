@@ -21,6 +21,7 @@ try
     // Exclusive file lock is held for the full daemon lifetime. Browser/CLI clients never refresh.
     Directory.CreateDirectory(directory);
     using var owner = new FileStream(Path.Combine(directory, "daemon.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+    NativeLogin.CleanupAbandonedProfiles(directory);
     var vault = new Vault(directory);
     // Startup fallback when /v1/models omits client_version; prefer the query Codex sends.
     var modelClientVersion = CodexClientVersion.ResolveInstalled(Environment.GetEnvironmentVariable("CODEX_POOL_CLIENT_VERSION"));
