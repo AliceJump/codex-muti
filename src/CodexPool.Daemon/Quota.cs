@@ -28,7 +28,7 @@ public sealed record QuotaSnapshot(string AccountId, string Source, string? Plan
     public IEnumerable<QuotaWindow> RoutingWindows(string? model, DateTimeOffset now) => Applicable(model).Where(w => w.ResetAt > now
         && !(w.LimitId == "codex" && w.UsedPercent >= 100 && (Allowed == true || CreditsAvailable)));
 }
-public sealed class Quota(HttpClient http, OAuth auth, Vault vault)
+public sealed class Quota(HttpClient http, OAuth auth, Vault vault, TimeSpan? requestTimeout = null)
 {
     private readonly ConcurrentDictionary<string, QuotaSnapshot> snapshots = new(vault.Quotas.Select(x => new KeyValuePair<string, QuotaSnapshot>(x.AccountId, x)));
     private readonly ConcurrentDictionary<string, SemaphoreSlim> locks = new();
@@ -66,14 +66,20 @@ public sealed class Quota(HttpClient http, OAuth auth, Vault vault)
     }
     public async Task<object> RefreshAsync(string id, CancellationToken cancellationToken, bool force = false)
     {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(requestTimeout ?? TimeSpan.FromSeconds(30));
+        var operationToken = deadline.Token;
         using var use = vault.AcquireUse(id);
         var account = vault.Find(id) ?? throw new AuthFailure("account_not_found");
         if (account.ProviderKind != "native") return View(id); // Do not use SIWC grants against backend-api.
         var startedAt = DateTimeOffset.UtcNow;
-        var singleFlight = locks.GetOrAdd(id, _ => new(1, 1)); await singleFlight.WaitAsync(cancellationToken);
+        var singleFlight = locks.GetOrAdd(id, _ => new(1, 1));
+        var acquired = false;
         int? status = null; var recovering = false;
         try
         {
+            await singleFlight.WaitAsync(operationToken);
+            acquired = true;
             // Concurrent callers share the result completed after they arrived.
             // A later explicit read can retry a failed query immediately.
             account = vault.Find(id) ?? throw new AuthFailure("account_not_found");
@@ -82,7 +88,7 @@ public sealed class Quota(HttpClient http, OAuth auth, Vault vault)
             if (Snapshot(id) is { RefreshError: null } current && (current.UpdatedAt >= startedAt
                 || !force && current.Fresh(DateTimeOffset.UtcNow) && DateTimeOffset.UtcNow - current.UpdatedAt < TimeSpan.FromSeconds(30))) return current;
             var beforeReady = account;
-            account = await auth.ReadyAsync(id, cancellationToken);
+            account = await auth.ReadyAsync(id, operationToken);
             var preparedRefresh = account.UpdatedAt != beforeReady.UpdatedAt || account.AccessToken != beforeReady.AccessToken
                 || account.RefreshToken != beforeReady.RefreshToken;
             var now = DateTimeOffset.UtcNow;
@@ -98,11 +104,11 @@ public sealed class Quota(HttpClient http, OAuth auth, Vault vault)
                 renewalSyncAt[id] = (now, account.AuthorizationVersion);
                 try
                 {
-                    account = await auth.ReadyAsync(id, cancellationToken, forceRefresh: true, rejectedCredential: account);
+                    account = await auth.ReadyAsync(id, operationToken, forceRefresh: true, rejectedCredential: account);
                     preparedRefresh = true;
                 }
                 catch (AuthFailure ex) when (ex.Code is "auth_temporarily_unavailable" or "refresh_not_yet_allowed")
-                { account = await auth.ReadyAsync(id, cancellationToken); }
+                { account = await auth.ReadyAsync(id, operationToken); }
             }
             async Task<HttpResponseMessage> SendAsync(AccountCredential credential)
             {
@@ -110,7 +116,7 @@ public sealed class Quota(HttpClient http, OAuth auth, Vault vault)
                 request.Headers.Authorization = new("Bearer", credential.AccessToken);
                 request.Headers.TryAddWithoutValidation("ChatGPT-Account-Id", credential.BackendAccountId);
                 request.Headers.UserAgent.ParseAdd("codex_pool/0.1.0");
-                return await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                return await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, operationToken);
             }
             var requestedAt = DateTimeOffset.UtcNow;
             var response = await SendAsync(account);
@@ -129,7 +135,7 @@ public sealed class Quota(HttpClient http, OAuth auth, Vault vault)
                     recoveryBackoff[id] = (DateTimeOffset.UtcNow.AddMinutes(15), account.AuthorizationVersion);
                     if (!preparedRefresh)
                     {
-                        account = await auth.ReadyAsync(id, cancellationToken, forceRefresh: true, rejectedCredential: account);
+                        account = await auth.ReadyAsync(id, operationToken, forceRefresh: true, rejectedCredential: account);
                         requestedAt = DateTimeOffset.UtcNow;
                         response = await SendAsync(account);
                         status = (int)response.StatusCode;
@@ -147,9 +153,9 @@ public sealed class Quota(HttpClient http, OAuth auth, Vault vault)
                     refreshFailures[id] = new(id, code, DateTimeOffset.UtcNow, status, AuthorizationVersion: account.AuthorizationVersion);
                     return View(id);
                 }
-                await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+                await using var stream = await response.Content.ReadAsStreamAsync(operationToken);
                 using var buffer = new MemoryStream(); var bytes = new byte[8192];
-                while (true) { var count = await stream.ReadAsync(bytes, cancellationToken); if (count == 0) break;
+                while (true) { var count = await stream.ReadAsync(bytes, operationToken); if (count == 0) break;
                     if (buffer.Length + count > 512 * 1024) throw new AuthFailure("oversized_quota_response"); buffer.Write(bytes, 0, count); }
                 // An old query must not overwrite metadata from a returning login.
                 var snapshot = Parse(id, buffer.ToArray()) with { RequestedAt = requestedAt };
@@ -179,7 +185,7 @@ public sealed class Quota(HttpClient http, OAuth auth, Vault vault)
             refreshFailures[id] = new(id, code, DateTimeOffset.UtcNow, status, recoveryCode, account.AuthorizationVersion);
             throw;
         }
-        finally { singleFlight.Release(); }
+        finally { if (acquired) singleFlight.Release(); }
     }
     public static QuotaSnapshot Parse(string id, ReadOnlyMemory<byte> payload)
     {

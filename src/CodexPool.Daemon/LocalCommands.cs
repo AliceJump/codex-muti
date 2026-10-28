@@ -50,7 +50,7 @@ public static class LocalCommands
     {
         if (command == "help")
         {
-            Console.WriteLine("serve [--live-boundary-probe] | login/native-login <label> | dashboard | status | usage | statistics/requests [yyyy-MM-dd [yyyy-MM-dd]] | models | settings [on/off threshold] | rename <account-id> <name> | activate/pause/resume/drain/undrain/enable/disable/refresh/delete <account-id> | codex [official arguments]"); return 0;
+            Console.WriteLine("serve [--live-boundary-probe] | login/native-login <label> | native-login-cancel <attempt-id> | dashboard | status | usage | statistics/requests [yyyy-MM-dd [yyyy-MM-dd]] | models | settings [on/off threshold] | rename <account-id> <name> | activate/pause/resume/drain/undrain/enable/disable/refresh/delete <account-id> | codex [official arguments]"); return 0;
         }
         var key = Vault.ReadLocalKey(directory);
         if (command == "model-credential")
@@ -134,6 +134,11 @@ public static class LocalCommands
         {
             using var response = await client.PostAsJsonAsync("http://127.0.0.1:3210/accounts/native-login", new { name = args[0], accountId = (string?)null });
             response.EnsureSuccessStatusCode(); Console.WriteLine("Official Codex login started in an isolated local profile. Complete authorization in the system browser, then run status."); return 0;
+        }
+        if (command == "native-login-cancel" && args.Length == 1 && Guid.TryParseExact(args[0], "N", out _))
+        {
+            using var response = await client.PostAsJsonAsync($"http://127.0.0.1:3210/accounts/native-login/{args[0]}/cancel", new { });
+            response.EnsureSuccessStatusCode(); Console.WriteLine("Login attempt is no longer running. You can start a new login."); return 0;
         }
         if (command == "login" && args.Length is 1 or 2)
         {

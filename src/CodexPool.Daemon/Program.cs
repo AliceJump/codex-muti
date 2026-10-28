@@ -21,6 +21,7 @@ try
     // Exclusive file lock is held for the full daemon lifetime. Browser/CLI clients never refresh.
     Directory.CreateDirectory(directory);
     using var owner = new FileStream(Path.Combine(directory, "daemon.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+    NativeLogin.CleanupAbandonedProfiles(directory);
     var vault = new Vault(directory);
     // Startup fallback when /v1/models omits client_version; prefer the query Codex sends.
     var modelClientVersion = CodexClientVersion.ResolveInstalled(Environment.GetEnvironmentVariable("CODEX_POOL_CLIENT_VERSION"));
@@ -41,7 +42,8 @@ try
         AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate })
         { Timeout = TimeSpan.FromMinutes(10) };
     var auth = new OAuth(http, vault); var relay = new ResponsesRelay(modelHttp);
-    var nativeLogin = new NativeLogin(auth, directory);
+    await using var nativeLogin = new NativeLogin(auth, directory);
+    using var stopLogin = app.Lifetime.ApplicationStopping.Register(() => { _ = nativeLogin.StopAsync(); });
     var quota = new Quota(http, auth, vault);
     using var statistics = new UsageStatistics(directory);
     var inFlight = new ConcurrentDictionary<string, int>();
@@ -112,7 +114,7 @@ try
         app.MapGet(asset.Path, () => Results.Stream(typeof(Vault).Assembly.GetManifestResourceStream("CodexPool.Daemon.Dashboard." + asset.File)!, asset.Type));
     app.MapGet("/settings", () => pool.Settings);
     DaemonControlEndpoints.Map(app, vault.LocalKey, app.Lifetime.StopApplication,
-        () => inFlight.Values.All(x => x == 0) && vault.Accounts.All(x => !auth.IsRefreshing(x.Id)));
+        () => !nativeLogin.IsRunning && inFlight.Values.All(x => x == 0) && vault.Accounts.All(x => !auth.IsRefreshing(x.Id)));
     app.MapPost("/settings", async (HttpContext context) =>
     {
         var settings = await context.Request.ReadFromJsonAsync<PoolSettings>(context.RequestAborted) ?? throw new AuthFailure("invalid_settings");
@@ -132,6 +134,8 @@ try
         var input = await context.Request.ReadFromJsonAsync<LoginInput>(context.RequestAborted) ?? throw new AuthFailure("invalid_login_request");
         return Results.Json(new { attemptId = await nativeLogin.StartAsync(input.Name), state = "waiting_for_browser" });
     });
+    app.MapPost("/accounts/native-login/{attemptId}/cancel", async (string attemptId) =>
+        Results.Ok(new { cancelled = await nativeLogin.CancelAsync(attemptId) }));
     app.MapPost("/accounts/{id}/refresh", async (string id, HttpContext context) =>
     {
         var before = vault.Accounts; var original = before.FirstOrDefault(x => x.Id == id) ?? throw new AuthFailure("account_not_found");
@@ -141,43 +145,26 @@ try
             otherAccountCredentialsUnchanged = before.Where(x => x.Id != id).All(x => vault.Find(x.Id) is { } current
                 && current.AccessToken == x.AccessToken && current.RefreshToken == x.RefreshToken) });
     });
+    var modelCatalog = new ModelCatalog(http, pool);
     async Task<IResult> ModelCatalog(HttpContext context)
     {
-        using var reservation = pool.ReserveCatalog();
-        var candidates = await pool.PrepareAsync(reservation, context.RequestAborted);
-        // Forward Codex's client_version so the picker catalog matches the installed CLI (e.g. gpt-6.1-sol).
-        var catalogVersion = CodexClientVersion.FromQueryOrFallback(context.Request.Query["client_version"], modelClientVersion);
-        for (var index = 0; index < candidates.Length; index++)
+        try
         {
-            var account = candidates[index]; var native = account.Endpoint.Host == "chatgpt.com";
-            using var request = new HttpRequestMessage(HttpMethod.Get, native
-                ? $"https://chatgpt.com/backend-api/codex/models?client_version={Uri.EscapeDataString(catalogVersion)}" : "https://api.openai.com/v1/models");
-            request.Headers.Authorization = new("Bearer", account.AccessToken);
-            if (native) request.Headers.TryAddWithoutValidation("ChatGPT-Account-Id", account.BackendAccountId);
-            using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, context.RequestAborted);
-            if (!response.IsSuccessStatusCode)
-            {
-                var error = await ModelErrors.FromResponseAsync(response, context.RequestAborted);
-                pool.RecordFailure(account.AccountId, error, account.AuthorizationVersion);
-                if (error.FailoverReason is not null && index + 1 < candidates.Length) continue;
-                if (error.FailoverReason is not null) error = pool.Unavailable(error, reservation.CandidateIds.ToArray(), reservation.AutoSwitch);
-                if (error.RetryAfter is not null) context.Response.Headers["Retry-After"] = error.RetryAfter;
-                return Results.Content(Encoding.UTF8.GetString(error.Body()), "application/json", statusCode: error.Status);
-            }
-            await using var stream = await response.Content.ReadAsStreamAsync(context.RequestAborted);
-            using var content = new MemoryStream(); var buffer = new byte[8192];
-            while (true) { var count = await stream.ReadAsync(buffer, context.RequestAborted); if (count == 0) break; if (content.Length + count > 2 * 1024 * 1024) throw new AuthFailure("oversized_model_catalog"); content.Write(buffer, 0, count); }
-            using var json = JsonDocument.Parse(content.ToArray());
-            if (json.RootElement.ValueKind != JsonValueKind.Object || !json.RootElement.TryGetProperty("models", out var models) || models.ValueKind != JsonValueKind.Array)
-                throw new AuthFailure("unrecognized_model_catalog");
+            var version = CodexClientVersion.FromQueryOrFallback(context.Request.Query["client_version"], modelClientVersion);
+            var view = await modelCatalog.ReadAsync(version, context.RequestAborted);
             if (context.Request.Path == "/api/v1/models" || context.Items["modelClient"] is true)
-                return Results.Json(CompatibilityCatalog.Models(json.RootElement));
-            if (context.Request.Path == "/v1/models") return Results.Json(json.RootElement.Clone());
-            var visible = models.EnumerateArray().Where(x => x.TryGetProperty("visibility", out var visibility) && visibility.GetString() == "list")
+                return Results.Json(CompatibilityCatalog.Models(view.Catalog));
+            if (context.Request.Path == "/v1/models") return Results.Json(view.Catalog);
+            var visible = view.Catalog.GetProperty("models").EnumerateArray()
+                .Where(x => x.TryGetProperty("visibility", out var visibility) && visibility.GetString() == "list")
                 .Select(x => new { slug = x.GetProperty("slug").GetString(), displayName = x.GetProperty("display_name").GetString() }).ToArray();
-            return Results.Json(new { accountId = account.AccountId, models = visible });
+            return Results.Json(new { accountId = view.AccountId, models = visible });
         }
-        throw new NoEligibleAccountException();
+        catch (ModelCatalogFailure ex)
+        {
+            if (ex.Error.RetryAfter is not null) context.Response.Headers["Retry-After"] = ex.Error.RetryAfter;
+            return Results.Content(Encoding.UTF8.GetString(ex.Error.Body()), "application/json", statusCode: ex.Error.Status);
+        }
     }
     app.MapGet("/models", (Func<HttpContext, Task<IResult>>)ModelCatalog);
     app.MapGet("/v1/models", (Func<HttpContext, Task<IResult>>)ModelCatalog);
@@ -276,23 +263,21 @@ try
             requestedModel = modelValue.GetString()!;
         }
         context.Items["quotaModel"] = requestedModel;
+        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted); lifetime.CancelAfter(TimeSpan.FromMinutes(10));
         using var reservation = pool.ReserveModelRequest(requestedModel);
         var selection = reservation.Selection;
-        var candidates = await pool.PrepareAsync(reservation, context.RequestAborted);
-        if (translation?.Kind == CompatibilityKind.Image && candidates.Any(x => x.Endpoint.Host != "chatgpt.com"))
+        var candidates = pool.PrepareCandidatesAsync(reservation, lifetime.Token);
+        if (translation?.Kind == CompatibilityKind.Image && vault.Find(selection.AccountId)?.ProviderKind != "native")
             throw new CompatibilityFailure("image_requires_native_account");
-        var account = candidates[0];
         var headers = context.Request.Headers.ToDictionary(x => x.Key, x => x.Value.ToString(), StringComparer.OrdinalIgnoreCase);
         headers.Remove("ChatGPT-Account-Id"); // Backend account routing is supplied only by validated credentials.
         // Global sticky selection is unchanged. This only decides whether account-bound turn state still belongs here.
-        ResponsesHeaders.BindTurnState(headers, sessionOwners, account.AccountId);
         var started = Stopwatch.GetTimestamp();
-        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted); lifetime.CancelAfter(TimeSpan.FromMinutes(10));
-        RelayResult result = new(account.AccountId, 500, 0, false, "transport_error");
+        RelayResult result = new(selection.AccountId, 500, 0, false, "transport_error");
         var sink = new WebSink(context);
         using var converter = translation is null ? null : new CompatibilitySink(sink, translation);
         IResponseSink responseSink = converter is null ? sink : converter;
-        var attemptedAccount = account.AccountId; var attemptCount = 0;
+        var attemptedAccount = selection.AccountId; var attemptCount = 0;
         var upstreamCompleted = false;
         ResponseTokenUsage? tokenUsage = null;
         string? failoverReason = null;
@@ -302,7 +287,11 @@ try
                 (_, reason) => failoverReason = reason,
                 (lease, entering) =>
                 {
-                    if (entering) { attemptedAccount = lease.AccountId; attemptCount++; }
+                    if (entering)
+                    {
+                        if (attemptCount == 0) ResponsesHeaders.BindTurnState(headers, sessionOwners, lease.AccountId);
+                        attemptedAccount = lease.AccountId; attemptCount++;
+                    }
                     inFlight.AddOrUpdate(lease.AccountId, entering ? 1 : 0, (_, count) => Math.Max(0, count + (entering ? 1 : -1)));
                 }, lease => { upstreamCompleted = true; pool.RecordSuccess(lease.AccountId); },
                 (lease, error) => pool.RecordFailure(lease.AccountId, error, lease.AuthorizationVersion), error => pool.Unavailable(error, reservation.CandidateIds.ToArray(), reservation.AutoSwitch, requestedModel),

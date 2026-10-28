@@ -25,7 +25,7 @@ public sealed class ResponsesRelay(HttpClient http)
 {
     private const int MaximumErrorBytes = 8192;
 
-    public async Task<RelayResult> ForwardAsync(
+    public Task<RelayResult> ForwardAsync(
         ReadOnlyMemory<byte> body, string contentType, IReadOnlyList<ModelLease> candidates,
         IReadOnlyDictionary<string, string> headers, IResponseSink sink, CancellationToken cancellationToken,
         Action<ModelLease, string>? rejected = null, Action<ModelLease, bool>? attempt = null, Action<ModelLease>? completed = null,
@@ -35,11 +35,27 @@ public sealed class ResponsesRelay(HttpClient http)
         if (candidates.Count == 0) throw new ArgumentException("No candidate accounts.", nameof(candidates));
         if (candidates.Select(x => x.AccountId).Distinct(StringComparer.Ordinal).Count() != candidates.Count)
             throw new ArgumentException("Each account may be attempted only once.", nameof(candidates));
+        return ForwardAsync(body, contentType, Enumerate(candidates), headers, sink, cancellationToken,
+            rejected, attempt, completed, classified, exhausted, usage);
+    }
+    private static async IAsyncEnumerable<ModelLease> Enumerate(IReadOnlyList<ModelLease> candidates)
+    { foreach (var candidate in candidates) yield return candidate; await Task.CompletedTask; }
+    public async Task<RelayResult> ForwardAsync(
+        ReadOnlyMemory<byte> body, string contentType, IAsyncEnumerable<ModelLease> candidates,
+        IReadOnlyDictionary<string, string> headers, IResponseSink sink, CancellationToken cancellationToken,
+        Action<ModelLease, string>? rejected = null, Action<ModelLease, bool>? attempt = null, Action<ModelLease>? completed = null,
+        Action<ModelLease, ModelError>? classified = null, Func<ModelError, ModelError>? exhausted = null,
+        Action<ModelLease, ResponseTokenUsage>? usage = null)
+    {
         var committed = false;
-        for (var index = 0; index < candidates.Count; index++)
+        var index = -1;
+        ModelLease? lastRejected = null; ModelError? lastError = null;
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        await foreach (var lease in candidates.WithCancellation(cancellationToken))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var lease = candidates[index];
+            if (!seen.Add(lease.AccountId)) throw new ArgumentException("Each account may be attempted only once.", nameof(candidates));
+            index++;
             using var observation = new AttemptObservation(lease, attempt);
             using var request = new HttpRequestMessage(HttpMethod.Post, lease.Endpoint);
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", lease.AccessToken);
@@ -71,7 +87,8 @@ public sealed class ResponsesRelay(HttpClient http)
                     var reason = mapped.FailoverReason ?? "unknown_rejection";
                     classified?.Invoke(lease, mapped);
                     if (mapped.FailoverReason is not null) rejected?.Invoke(lease, reason);
-                    if (!committed && index + 1 < candidates.Count && mapped.FailoverReason is not null) continue;
+                    if (!committed && mapped.FailoverReason is not null)
+                    { lastRejected = lease; lastError = mapped; continue; }
                     // Never send upstream error bodies: they can echo prompts or credentials.
                     if (mapped.FailoverReason is not null && exhausted is not null) mapped = exhausted(mapped);
                     if (mapped.RetryAfter is not null) sink.SetHeader("Retry-After", mapped.RetryAfter);
@@ -151,7 +168,15 @@ public sealed class ResponsesRelay(HttpClient http)
                 { return new(lease.AccountId, 502, index + 1, committed, "stream_interrupted"); }
             }
         }
-        throw new InvalidOperationException("Candidate loop must return.");
+        if (lastError is not null && lastRejected is not null)
+        {
+            var mapped = exhausted?.Invoke(lastError) ?? lastError;
+            if (mapped.RetryAfter is not null) sink.SetHeader("Retry-After", mapped.RetryAfter);
+            sink.Start(mapped.Status, "application/json");
+            await sink.WriteAsync(mapped.Body(), cancellationToken);
+            return new(lastRejected.AccountId, mapped.Status, index + 1, true, lastError.FailoverReason!);
+        }
+        throw new ArgumentException("No candidate accounts.", nameof(candidates));
     }
 
     private sealed class AttemptObservation : IDisposable

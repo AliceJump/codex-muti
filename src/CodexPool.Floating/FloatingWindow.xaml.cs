@@ -29,6 +29,7 @@ public partial class FloatingWindow : Window
     private WindowPreferences preferences = new();
     private JsonElement? snapshot;
     private bool exiting, busy, connected;
+    private bool lightTheme;
     private readonly bool startServices;
     private const string PreferencesFile = "widget.json";
     private Forms.Screen? flyoutScreen;
@@ -71,6 +72,13 @@ public partial class FloatingWindow : Window
             }
         };
         Scene.DragRequested = () => { if (Pinned) { DragMove(); ConstrainPinnedScene(IsVisible); SavePosition(); } };
+        Scene.TouchDragRequested = delta => { if (Pinned) { Left += delta.X; Top += delta.Y; } };
+        Scene.TouchDragCompleted = () => { if (Pinned) { ConstrainPinnedScene(IsVisible); SavePosition(); } };
+        Scene.ContextRequested = point =>
+        {
+            var screen = Scene.PointToScreen(point);
+            ShowSceneMenu(new System.Drawing.Point((int)Math.Round(screen.X), (int)Math.Round(screen.Y)));
+        };
         if (startServices)
         {
             tray = new StableTrayIcon(CreateIcon(), "Codex Pool · 账户状态 · Ctrl+Alt+W");
@@ -116,8 +124,8 @@ public partial class FloatingWindow : Window
     }
     private void ApplyTheme()
     {
-        var light = preferences.Theme == 1 || preferences.Theme == 0 && Registry.GetValue(@"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "AppsUseLightTheme", 0) is int value && value == 1;
-        Scene.SetTheme(light, SystemParameters.HighContrast);
+        lightTheme = preferences.Theme == 1 || preferences.Theme == 0 && Registry.GetValue(@"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "AppsUseLightTheme", 0) is int value && value == 1;
+        Scene.SetTheme(lightTheme, SystemParameters.HighContrast);
     }
     private async Task WatchAsync()
     {
@@ -338,7 +346,7 @@ public partial class FloatingWindow : Window
         if (snapshot is { } state) Render(state);
         SavePosition();
     }
-    private void CycleTheme(object sender, RoutedEventArgs e) { preferences = preferences with { Theme = (preferences.Theme + 1) % 3 }; ApplyTheme(); if (snapshot is { } state) Render(state); SavePosition(); }
+    private void CycleTheme(object sender, RoutedEventArgs e) { preferences = preferences with { Theme = lightTheme ? 2 : 1 }; ApplyTheme(); if (snapshot is { } state) Render(state); SavePosition(); }
     private void DismissWindow(object sender, RoutedEventArgs e) { SavePosition(); Hide(); }
     private async void OpenDashboard(object sender, RoutedEventArgs e) => await DashboardAsync();
     private async void RefreshQuota(object sender, RoutedEventArgs e) => await RefreshQuotaAsync(notify: true);
@@ -351,6 +359,13 @@ public partial class FloatingWindow : Window
         var cursor = Forms.Cursor.Position;
         glassMenu = new GlassTrayMenu(BuildTrayMenu(), () => glassMenu = null, preferences.Theme) { Title = "Codex Pool · 账户与浮窗" };
         glassMenu.ShowNear(cursor, bounds);
+    }
+
+    private void ShowSceneMenu(System.Drawing.Point point)
+    {
+        glassMenu?.Close();
+        glassMenu = new GlassTrayMenu(BuildTrayMenu(), () => glassMenu = null, preferences.Theme);
+        glassMenu.ShowNear(point, null);
     }
 
     internal IReadOnlyList<GlassMenuItem> BuildTrayMenu()

@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
 
   <ItemGroup>
+    <InternalsVisibleTo Include="CodexPool.SecurityTests" />
     <EmbeddedResource Include="Dashboard/*" />
     <ProjectReference Include="..\CodexPool.Core\CodexPool.Core.csproj" />
   </ItemGroup>
