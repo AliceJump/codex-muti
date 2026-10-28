@@ -35,7 +35,12 @@ internal static class NativeLoginTests
         }
         if (args[0] == "cleanup")
         {
-            await File.WriteAllTextAsync(Path.Combine(args[1], "locked-fixture"), "synthetic");
+            // Publish only after the writer has closed its handle. File.Exists
+            // alone can observe an async write still holding the fixture open,
+            // racing the parent's exclusive lock on faster CI runners.
+            var marker = Path.Combine(args[1], "locked-fixture");
+            await File.WriteAllTextAsync(marker + ".tmp", "synthetic");
+            File.Move(marker + ".tmp", marker);
             await Task.Delay(TimeSpan.FromMinutes(1)); return 1;
         }
         return args[0] == "missing" ? 0 : 1;
