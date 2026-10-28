@@ -3,6 +3,7 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Threading;
+using System.Runtime.InteropServices;
 using Point = System.Windows.Point;
 using ButtonBase = System.Windows.Controls.Primitives.ButtonBase;
 using ToolTip = System.Windows.Controls.ToolTip;
@@ -93,7 +94,11 @@ public sealed partial class PoolScene
             }
         };
         tipTimer.Tick += (_, _) => CloseTouchTip();
-        PreviewMouseDown += (_, _) => CloseTouchTip();
+        // Windows may also emit compatibility mouse messages for WM_POINTER
+        // touch input. They can have no StylusDevice, so inspect the native
+        // touch signature rather than letting them click/drag a second time.
+        PreviewMouseDown += (_, e) => { if (IsTouchMouseMessage()) e.Handled = true; else CloseTouchTip(); };
+        PreviewMouseUp += (_, e) => { if (IsTouchMouseMessage()) e.Handled = true; };
         MouseRightButtonUp += (_, e) => { ContextRequested?.Invoke(e.GetPosition(this)); e.Handled = true; };
         PreviewKeyDown += (_, e) =>
         {
@@ -130,4 +135,8 @@ public sealed partial class PoolScene
         if (touchTip is not null) touchTip.IsOpen = false;
         touchTip = null;
     }
+
+    internal static bool IsTouchMouseMessage() => IsTouchMouseMessage(GetMessageExtraInfo());
+    internal static bool IsTouchMouseMessage(nint extraInfo) => ((long)extraInfo & 0xffffff80L) == 0xff515780L;
+    [DllImport("user32.dll")] private static extern nint GetMessageExtraInfo();
 }

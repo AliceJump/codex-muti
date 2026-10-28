@@ -12,6 +12,14 @@ internal static class TouchTests
 
     internal static void Run(Action<string, Action> run)
     {
+        run("Pointer input is enabled before WPF startup and compatibility mouse classification preserves pen and mouse", () =>
+        {
+            Check(AppContext.TryGetSwitch("Switch.System.Windows.Input.Stylus.EnablePointerSupport", out var enabled) && enabled);
+            Check(PoolScene.IsTouchMouseMessage(unchecked((nint)0xff5157f1L)));
+            Check(PoolScene.IsTouchMouseMessage(unchecked((nint)0xffffffffff5157f1UL)));
+            Check(!PoolScene.IsTouchMouseMessage(unchecked((nint)0xff515701L)));
+            Check(!PoolScene.IsTouchMouseMessage(0));
+        });
         run("Touch tap invokes once, hold shows disabled account details and swipe never activates", () =>
         {
             var window = new FloatingWindow(false) { ShowActivated = false };

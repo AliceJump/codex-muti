@@ -5,4 +5,5 @@
     <UseWPF>true</UseWPF>
   </PropertyGroup>
   <ItemGroup><ProjectReference Include="../../src/CodexPool.Floating/CodexPool.Floating.csproj" /></ItemGroup>
+  <ItemGroup><RuntimeHostConfigurationOption Include="Switch.System.Windows.Input.Stylus.EnablePointerSupport" Value="true" /></ItemGroup>
 </Project>

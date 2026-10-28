@@ -16,4 +16,9 @@
   </PropertyGroup>
   <ItemGroup><ProjectReference Include="../CodexPool.Daemon/CodexPool.Daemon.csproj" /></ItemGroup>
   <ItemGroup><Resource Include="../../assets/codex-pool.ico" Link="Assets/codex-pool.ico" /></ItemGroup>
+  <ItemGroup>
+    <!-- Use Windows pointer input rather than the legacy tablet service. This
+         must be configured before WPF initializes its input manager. -->
+    <RuntimeHostConfigurationOption Include="Switch.System.Windows.Input.Stylus.EnablePointerSupport" Value="true" />
+  </ItemGroup>
 </Project>
