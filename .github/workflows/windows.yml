@@ -51,7 +51,7 @@ jobs:
       - name: Client packaging and menu checks
         shell: pwsh
         run: |
-          foreach ($taskFilter in @('Portable package', 'Tray menus separate', 'Linked client launch', 'Account switch toggle', 'Background startup', 'Control authentication', 'Tray status recovers', 'Tray retries modify', 'Tray recovers an existing GUID', 'Tray publishes icon', 'Quota action works', 'Quota refresh reports', 'Token cache bars', 'Subscription deadline')) {
+          foreach ($taskFilter in @('Portable package', 'Tray menus separate', 'Linked client launch', 'Account switch toggle', 'Background startup', 'Control authentication', 'Tray status recovers', 'Tray retries modify', 'Tray recovers an existing GUID', 'Tray publishes icon', 'Quota action works', 'Quota refresh reports', 'Token cache bars', 'Subscription deadline', 'Pointer input')) {
             dotnet run --project tests/CodexPool.UiTests -c Release --no-build -- --filter $taskFilter
             if ($LASTEXITCODE -ne 0) { throw "Client check failed: $taskFilter" }
           }
