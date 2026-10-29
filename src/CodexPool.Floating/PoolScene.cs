@@ -21,6 +21,8 @@ using Pen = System.Windows.Media.Pen;
 using ButtonBase = System.Windows.Controls.Primitives.ButtonBase;
 using ToggleButton = System.Windows.Controls.Primitives.ToggleButton;
 
+using CodexPool.Core;
+
 namespace CodexPool.Floating;
 
 // One scene owns all pixels. Native controls above it supply keyboard, focus,

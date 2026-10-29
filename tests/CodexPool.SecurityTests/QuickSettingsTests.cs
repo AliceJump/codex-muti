@@ -34,6 +34,34 @@ internal static class QuickSettingsTests
         var rows = projection["rows"]!.AsArray();
         Check(rows.Count == 2 && rows[0]!["selected"]!.GetValue<bool>() && !rows[1]!["selected"]!.GetValue<bool>());
         Check(!rows[1]!["enabled"]!.GetValue<bool>() && rows[0]!["subtitle"]!.GetValue<string>().Contains("未知"));
+        Check(projection["name"]!.GetValue<string>() == "Codex Pool" && projection["tileLabel"]!.GetValue<string>() == "Account A");
+        Check(!projection["quotaIcon"]!["known"]!.GetValue<bool>() && projection["quotaIcon"]!["label"]!.GetValue<string>() == "—");
+        var now = DateTimeOffset.UtcNow;
+        var iconQuota = System.Text.Json.Nodes.JsonNode.Parse(JsonSerializer.Serialize(new {
+            accountId = "account-a", updatedAt = now, cacheState = "current", windows = new[] {
+                new { kind = "5h", windowSeconds = 18000, remainingPercent = 42d, resetAt = now.AddHours(1) },
+                new { kind = "weekly", windowSeconds = 604800, remainingPercent = 4d, resetAt = now.AddDays(1) }
+            }
+        }))!.AsObject();
+        fakeStatus["usage"]!.AsArray().Add(iconQuota);
+        fakeStatus["settings"] = JsonSerializer.SerializeToNode(new PoolSettings(true, 95, 95, 95));
+        var dynamic = QuickSettingsRegistration.Presentation(new(true,true,fakeStatus,"代理运行中"),true,"");
+        Check(dynamic["quotaIcon"]!["remaining"]!.GetValue<double>() == 4); // Same limiting weekly window as the tray.
+        Check(dynamic["quotaIcon"]!["accentArgb"]!.GetValue<uint>() == 0xFFFF7069);
+        fakeStatus["settings"]!["autoSwitch"] = false;
+        dynamic = QuickSettingsRegistration.Presentation(new(true,true,fakeStatus,"代理运行中"),true,"");
+        Check(dynamic["quotaIcon"]!["remaining"]!.GetValue<double>() == 42 && dynamic["quotaIcon"]!["label"]!.GetValue<string>() == "42");
+        iconQuota["windows"]![0]!["remainingPercent"] = 0d;
+        dynamic = QuickSettingsRegistration.Presentation(new(true,true,fakeStatus,"代理运行中"),true,"");
+        Check(dynamic["quotaIcon"]!["exhausted"]!.GetValue<bool>());
+        iconQuota["cacheState"] = "historical";
+        dynamic = QuickSettingsRegistration.Presentation(new(true,true,fakeStatus,"代理运行中"),true,"");
+        Check(!dynamic["quotaIcon"]!["known"]!.GetValue<bool>() && !dynamic["quotaIcon"]!["exhausted"]!.GetValue<bool>());
+        fakeStatus["activeAccountId"] = "account-b";
+        dynamic = QuickSettingsRegistration.Presentation(new(true,true,fakeStatus,"代理运行中"),true,"");
+        Check(dynamic["tileLabel"]!.GetValue<string>() == "Account B" && !dynamic["quotaIcon"]!["known"]!.GetValue<bool>());
+        Check(new QuotaIconState(30,false).AccentArgb == 0xFF75DBAF && new QuotaIconState(29,false).AccentArgb == 0xFFFFC65F);
+        Check(new QuotaIconState(14,false).AccentArgb == 0xFFFF7069 && new QuotaIconState(null,false).AccentArgb == 0xFF96A1B1);
         var intent = Path.Combine(root,"service-intent");
         Check(ProxyServiceIntent.AllowsAutomaticStart(intent));
         ProxyServiceIntent.Confirm(intent,false);Check(!ProxyServiceIntent.AllowsAutomaticStart(intent));

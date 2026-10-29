@@ -7,6 +7,7 @@ using System.Security.Principal;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Win32.SafeHandles;
+using CodexPool.Core;
 
 namespace CodexPool.Daemon;
 
@@ -140,6 +141,8 @@ internal static class QuickSettingsRegistration
     {
         var lines = new JsonArray();
         var rows = new JsonArray();
+        var tileLabel = state.Known && !state.Running ? "代理未启动" : "未选择账户";
+        var tileIcon = new QuotaIconState(null, false);
         if (state.Status is { } status)
         {
             var accounts = status["accounts"]!.AsArray();
@@ -151,6 +154,13 @@ internal static class QuickSettingsRegistration
                 var id = account["id"]!.GetValue<string>();
                 var quota = usage?.OfType<JsonObject>().FirstOrDefault(x => x["accountId"]?.GetValue<string>() == id);
                 var routing = availability?.OfType<JsonObject>().FirstOrDefault(x => x["accountId"]?.GetValue<string>() == id);
+                if (status["activeAccountId"]?.GetValue<string>() == id)
+                {
+                    tileLabel = account["name"]?.GetValue<string>() ?? "未命名账户";
+                    var window = QuotaDisplay.TrayWindow(JsonSerializer.SerializeToElement(quota),
+                        JsonSerializer.SerializeToElement(status["settings"]));
+                    tileIcon = new(window?.Remaining, window?.Remaining is <= 0);
+                }
                 rows.Add(new JsonObject {
                     ["id"] = id, ["title"] = account["name"]?.GetValue<string>() ?? "未命名账户",
                     ["subtitle"] = QuotaCaption(quota), ["action"] = "activate-account",
@@ -165,6 +175,9 @@ internal static class QuickSettingsRegistration
         return new()
         {
             ["id"] = Id, ["name"] = "Codex Pool", ["icon"] = "bot", ["tileType"] = "split-toggle",
+            ["tileLabel"] = tileLabel.Length > 128 ? tileLabel[..128] : tileLabel,
+            ["quotaIcon"] = new JsonObject { ["known"] = tileIcon.Known, ["remaining"] = tileIcon.Amount,
+                ["exhausted"] = tileIcon.Exhausted, ["label"] = tileIcon.Label, ["accentArgb"] = tileIcon.AccentArgb },
             ["summary"] = state.Message, ["added"] = false, ["online"] = true,
             ["enabled"] = state.Known ? state.Running : lastKnownRunning, ["canToggle"] = state.Known,
             ["lines"] = lines, ["rows"] = rows,

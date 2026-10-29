@@ -1,17 +1,16 @@
 using System.Text.Json;
-using CodexPool.Core;
 
-namespace CodexPool.Floating;
+namespace CodexPool.Core;
 
-internal sealed record DisplayQuotaWindow(string Key, string Kind, string Label, JsonElement Window, double? Remaining, int? Seconds, string Family);
-internal static class QuotaDisplay
+public sealed record DisplayQuotaWindow(string Key, string Kind, string Label, JsonElement Window, double? Remaining, int? Seconds, string Family);
+public static class QuotaDisplay
 {
-    internal static bool Fresh(JsonElement quota) => quota.ValueKind == JsonValueKind.Object
+    public static bool Fresh(JsonElement quota) => quota.ValueKind == JsonValueKind.Object
         && (!quota.TryGetProperty("refreshError", out var error) || error.ValueKind == JsonValueKind.Null)
         && (!quota.TryGetProperty("cacheState", out var cache) || cache.GetString() != "historical")
         && quota.TryGetProperty("updatedAt", out var updated) && updated.ValueKind == JsonValueKind.String && updated.TryGetDateTimeOffset(out var at)
         && DateTimeOffset.UtcNow - at <= TimeSpan.FromMinutes(2) && at <= DateTimeOffset.UtcNow.AddSeconds(30);
-    internal static DisplayQuotaWindow[] Windows(JsonElement quota)
+    public static DisplayQuotaWindow[] Windows(JsonElement quota)
     {
         if (quota.ValueKind != JsonValueKind.Object || !quota.TryGetProperty("windows", out var windows) || windows.ValueKind != JsonValueKind.Array) return [];
         var fresh = Fresh(quota);
@@ -28,7 +27,7 @@ internal static class QuotaDisplay
             return new DisplayQuotaWindow(family + ":" + kind + ":" + seconds + ":" + index, kind, label, w, remaining, seconds, family);
         }).ToArray();
     }
-    internal static DisplayQuotaWindow? TrayWindow(JsonElement quota, JsonElement settings = default)
+    public static DisplayQuotaWindow? TrayWindow(JsonElement quota, JsonElement settings = default)
     {
         var policy = settings.ValueKind == JsonValueKind.Object ? settings.Deserialize<PoolSettings>(JsonSerializerOptions.Web) ?? new() : new PoolSettings();
         var windows = Windows(quota).Where(w => w.Family == "codex"
@@ -43,10 +42,10 @@ internal static class QuotaDisplay
             ?? windows.Where(w => !Weekly(w)).OrderBy(w => w.Remaining is null)
                 .ThenByDescending(w => w.Kind is "5h" or "primary_window").ThenBy(w => w.Seconds ?? int.MaxValue).FirstOrDefault();
     }
-    internal static string State(JsonElement quota)
+    public static string State(JsonElement quota)
     {
         if (quota.ValueKind == JsonValueKind.Object && quota.TryGetProperty("refreshError", out var error) && error.ValueKind == JsonValueKind.Object)
-            return "历史缓存 · " + QuotaLabels.Failure(PoolPresentation.String(error, "code"));
+            return "历史缓存 · " + QuotaLabels.Failure(error.TryGetProperty("code", out var code) && code.ValueKind == JsonValueKind.String ? code.GetString() : null);
         if (!Fresh(quota)) return "额度未知或已过期";
         if (quota.TryGetProperty("credits", out var credits) && credits.ValueKind == JsonValueKind.Object)
         {
@@ -56,8 +55,8 @@ internal static class QuotaDisplay
         }
         return quota.TryGetProperty("windowState", out var state) && state.GetString() == "not_reported" ? "未提供固定额度窗口" : "额度窗口未知";
     }
-    internal static bool AllowsContinuation(JsonElement quota) => Fresh(quota) &&
+    public static bool AllowsContinuation(JsonElement quota) => Fresh(quota) &&
         (quota.TryGetProperty("allowed", out var allowed) && allowed.ValueKind == JsonValueKind.True
         || quota.TryGetProperty("creditsAvailable", out var credit) && credit.ValueKind == JsonValueKind.True);
-    internal static string Percent(DisplayQuotaWindow w) => w.Remaining is { } value ? value.ToString("0") + "%" : "—";
+    public static string Percent(DisplayQuotaWindow w) => w.Remaining is { } value ? value.ToString("0") + "%" : "—";
 }

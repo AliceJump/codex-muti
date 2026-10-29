@@ -1,4 +1,5 @@
 using CodexPool.Floating;
+using CodexPool.Core;
 using System.Windows.Media;
 using System.Windows;
 using System.Windows.Controls;
