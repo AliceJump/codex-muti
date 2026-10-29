@@ -9,6 +9,7 @@ internal static class ProxyStartup
 {
     public static async Task EnsureRunningAsync(CancellationToken token, bool explicitStart = false)
     {
+        if (!explicitStart && !CodexPool.Daemon.ProxyServiceIntent.AllowsAutomaticStart(CodexPool.Daemon.ProxyServiceIntent.DataDirectory)) return;
         using var client = new HttpClient(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false })
             { Timeout = TimeSpan.FromSeconds(2) };
         try

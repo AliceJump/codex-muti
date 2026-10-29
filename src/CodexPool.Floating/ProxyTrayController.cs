@@ -127,7 +127,7 @@ internal sealed class ProxyTrayController : IDisposable
         for (var i = 0; i < 30; i++)
         {
             await Task.Delay(200, lifetime.Token);
-            try { state = await ReadStatusAsync(); return; } catch { if (child.HasExited) throw; }
+            try { state = await ReadStatusAsync(); ProxyServiceIntent.Confirm(directory,true); return; } catch { if (child.HasExited) throw; }
         }
         throw new TimeoutException();
     }

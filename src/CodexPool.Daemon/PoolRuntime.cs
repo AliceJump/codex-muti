@@ -268,6 +268,16 @@ public sealed class PoolRuntime(Vault vault, OAuth auth, Quota quota, bool bound
         if (settings.AutoSwitch && !boundaryProbe) throw new AuthFailure("live_migration_gate_pending");
         lock (gate) vault.SaveSettings(settings);
     }
+    public PoolSettings UpdateAutomaticSwitching(bool enabled)
+    {
+        if (enabled && !boundaryProbe) throw new AuthFailure("live_migration_gate_pending");
+        lock (gate)
+        {
+            var settings = vault.Settings with { AutoSwitch = enabled };
+            vault.SaveSettings(settings);
+            return settings;
+        }
+    }
     public string[] Candidates(AccountSelection selection, string? model = null)
     {
         lock (gate)

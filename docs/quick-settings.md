@@ -1,0 +1,28 @@
+# Windows 快速设置接入
+
+Codex Pool 通过独立 `quick-settings` 注册进程接入 [Windows Quick Settings Extensions](https://github.com/AliceJump/windows-quick-settings-extensions)。当前为限版本的实验功能，实际 Windows 组件和宿主安装入口由该项目管理。
+
+用户界面按 Wi-Fi 二级页组织：左上返回箭头、同一行标题及右上代理启停开关，下方账户横条显示名称和缓存额度。主开关控制本地 Daemon 的启动/安全停止，与自动账户切换设置分离。点击可用账户整条行提交激活，成功读回后才改变当前账户标记；激活只影响新请求。
+
+关闭代理会断开经它访问的模型连接，正在进行的请求/授权会触发繁忙拒绝。不要为了验证磁贴自动关闭承载当前开发会话的代理。注册进程独立于 Daemon，停止服务后仍在线，供用户再次开启；未知状态不标为已关闭，也不自动重放启停或切换请求。
+
+独立进程命令（绝对路径由安装脚本传入）：
+
+```powershell
+CodexPool.Daemon.exe quick-settings "C:\path\qse-broker.exe" "C:\path\service\CodexPool.Daemon.exe"
+```
+
+注册 helper 可在独立发布目录运行，不需要替换现用服务。它校验监听进程的安装路径、用户和会话，认证访问本机管理 API；本地管理密钥不进入 QSE Broker、Shell 或命令参数。状态只投影账户公开字段和缓存额度，不将完整请求历史发送给 Shell。
+
+`proxy-service-intent.json` 仅保存已确认的服务运行意图，供新版本桌面启动器避免在用户关闭后再次隐式启动。启动继承此前认证服务的启动模式，不为使开关可用而新增迁移门禁绕过。账户切换仍受现有 Daemon 的资格、额度和生产门禁校验；失败保留原账户。
+
+额度使用本机 `status.usage` 的真实缓存窗口，未知显示未知，过期值标记缓存。底部“刷新状态”只重读本机状态，不等于上游额度刷新。自动切换设置仍由既有控制台管理，当前二级页没有额外阈值编辑器。
+
+测试：
+
+```powershell
+dotnet run --project tests/CodexPool.Tests -c Release
+dotnet run --project tests/CodexPool.SecurityTests -c Release -- --quick-settings-only
+```
+
+针对性测试使用隔离数据和随机 loopback 端口，不启动或停止当前端口 3210 的代理；覆盖设置原子更新、门禁、服务意图、未知状态、账户行投影和不可用状态。实际账户切换需用户手动验收，不能把模拟数据测试计为真实切换通过。
