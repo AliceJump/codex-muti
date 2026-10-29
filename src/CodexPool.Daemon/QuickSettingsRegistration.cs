@@ -31,13 +31,16 @@ internal static class QuickSettingsRegistration
             { BaseAddress = new("http://127.0.0.1:3210"), Timeout = TimeSpan.FromSeconds(2) };
         var proxy = new QuickSettingsProxy(args[1], directory, http);
         Task<ProxyOperation>? operation = null;
-        ulong operationRequestId = 0;
+        var operationEventId = "";
+        var providerEpoch = Guid.NewGuid().ToString("N");
+        string? brokerEpoch = null;
         var operationNotice = "";
         var lastKnownRunning = false;
         var registered = false;
         var publishAfterRegister = false;
         ulong revision = 1;
         JsonObject? completion = null;
+        JsonObject? completionState = null;
         JsonObject? previous = null;
         try
         {
@@ -49,7 +52,7 @@ internal static class QuickSettingsRegistration
                     {
                         var result = await operation;
                         operationNotice = result.Message;
-                        completion = new() { ["requestId"] = operationRequestId, ["success"] = result.Success };
+                        completion = new() { ["eventId"] = operationEventId, ["outcome"] = result.Success ? "confirmed" : "rejected" };
                         operation = null;
                     }
                     var state = await proxy.ReadAsync(stop.Token);
@@ -59,51 +62,64 @@ internal static class QuickSettingsRegistration
                     if (changed) ++revision;
                     previous = (JsonObject)current.DeepClone();
                     current["revision"] = revision;
+                    var publishedState = ContractState(current, providerEpoch, revision);
+                    if (completion is not null) completionState ??= (JsonObject)publishedState.DeepClone();
                     JsonObject request;
                     if (!registered)
                     {
                         request = Message("plugin.register");
-                        request["schemaVersion"] = 1;
-                        request["permissions"] = new JsonArray("tile:register", "state:publish", "actions:receive");
-                        request["entry"] = current;
+                        var capabilities = await ExchangeAsync(Message("framework.hello"), broker, stop.Token);
+                        if (capabilities["manifestVersion"]?.GetValue<int>() != 2 || capabilities["stateVersion"]?.GetValue<int>() != 2)
+                            throw new IOException("Unsupported Quick Settings contract.");
+                        request["id"] = Id;request["manifest"] = Manifest();request["state"] = publishedState;
                     }
                     else
                     {
-                        request = Message("plugin.poll"); request["id"] = Id;
-                        if (changed) request["state"] = current;
-                        if (completion is not null) request["result"] = completion;
+                        request = Message("plugin.poll"); request["id"] = Id;request["providerEpoch"] = providerEpoch;
+                        if (changed) request["state"] = publishedState;
+                        if (completionState is not null) request["state"] = completionState.DeepClone();
+                        if (completion is not null) request["result"] = completion.DeepClone();
                     }
                     var response = await ExchangeAsync(request, broker, stop.Token);
-                    if (response["protocol"]?.GetValue<int>() != 1 || response["type"]?.GetValue<string>() == "error")
-                        throw new IOException("Registration rejected.");
-                    publishAfterRegister = !registered;
-                    registered = true; completion = null;
-                    if (response["action"] is JsonObject action)
+                    if (response["protocol"]?.GetValue<int>() != 2 || response["type"]?.GetValue<string>() == "error")
                     {
-                        var requestId = action["requestId"]!.GetValue<ulong>();
+                        completion = null;completionState = null;
+                        throw new IOException("Registration rejected.");
+                    }
+                    var responseEpoch = response["brokerEpoch"]?.GetValue<string>() ?? throw new IOException("Broker epoch unavailable.");
+                    if (!registered && brokerEpoch is not null && brokerEpoch != responseEpoch) { completion = null;completionState = null; }
+                    brokerEpoch = responseEpoch;
+                    publishAfterRegister = !registered;
+                    if(registered){completion = null;completionState = null;}
+                    registered = true;
+                    if (response["event"] is JsonObject action)
+                    {
+                        var eventId = action["eventId"]!.GetValue<string>();
                         var accepted = action["id"]?.GetValue<string>() == Id
-                            && action["expectedRevision"]?.GetValue<ulong>() == revision;
+                            && action["expectedRevision"]?.GetValue<ulong>() == revision
+                            && action["providerEpoch"]?.GetValue<string>() == providerEpoch && action["brokerEpoch"]?.GetValue<string>() == brokerEpoch;
                         if (accepted && operation is null && action["kind"]?.GetValue<string>() == "setEnabled")
                         {
-                            operationNotice = "操作处理中…"; operationRequestId = requestId;
+                            operationNotice = "操作处理中…"; operationEventId = eventId;
                             operation = proxy.SetRunningAsync(action["value"]!.GetValue<bool>(), stop.Token);
                         }
                         else if (accepted && operation is null && action["kind"]?.GetValue<string>() == "invoke"
-                            && action["action"]?.GetValue<string>() == "activate-account" && action["argument"]?.GetValue<string>() is { } accountId)
+                            && action["componentId"]?.GetValue<string>() == "accounts" && action["action"]?.GetValue<string>() == "activate-account" && action["argument"]?.GetValue<string>() is { } accountId)
                         {
-                            operationNotice = "正在切换账户…"; operationRequestId = requestId;
+                            operationNotice = "正在切换账户…"; operationEventId = eventId;
                             operation = proxy.ActivateAccountAsync(accountId, stop.Token);
                         }
                         else
-                            completion = new() { ["requestId"] = requestId, ["success"] = accepted && operation is null
-                                && action["kind"]?.GetValue<string>() == "invoke" && action["action"]?.GetValue<string>() == "refresh" && state.Known };
+                            completion = new() { ["eventId"] = eventId, ["outcome"] = accepted && operation is null
+                                && action["kind"]?.GetValue<string>() == "invoke" && action["componentId"]?.GetValue<string>() == "refresh"
+                                && action["action"]?.GetValue<string>() == "refresh" && state.Known ? "confirmed" : "rejected" };
                     }
                 }
                 catch (Exception e) when (Unavailable(e))
                 {
                     // An unknown transport outcome never replays an action.
                     // Re-register only a newly read authoritative state.
-                    registered = false; completion = null;
+                    registered = false;
                 }
                 await Task.Delay(200, stop.Token);
             }
@@ -117,7 +133,37 @@ internal static class QuickSettingsRegistration
         or UnauthorizedAccessException or System.Security.Cryptography.CryptographicException
         or InvalidOperationException or JsonException or OperationCanceledException;
 
-    private static JsonObject Message(string type) => new() { ["protocol"] = 1, ["type"] = type };
+    private static JsonObject Message(string type) => new() { ["protocol"] = 2, ["type"] = type };
+
+    internal static JsonObject Manifest()
+    {
+        using var stream = typeof(QuickSettingsRegistration).Assembly.GetManifestResourceStream("CodexPool.Daemon.QuickSettings.manifest.json")
+            ?? throw new IOException("Quick Settings manifest unavailable.");
+        return JsonNode.Parse(stream)!.AsObject();
+    }
+
+    internal static JsonObject ContractState(JsonObject projection,string providerEpoch,ulong revision)
+    {
+        var components = new JsonArray();
+        foreach (var line in projection["lines"]!.AsArray().Select(x => x!.GetValue<string>()).Select((text,index) => (text,index)))
+            components.Add(new JsonObject { ["id"] = "notice-" + line.index, ["type"] = "text", ["subtitle"] = line.text });
+        components.Add(new JsonObject { ["id"] = "accounts", ["type"] = "list", ["icon"] = "person", ["action"] = "activate-account",
+            ["items"] = new JsonArray(projection["rows"]!.AsArray().OfType<JsonObject>().Select(row => (JsonNode)new JsonObject {
+                ["id"] = row["id"]!.DeepClone(),["title"] = row["title"]!.DeepClone(),["subtitle"] = row["subtitle"]!.DeepClone(),
+                ["selected"] = row["selected"]!.DeepClone(),["enabled"] = row["enabled"]!.DeepClone()
+            }).ToArray()) });
+        var footer = new JsonArray(new JsonObject { ["id"] = "refresh",["type"] = "button",["title"] = "刷新状态",["action"] = "refresh" });
+        var icon = projection["quotaIcon"]!.AsObject();
+        var tone = icon["accentArgb"]!.GetValue<uint>() switch {0xFF75DBAF => "success",0xFFFFC65F => "warning",0xFFFF7069 => "critical",_ => "neutral"};
+        return new JsonObject {
+            ["stateVersion"] = 2,["providerEpoch"] = providerEpoch,["revision"] = revision,["observedAt"] = DateTimeOffset.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"),
+            ["tile"] = new JsonObject { ["label"] = projection["tileLabel"]!.DeepClone(),["summary"] = projection["summary"]!.DeepClone(),
+                ["valueKnown"] = projection["canToggle"]!.DeepClone(),["value"] = projection["enabled"]!.DeepClone(),["canToggle"] = projection["canToggle"]!.DeepClone(),
+                ["unavailableReason"] = projection["canToggle"]!.GetValue<bool>() ? "" : "代理状态暂不可确认",
+                ["indicator"] = new JsonObject { ["kind"] = "ring",["known"] = icon["known"]!.DeepClone(),["value"] = icon["remaining"]!.DeepClone(),["exhausted"] = icon["exhausted"]!.DeepClone(),["tone"] = tone } },
+            ["components"] = components,["footer"] = footer
+        };
+    }
 
     internal static async Task<JsonObject> ReadAsync(HttpClient http, string directory, string path, CancellationToken token)
     {

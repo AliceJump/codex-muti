@@ -62,6 +62,12 @@ internal static class QuickSettingsTests
         Check(dynamic["tileLabel"]!.GetValue<string>() == "Account B" && !dynamic["quotaIcon"]!["known"]!.GetValue<bool>());
         Check(new QuotaIconState(30,false).AccentArgb == 0xFF75DBAF && new QuotaIconState(29,false).AccentArgb == 0xFFFFC65F);
         Check(new QuotaIconState(14,false).AccentArgb == 0xFFFF7069 && new QuotaIconState(null,false).AccentArgb == 0xFF96A1B1);
+        var manifest=QuickSettingsRegistration.Manifest();Check(manifest["manifestVersion"]!.GetValue<int>()==2 && manifest["id"]!.GetValue<string>()=="codex-pool");
+        var contract=QuickSettingsRegistration.ContractState(dynamic,"test-provider-epoch",7);
+        Check(contract["providerEpoch"]!.GetValue<string>()=="test-provider-epoch" && contract["revision"]!.GetValue<ulong>()==7);
+        Check(contract["tile"]!["label"]!.GetValue<string>()=="Account B" && !contract["tile"]!["indicator"]!["known"]!.GetValue<bool>());
+        var components=contract["components"]!.AsArray();Check(components.Single(x=>x!["id"]!.GetValue<string>()=="accounts")!["items"]!.AsArray().Count==2);
+        Check(!contract.ContainsKey("rows") && !contract.ContainsKey("quotaIcon"));
         var intent = Path.Combine(root,"service-intent");
         Check(ProxyServiceIntent.AllowsAutomaticStart(intent));
         ProxyServiceIntent.Confirm(intent,false);Check(!ProxyServiceIntent.AllowsAutomaticStart(intent));

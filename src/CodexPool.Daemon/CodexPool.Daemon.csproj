@@ -3,6 +3,8 @@
   <ItemGroup>
     <InternalsVisibleTo Include="CodexPool.SecurityTests" />
     <EmbeddedResource Include="Dashboard/*" />
+    <EmbeddedResource Include="QuickSettings/manifest.json" />
+    <Content Include="QuickSettings/manifest.json" Link="qse-manifest.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <ProjectReference Include="..\CodexPool.Core\CodexPool.Core.csproj" />
   </ItemGroup>
 

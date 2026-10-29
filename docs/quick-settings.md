@@ -14,6 +14,16 @@ CodexPool.Daemon.exe quick-settings "C:\path\qse-broker.exe" "C:\path\service\Co
 
 注册 helper 可在独立发布目录运行，不需要替换现用服务。它校验监听进程的安装路径、用户和会话，认证访问本机管理 API；本地管理密钥不进入 QSE Broker、Shell 或命令参数。状态只投影账户公开字段和缓存额度，不将完整请求历史发送给 Shell。
 
+当前使用 QSE 协议 v2：应用携带 `qse-manifest.json`，通过通用 install 绑定提供方路径；账户列表由标准 `list` 组件描述，底部操作由 `footer` 的标准 `button` 描述。框架中没有账户或代理分支。进程创建 providerEpoch，请求匹配 Broker/提供方 epoch 和 revision；确认结果的 ACK 丢失可补送同一结果及同一状态，绝不重做业务动作。
+
+实验宿主部署入口已迁入本仓库：
+
+```powershell
+.\scripts\Deploy-QuickSettings.ps1 -Force -FrameworkRoot D:\items\project\github_project\quick-settings-extensions
+```
+
+脚本只替换注册 helper，并调用 QSE 的通用框架部署/安装 API；保留现用代理进程。框架停用不终止业务进程。宿主 Shell 挂起时可能需要保持 Win+A 展开以完成适配器卸载；尚未作为无交互正式安装器交付。
+
 `proxy-service-intent.json` 仅保存已确认的服务运行意图，供新版本桌面启动器避免在用户关闭后再次隐式启动。启动继承此前认证服务的启动模式，不为使开关可用而新增迁移门禁绕过。账户切换仍受现有 Daemon 的资格、额度和生产门禁校验；失败保留原账户。
 
 额度使用本机 `status.usage` 的真实缓存窗口，未知显示未知，过期值标记缓存。底部“刷新状态”只重读本机状态，不等于上游额度刷新。自动切换设置仍由既有控制台管理，当前二级页没有额外阈值编辑器。
