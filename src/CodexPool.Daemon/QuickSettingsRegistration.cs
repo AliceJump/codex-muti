@@ -277,7 +277,7 @@ internal static class QuickSettingsRegistration
         return Window(18000, "5 小时") + "    " + Window(604800, "每周");
     }
 
-    private static async Task<JsonObject> ExchangeAsync(JsonObject request, string broker, CancellationToken token)
+    internal static async Task<JsonObject> ExchangeAsync(JsonObject request, string broker, CancellationToken token)
     {
         using var currentIdentity = WindowsIdentity.GetCurrent();
         using var self = Process.GetCurrentProcess();

@@ -1,6 +1,6 @@
 ﻿#requires -Version 5.1
 [CmdletBinding()]
-param([string]$RuntimeRoot='C:\QSE-Host')
+param([string]$RuntimeRoot='C:\QSE-Host',[ValidateRange(0,30)][int]$WaitSeconds=2)
 $ErrorActionPreference='Stop'
 Import-Module (Join-Path $PSScriptRoot 'QuickSettingsLifecycle.psm1')
 $runtime=Get-QseRuntime $RuntimeRoot;$lock=Enter-QsePluginLock $runtime
@@ -13,8 +13,16 @@ try{
         $null=Invoke-QseManagement $runtime @('provider-disable','codex-pool')
     }
     if($record){$null=Stop-QseProvider $runtime $record}
-    $null=Invoke-QseManagement $runtime @('uninstall','codex-pool')
+    $operation=$null
+    if($state.installed){$operation=Invoke-QseOwnedManagement $runtime $record 'unregister'}
+    elseif(Test-Path -LiteralPath $runtime.operationPath){
+        $saved=Get-Content -LiteralPath $runtime.operationPath -Raw -Encoding utf8 | ConvertFrom-Json
+        $known=Invoke-QseOwnedManagement $runtime $saved.record 'operation-status' $saved.operationId
+        if($known.kind -eq 'unregister'){$operation=$known;$record=$saved.record}
+    }
     if((Get-QsePlugin $runtime).installed){throw 'QSE has not confirmed removal of the plugin registration.'}
     if(Test-Path -LiteralPath $runtime.recordPath){Remove-Item -LiteralPath $runtime.recordPath}
-    [pscustomobject]@{plugin='codex-pool';registrationRemoved=$true;nativeCleanup='await-shell-snapshot';frameworkUntouched=$true;proxyServiceUntouched=$true}
+    if($operation){$operation=Wait-QseOperation $runtime $record $operation $WaitSeconds}
+    $native=if($operation -and $operation.nativeConfirmed){'confirmed'}elseif($operation){$operation.state}else{'unknown'}
+    [pscustomobject]@{plugin='codex-pool';registrationRemoved=$true;nativeCleanup=$native;operation=$operation;frameworkUntouched=$true;proxyServiceUntouched=$true}
 }finally{Exit-QsePluginLock $lock}

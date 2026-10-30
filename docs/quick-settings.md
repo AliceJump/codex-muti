@@ -29,19 +29,26 @@ CodexPool.Daemon.exe quick-settings "C:\path\qse-broker.exe" "C:\path\service\Co
 .\scripts\Start-QuickSettings.ps1
 # 显式撤销插件目录注册：
 .\scripts\Uninstall-QuickSettings.ps1
+# 固定 / 取消固定（目录提交和原生完成分别返回）：
+.\scripts\Set-QuickSettingsPinned.ps1 -Pinned $true
+.\scripts\Set-QuickSettingsPinned.ps1 -Pinned $false
+# 查询最近一次注册 / 固定 / 注销操作：
+.\scripts\Get-QuickSettingsOperation.ps1
 ```
 
-2026-10-30 起，这些脚本只管理 Codex Pool 的注册 helper 与目录绑定，不再部署、启动或停止共享 QSE。先在 QSE 仓库单独安装/启动框架；必须支持 `plugin-status/provider-enable/provider-disable/install-cas/uninstall/on-demand-v1`。`-RuntimeRoot` 默认 `C:\QSE-Host`；旧 `-FrameworkRoot` 参数仅为调用兼容而保留，不触发框架操作。
+2026-10-30 起，这些脚本只管理 Codex Pool 的注册 helper 与目录绑定，不再部署、启动或停止共享 QSE。先在 QSE 仓库单独安装/启动框架；必须支持 `plugin-status/provider-enable/provider-disable/install-cas/uninstall/on-demand-v1/owned-management-v1/native-confirmation-v1`。`-RuntimeRoot` 默认 `C:\QSE-Host`；旧 `-FrameworkRoot` 参数仅为调用兼容而保留，不触发框架操作。
 
-Provider 新包位于 `%LOCALAPPDATA%\Programs\CodexPool\QuickSettingsProvider\provider-版本号\`，由应用自己管理，QSE 只保存声明、路径、启动授权及用户固定选择。原服务和账户数据目录保持原位。旧 `C:\QSE-Host\CodexPool\provider-*` 仍可用于历史恢复/卸载，新发布不再使用它。
+Provider 新包位于 `%LOCALAPPDATA%\Programs\CodexPool\QuickSettingsProvider\provider-版本号\`，由应用自己管理，QSE 只保存声明、路径、启动授权及用户固定选择。同目录的 `CodexPool.QseManager.exe` 是复用 Daemon 程序集的轻量管理 apphost，操作结束就退出，避免管理命令被误认为等待注册的 Provider。安装时以 `--owner` 授权该路径；它通过标准 `plugin.*` 管理 API 只管理 Codex Pool。原服务和账户数据目录保持原位。旧 `C:\QSE-Host\CodexPool\provider-*` 保留用于历史恢复，新版管理接口要求更新插件后使用。
 
 Manifest 声明 `activation.mode:on-demand`，安装时显式传入 `--allow-activation`。桌面 Broker 校验 EXE 路径、摘要、所有者和当前用户/会话，再以固定参数 `qse-provider <broker.exe> codex-pool <nonce>` 拉起本应用 EXE。应用从自己目录的 `qse-provider.json` 读取服务路径及数据目录；配置不包含密钥，也不由 QSE 解析。详情入口只唤醒；主开关保留用户启停目标，待新状态校验，目标已满足时只读确认。未知结果不自动重放。
 
 Deploy 在插件锁内核对旧绑定和无 pending 状态，停用并停止专用 helper，再比较旧路径安装新版本；保留用户固定选择和停用状态。新 helper 未能注册时恢复旧绑定、部署记录及先前在线的 helper。`-ProviderPackage` 可指定已发布且带有 `qse-manifest.json` 的 helper 目录，否则使用 dotnet publish。实际代理的监听 PID 被排除，不会被停止。
 
-Stop 保留注册和固定选择，持久化停用并撤销旧提供方会话；旧实例无法重新注册。Start 要求插件已安装且路径匹配，只启用并拉起自己的 helper，卸载后不会静默重装。Uninstall 停用/停止 helper、撤销目录注册并删除本插件部署记录，重复执行幂等；保留旧发布包供恢复，返回 `await-shell-snapshot` 表示尚未确认原生 Shell 移除。以上流程均不停止实际代理或其他插件；有业务操作待确认时拒绝停止、更新和卸载。
+Stop 保留注册和固定选择，持久化停用并撤销旧提供方会话；旧实例无法重新注册。Start 要求插件已安装且路径匹配，只启用并拉起自己的 helper，卸载后不会静默重装。Uninstall 停用/停止 helper，再通过应用自己的 owner API 撤销注册，确认目录已删除后移除部署记录；保留旧发布包及最近操作回执供查询。以上流程均不停止实际代理或其他插件；有业务操作待确认时拒绝停止、更新和卸载。
 
-提供方遵守 QSE 活动租约：面板可见或正在处理操作时继续运行，无活动约 60 秒后自行退出；注册与固定选择保留，下次点击再唤醒。空闲退出不同于 Stop 的显式停用，后者不会被点击重新拉起。统一固定/取消固定/原生移除确认 API、安装器断电恢复仍未实现。框架自身升级仍可能等待 Shell 恢复执行；插件日常升级不再要求卸载共享适配器。
+管理命令返回 `operationId/state/catalogCommitted/nativeConfirmed`。`awaiting-shell` 只表示目录已提交，`complete` 才表示原生完成；`superseded` 表示被后续意图覆盖。Shell 收起或挂起时不会强行展开它，后台清理等待恢复。默认最多等 2 秒，可用 `-WaitSeconds 0` 立即返回。最近操作保存在 Provider 根目录的 `last-operation.json`，注销后仍可查询；这里没有密钥。未知传输结果只按保存的操作 ID 读回，不重新提交变更。注册实例和固定版本的 CAS 防止旧请求覆盖新选择或删除重装后的磁贴。
+
+提供方遵守 QSE 活动租约：面板可见或正在处理操作时继续运行，无活动约 60 秒后自行退出；注册与固定选择保留，下次点击再唤醒。空闲退出不同于 Stop 的显式停用，后者不会被点击重新拉起。统一管理 API 和原生结果确认已实现；完整安装器文件删除、断电恢复仍待验收。框架自身升级仍可能等待 Shell 恢复执行；插件日常升级不再要求卸载共享适配器。
 
 `proxy-service-intent.json` 仅保存已确认的服务运行意图，供新版本桌面启动器避免在用户关闭后再次隐式启动。启动继承此前认证服务的启动模式，不为使开关可用而新增迁移门禁绕过。账户切换仍受现有 Daemon 的资格、额度和生产门禁校验；失败保留原账户。
 
@@ -64,3 +71,5 @@ dotnet run --project tests/CodexPool.SecurityTests -c Release -- --quick-setting
 2026-10-30 另在真实 QSE Broker 与第二个独立示例提供方并存时验证：插件启停、停用期间更新、在线更新、故意启动失败后的回滚、卸载、卸载后 Start 拒绝及重新安装恢复。各阶段 Broker/引擎/Shell/实际代理与示例 PID 未变，示例持续在线；没有关闭代理或切换真实账户。这是插件运维验收，不代替完整 Shell、安装器与 M5 矩阵。
 
 同日按需阶段另通过原生详情箭头唤醒 Codex Pool，两个独立 Provider 收起面板后自行空闲退出，再次通过原生详情箭头创建新的 Codex Pool 进程；示例的冷启动显式启停和重复唤醒单实例也已确认。测试基线内共享进程及实际代理 PID 未变，未切换真实账户；框架维护前后曾观察到 Shell 重建，不据此宣布同进程热升级或完整 M5 通过。
+
+第三阶段实机通过 owner 归属拒绝、两个插件独立固定/取消固定、详情打开时注销并关闭页面、重装新身份和原固定选择恢复，以及收起时等待、展开后四个原生集合确认移除。另一插件及实际代理保持不变，管理操作不需要示例 Provider 常驻。定向安全测试还模拟变更响应丢失，验证只读查询回执、没有重复提交。更新脚本在发出变更前标记事务已开始，未知返回也进入实际状态检查与安全回滚。

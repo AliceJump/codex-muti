@@ -27,19 +27,25 @@ try{
     $manifest=Join-Path $providerDir 'qse-manifest.json'
     $declaration=Get-Content -LiteralPath $manifest -Raw -Encoding utf8 | ConvertFrom-Json
     if($declaration.id -ne 'codex-pool'){throw 'The provider manifest does not declare Codex Pool.'}
+    $managerPath=Join-Path $providerDir 'CodexPool.QseManager.exe'
+    Copy-Item -LiteralPath (Join-Path $providerDir 'CodexPool.Daemon.exe') -Destination $managerPath -Force
     $dataDirectory=if($env:CODEX_POOL_DATA_DIR){$env:CODEX_POOL_DATA_DIR}elseif($old){$old.dataDirectory}else{Join-Path $env:LOCALAPPDATA 'CodexPool'}
     if($declaration.PSObject.Properties['activation']){[IO.File]::WriteAllText((Join-Path $providerDir 'qse-provider.json'),(@{configVersion=1;servicePath=$servicePath;dataDirectory=$dataDirectory} | ConvertTo-Json),[Text.UTF8Encoding]::new($false))}
-    $record=[pscustomobject]@{kind='codex-pool';version=$version;brokerPath=$runtime.broker;providerPath=(Join-Path $providerDir 'CodexPool.Daemon.exe');servicePath=$servicePath;dataDirectory=$dataDirectory}
+    $record=[pscustomobject]@{kind='codex-pool';version=$version;brokerPath=$runtime.broker;providerPath=(Join-Path $providerDir 'CodexPool.Daemon.exe');managerPath=$managerPath;servicePath=$servicePath;dataDirectory=$dataDirectory}
     $changed=$false
     try{
-        if($before.installed){$null=Invoke-QseManagement $runtime @('provider-disable','codex-pool');$changed=$true}
+        if($before.installed){$changed=$true;$null=Invoke-QseManagement $runtime @('provider-disable','codex-pool')}
         if($old){$null=Stop-QseProvider $runtime $old}
         $expected=if($before.installed){$before.providerPath}else{'-'}
-        $null=Install-QseBinding $runtime $manifest $record.providerPath $expected;$changed=$true
+        $changed=$true;$null=Install-QseBinding $runtime $manifest $record.providerPath $expected
         Write-QseRecord $runtime $record
         if($before.installed -and $before.disabled){$state=Get-QsePlugin $runtime}
         else{$null=Invoke-QseManagement $runtime @('provider-enable','codex-pool');Start-QseProvider $runtime $record;$state=Wait-QseProvider $runtime $record}
-        [pscustomobject]@{plugin='codex-pool';version=$version;contractVersion=2;registered=$state.online;disabled=$state.disabled;added=$state.added;frameworkUntouched=$true;proxyServiceUntouched=$true}
+        $owner=Invoke-QseOwnedManagement $runtime $record 'status'
+        if($owner.registrationId -ne $state.registrationId){throw 'The dedicated management client is not bound to this registration.'}
+        $registration=Invoke-QseOwnedManagement $runtime $record 'operation-status' $owner.registerOperation
+        $registration=Wait-QseOperation $runtime $record $registration 2
+        [pscustomobject]@{plugin='codex-pool';version=$version;contractVersion=2;registered=$state.online;disabled=$state.disabled;added=$state.added;operationId=$registration.operationId;nativeState=$registration.state;nativeConfirmed=$registration.nativeConfirmed;frameworkUntouched=$true;proxyServiceUntouched=$true}
     }catch{
         $failure=$_
         if($changed){

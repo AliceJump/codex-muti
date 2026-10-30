@@ -9,7 +9,8 @@ function Get-QseRuntime([string]$RuntimeRoot){
     $broker=[IO.Path]::GetFullPath((Join-Path $root 'Registered/qse-broker.exe'))
     $control=Join-Path $root 'Registered/qse-control.exe'
     if(-not [string]::Equals([IO.Path]::GetFullPath($framework.brokerPath),$broker,[StringComparison]::OrdinalIgnoreCase) -or -not(Test-Path -LiteralPath $broker) -or -not(Test-Path -LiteralPath $control)){throw 'The installed QSE runtime paths are invalid.'}
-    [pscustomobject]@{root=$root;broker=$broker;control=$control;recordPath=(Join-Path $root 'codex-pool-deployment.json');providerRoot=(Join-Path $env:LOCALAPPDATA 'Programs/CodexPool/QuickSettingsProvider')}
+    $providerRoot=Join-Path $env:LOCALAPPDATA 'Programs/CodexPool/QuickSettingsProvider'
+    [pscustomobject]@{root=$root;broker=$broker;control=$control;recordPath=(Join-Path $root 'codex-pool-deployment.json');providerRoot=$providerRoot;operationPath=(Join-Path $providerRoot 'last-operation.json')}
 }
 function Invoke-QseManagement($Runtime,[string[]]$Arguments){
     $encoding=[Console]::OutputEncoding
@@ -27,7 +28,7 @@ function Invoke-QseManagement($Runtime,[string[]]$Arguments){
 function Assert-QseLifecycle($Runtime){
     $capabilities=Invoke-QseManagement $Runtime @('capabilities')
     if($capabilities.protocol -ne 2 -or -not $capabilities.PSObject.Properties['management']){throw 'The QSE framework needs the plugin-lifecycle update. Update it separately first.'}
-    foreach($feature in @('plugin-status','provider-enable','provider-disable','install-cas','uninstall','on-demand-v1')){if($feature -notin $capabilities.management){throw 'The installed QSE framework lacks required lifecycle capabilities.'}}
+    foreach($feature in @('plugin-status','provider-enable','provider-disable','install-cas','uninstall','on-demand-v1','owned-management-v1','native-confirmation-v1')){if($feature -notin $capabilities.management){throw 'The installed QSE framework lacks required lifecycle capabilities.'}}
 }
 function Get-QsePlugin($Runtime){Invoke-QseManagement $Runtime @('plugin-status','codex-pool')}
 function Get-QseRecord($Runtime){if(Test-Path -LiteralPath $Runtime.recordPath){Get-Content -LiteralPath $Runtime.recordPath -Raw -Encoding utf8 | ConvertFrom-Json}}
@@ -38,6 +39,10 @@ function Assert-QseRecord($Runtime,$Record){
     $applicationRoot=[IO.Path]::GetFullPath($Runtime.providerRoot)+'\'
     if((-not $provider.StartsWith($ownedRoot,[StringComparison]::OrdinalIgnoreCase) -and -not $provider.StartsWith($applicationRoot,[StringComparison]::OrdinalIgnoreCase)) -or [IO.Path]::GetFileName($provider) -ne 'CodexPool.Daemon.exe' -or [string]::Equals($provider,[IO.Path]::GetFullPath($Record.servicePath),[StringComparison]::OrdinalIgnoreCase) -or -not [string]::Equals([IO.Path]::GetFullPath($Record.brokerPath),$Runtime.broker,[StringComparison]::OrdinalIgnoreCase)){
         throw 'The helper deployment record does not identify a dedicated Codex Pool provider.'
+    }
+    if($Record.PSObject.Properties['managerPath']){
+        $manager=[IO.Path]::GetFullPath($Record.managerPath)
+        if(-not [string]::Equals($manager,(Join-Path (Split-Path $provider) 'CodexPool.QseManager.exe'),[StringComparison]::OrdinalIgnoreCase)){throw 'The management client is not the dedicated application controller.'}
     }
 }
 function Enter-QsePluginLock($Runtime){
@@ -105,6 +110,36 @@ function Install-QseBinding($Runtime,[string]$Manifest,[string]$Provider,[string
     $arguments=@('install',$Manifest,$Provider,$Expected)
     $declaration=Get-Content -LiteralPath $Manifest -Raw -Encoding utf8 | ConvertFrom-Json
     if($declaration.PSObject.Properties['activation']){$arguments+='--allow-activation'}
+    $manager=Join-Path (Split-Path $Provider) 'CodexPool.QseManager.exe'
+    if(Test-Path -LiteralPath $manager){$arguments+=@('--owner',$manager)}
     Invoke-QseManagement $Runtime $arguments
 }
-Export-ModuleMember -Function Get-QseRuntime,Invoke-QseManagement,Assert-QseLifecycle,Get-QsePlugin,Get-QseRecord,Assert-QseRecord,Enter-QsePluginLock,Exit-QsePluginLock,Write-QseRecord,Stop-QseProvider,Start-QseProvider,Wait-QseProvider,Resolve-QseServicePath,Install-QseBinding
+function Invoke-QseOwnedManagement($Runtime,$Record,[string]$Action,[string]$OperationId){
+    Assert-QseRecord $Runtime $Record
+    if(-not $Record.PSObject.Properties['managerPath']){throw 'Update this plugin before using its owned management client.'}
+    if($Action -notin @('status','pin','unpin','unregister','operation-status')){throw 'Unknown registration management operation.'}
+    $encoding=[Console]::OutputEncoding
+    try{
+        [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
+        $arguments=@('qse-manage',$Runtime.broker,$Action);if($OperationId){$arguments+=$OperationId}
+        $text=& $Record.managerPath @arguments;$code=$LASTEXITCODE
+    }finally{[Console]::OutputEncoding=$encoding}
+    $result=($text -join "`n") | ConvertFrom-Json
+    if($result.PSObject.Properties['operationId'] -and $result.operationId){
+        New-Item -ItemType Directory -Path $Runtime.providerRoot -Force | Out-Null
+        $temporary=$Runtime.operationPath+'.'+[Guid]::NewGuid().ToString('N')+'.tmp'
+        [IO.File]::WriteAllText($temporary,(@{record=$Record;operationId=$result.operationId} | ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))
+        if(Test-Path -LiteralPath $Runtime.operationPath){[IO.File]::Replace($temporary,$Runtime.operationPath,[NullString]::Value)}else{[IO.File]::Move($temporary,$Runtime.operationPath)}
+    }
+    if($code -ne 0){throw 'The management result is unknown. Query the saved operation before taking further action; no mutation was replayed.'}
+    $result
+}
+function Wait-QseOperation($Runtime,$Record,$Operation,[int]$Seconds=2){
+    if($Seconds -lt 0 -or $Seconds -gt 30){throw 'Operation wait must be between 0 and 30 seconds.'}
+    $deadline=[DateTime]::UtcNow.AddSeconds($Seconds);$current=$Operation
+    while($current.state -eq 'awaiting-shell' -and [DateTime]::UtcNow -lt $deadline){
+        Start-Sleep -Milliseconds 200;$current=Invoke-QseOwnedManagement $Runtime $Record 'operation-status' $Operation.operationId
+    }
+    $current
+}
+Export-ModuleMember -Function Get-QseRuntime,Invoke-QseManagement,Assert-QseLifecycle,Get-QsePlugin,Get-QseRecord,Assert-QseRecord,Enter-QsePluginLock,Exit-QsePluginLock,Write-QseRecord,Stop-QseProvider,Start-QseProvider,Wait-QseProvider,Resolve-QseServicePath,Install-QseBinding,Invoke-QseOwnedManagement,Wait-QseOperation

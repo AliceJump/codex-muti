@@ -63,6 +63,24 @@ internal static class QuickSettingsTests
         Check(new QuotaIconState(30,false).AccentArgb == 0xFF75DBAF && new QuotaIconState(29,false).AccentArgb == 0xFFFFC65F);
         Check(new QuotaIconState(14,false).AccentArgb == 0xFFFF7069 && new QuotaIconState(null,false).AccentArgb == 0xFF96A1B1);
         var manifest=QuickSettingsRegistration.Manifest();Check(manifest["manifestVersion"]!.GetValue<int>()==2 && manifest["id"]!.GetValue<string>()=="codex-pool");
+        var registration=new System.Text.Json.Nodes.JsonObject { ["protocol"]=2,["type"]="framework.pluginStatus",["id"]="codex-pool",["installed"]=true,["registrationId"]=Guid.NewGuid().ToString(),["nativeRevision"]=1 };
+        var sent=new List<string>();
+        var managed=await QuickSettingsManagement.ExecuteAsync("pin",null,request=>{
+            var type=request["type"]!.GetValue<string>();sent.Add(type);
+            if(type=="plugin.status")return Task.FromResult((System.Text.Json.Nodes.JsonObject)registration.DeepClone());
+            if(type=="plugin.pin")throw new IOException("Synthetic response loss.");
+            Check(type=="plugin.operationStatus");return Task.FromResult(new System.Text.Json.Nodes.JsonObject { ["protocol"]=2,["type"]="framework.operation",["operationId"]=request["operationId"]!.DeepClone(),["state"]="awaiting-shell",["catalogCommitted"]=true,["nativeConfirmed"]=false,["target"]=new System.Text.Json.Nodes.JsonObject{["id"]="codex-pool"} });
+        });
+        Check(managed.Exit==0 && managed.Response["state"]!.GetValue<string>()=="awaiting-shell" && !managed.Response["nativeConfirmed"]!.GetValue<bool>());
+        Check(sent.Count(x=>x=="plugin.pin")==1 && sent.Count(x=>x=="plugin.operationStatus")==1);
+        sent.Clear();var unknownManagement=await QuickSettingsManagement.ExecuteAsync("unregister",null,request=>{
+            var type=request["type"]!.GetValue<string>();sent.Add(type);
+            if(type=="plugin.status")return Task.FromResult((System.Text.Json.Nodes.JsonObject)registration.DeepClone());
+            throw new IOException("Synthetic management outage.");
+        });
+        Check(unknownManagement.Exit==2 && unknownManagement.Response["state"]!.GetValue<string>()=="unknown" && unknownManagement.Response["catalogCommitted"] is null && !unknownManagement.Response["nativeConfirmed"]!.GetValue<bool>());
+        Check(sent.Count(x=>x=="plugin.unregister")==1);
+        registration["id"]="other-plugin";var foreignRejected=false;try{QuickSettingsManagement.Request(registration,"pin",Guid.NewGuid().ToString());}catch(IOException){foreignRejected=true;}Check(foreignRejected);
         Check(manifest["activation"]!["mode"]!.GetValue<string>()=="on-demand");
         Check(await QuickSettingsProviderEntry.RunAsync([])==2);
         Check(await QuickSettingsProviderEntry.RunAsync([Path.Combine(root,"missing-broker.exe"),"other-plugin",Guid.NewGuid().ToString()])==2);

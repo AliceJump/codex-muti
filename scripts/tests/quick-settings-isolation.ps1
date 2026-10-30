@@ -15,11 +15,13 @@ try{
     $runtime=Get-QseRuntime $root
     $record=[pscustomobject]@{kind='codex-pool';providerPath=(Join-Path $root 'CodexPool/provider-fixture/CodexPool.Daemon.exe');servicePath=(Join-Path $root 'application/CodexPool.Daemon.exe');brokerPath=$broker;dataDirectory=(Join-Path $root 'data')}
     Assert-QseRecord $runtime $record
+    $record|Add-Member -NotePropertyName managerPath -NotePropertyValue (Join-Path (Split-Path $record.providerPath) 'CodexPool.QseManager.exe');Assert-QseRecord $runtime $record
+    $manager=$record.managerPath;$record.managerPath=Join-Path $root 'unrelated/CodexPool.QseManager.exe';Reject {Assert-QseRecord $runtime $record};$record.PSObject.Properties.Remove('managerPath')
     $legacyProvider=$record.providerPath;$record.providerPath=Join-Path $runtime.providerRoot 'provider-fixture/CodexPool.Daemon.exe';Assert-QseRecord $runtime $record;$record.providerPath=$legacyProvider
     $service=$record.servicePath;$record.providerPath=$service;Reject {Assert-QseRecord $runtime $record}
     $record.providerPath=Join-Path $root 'Registered/qse-broker.exe';Reject {Assert-QseRecord $runtime $record}
     $record.providerPath=Join-Path $root 'CodexPool/../Registered/CodexPool.Daemon.exe';Reject {Assert-QseRecord $runtime $record}
-    foreach($relative in @('scripts/Deploy-QuickSettings.ps1','scripts/Start-QuickSettings.ps1','scripts/Stop-QuickSettings.ps1','scripts/Uninstall-QuickSettings.ps1','scripts/QuickSettingsLifecycle.psm1')){
+    foreach($relative in @('scripts/Deploy-QuickSettings.ps1','scripts/Start-QuickSettings.ps1','scripts/Stop-QuickSettings.ps1','scripts/Uninstall-QuickSettings.ps1','scripts/Set-QuickSettingsPinned.ps1','scripts/Get-QuickSettingsOperation.ps1','scripts/QuickSettingsLifecycle.psm1')){
         $path=Join-Path $repo $relative;$tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($path,[ref]$tokens,[ref]$errors);Check ($errors.Count -eq 0) ('Parse failed: '+$relative)
         $source=[IO.File]::ReadAllText($path)
         Check ($source -notmatch '(Deploy|Start|Stop)-FrameworkHost\.ps1') ('Shared framework lifecycle invoked by '+$relative)
