@@ -30,17 +30,20 @@ public static class QuotaDisplay
     public static DisplayQuotaWindow? TrayWindow(JsonElement quota, JsonElement settings = default)
     {
         var policy = settings.ValueKind == JsonValueKind.Object ? settings.Deserialize<PoolSettings>(JsonSerializerOptions.Web) ?? new() : new PoolSettings();
-        var windows = Windows(quota).Where(w => w.Family == "codex"
-            && !(w.Remaining <= 0 && AllowsContinuation(quota))).ToArray();
+        var reported = Windows(quota).Where(w => w.Family == "codex").ToArray();
+        var windows = reported.Where(w => !(w.Remaining <= 0 && AllowsContinuation(quota))).ToArray();
         bool Weekly(DisplayQuotaWindow w) => w.Seconds == 604800;
         bool Limited(DisplayQuotaWindow w) => w.Remaining is { } remaining
             && !(remaining <= 0 && AllowsContinuation(quota))
             && (remaining <= 0 || policy.AutoSwitch && 100 - remaining >= policy.Threshold(w.Seconds));
         // Weekly usage being numerically higher does not make it a routing limit.
         // Show a limiting window first; otherwise retain the ordinary short window.
+        // Weekly-only plans use their weekly window, but an unknown or suppressed
+        // short window must not be replaced by a healthy weekly percentage.
         return windows.Where(Limited).OrderByDescending(Weekly).ThenBy(w => w.Remaining).FirstOrDefault()
             ?? windows.Where(w => !Weekly(w)).OrderBy(w => w.Remaining is null)
-                .ThenByDescending(w => w.Kind is "5h" or "primary_window").ThenBy(w => w.Seconds ?? int.MaxValue).FirstOrDefault();
+                .ThenByDescending(w => w.Kind is "5h" or "primary_window").ThenBy(w => w.Seconds ?? int.MaxValue).FirstOrDefault()
+            ?? (reported.All(Weekly) ? windows.FirstOrDefault(Weekly) : null);
     }
     public static string State(JsonElement quota)
     {
