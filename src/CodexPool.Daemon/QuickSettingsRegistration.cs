@@ -19,12 +19,17 @@ internal static class QuickSettingsRegistration
     private const int MaxFrame = 32768;
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
-    internal static async Task<int> RunAsync(string[] args, string directory, string? activationNonce = null)
+    internal static async Task<int> RunAsync(string[] args, string directory, string? activationNonce = null,
+        Func<CancellationToken,Task<ProxySnapshot>>? readOverride = null,
+        Func<JsonObject,string,CancellationToken,Task<JsonObject>>? exchangeOverride = null,
+        CancellationToken cancellation = default, TimeSpan? unavailableExitAfter = null)
     {
         if (args.Length != 2 || !Path.IsPathFullyQualified(args[0]) || !File.Exists(args[0]))
             return 2;
         var broker = Path.GetFullPath(args[0]);
-        using var stop = new CancellationTokenSource();
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+        var lastBrokerContact=Stopwatch.GetTimestamp();
+        var unavailableTimeout=unavailableExitAfter ?? TimeSpan.FromSeconds(60);
         ConsoleCancelEventHandler cancel = (_, e) => { e.Cancel = true; stop.Cancel(); };
         Console.CancelKeyPress += cancel;
         using var http = new HttpClient(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false })
@@ -50,16 +55,20 @@ internal static class QuickSettingsRegistration
                 {
                     if (operation is { IsCompleted: true })
                     {
-                        var result = await operation;
+                        ProxyOperation result;
+                        try{result=await operation;}
+                        catch(Exception failure) when(Unavailable(failure)){result=new(false,"操作结果无法确认，未自动重试");}
                         operationNotice = result.Message;
                         completion = new() { ["eventId"] = operationEventId, ["outcome"] = result.Success ? "confirmed" : "rejected" };
                         operation = null;
                     }
-                    var state = await proxy.ReadAsync(stop.Token);
+                    var state = await (readOverride is null ? proxy.ReadAsync(stop.Token) : readOverride(stop.Token));
                     if (state.Known) lastKnownRunning = state.Running;
                     var current = Presentation(state, lastKnownRunning, operationNotice);
                     var changed = !JsonNode.DeepEquals(current, previous) || completion is not null || publishAfterRegister;
-                    if (changed) ++revision;
+                    // A result awaiting ACK owns an immutable state/revision.
+                    // Re-register that exact state until its receipt is resolved.
+                    if (changed && completionState is null) ++revision;
                     previous = (JsonObject)current.DeepClone();
                     current["revision"] = revision;
                     var publishedState = ContractState(current, providerEpoch, revision);
@@ -68,10 +77,10 @@ internal static class QuickSettingsRegistration
                     if (!registered)
                     {
                         request = Message("plugin.register");
-                        var capabilities = await ExchangeAsync(Message("framework.hello"), broker, stop.Token);
+                        var capabilities = await (exchangeOverride ?? ExchangeAsync)(Message("framework.hello"), broker, stop.Token);
                         if (capabilities["manifestVersion"]?.GetValue<int>() != 2 || capabilities["stateVersion"]?.GetValue<int>() != 2)
                             throw new IOException("Unsupported Quick Settings contract.");
-                        request["id"] = Id;request["manifest"] = Manifest();request["state"] = publishedState;
+                        request["id"] = Id;request["manifest"] = Manifest();request["state"] = completionState?.DeepClone() ?? publishedState;
                         if (activationNonce is not null) request["activationNonce"] = activationNonce;
                     }
                     else
@@ -81,16 +90,17 @@ internal static class QuickSettingsRegistration
                         if (completionState is not null) request["state"] = completionState.DeepClone();
                         if (completion is not null) request["result"] = completion.DeepClone();
                     }
-                    var response = await ExchangeAsync(request, broker, stop.Token);
+                    var response = await (exchangeOverride ?? ExchangeAsync)(request, broker, stop.Token);
                     if (response["protocol"]?.GetValue<int>() != 2 || response["type"]?.GetValue<string>() == "error")
                     {
                         completion = null;completionState = null;
                         throw new IOException("Registration rejected.");
                     }
                     var responseEpoch = response["brokerEpoch"]?.GetValue<string>() ?? throw new IOException("Broker epoch unavailable.");
+                    lastBrokerContact=Stopwatch.GetTimestamp();
                     if (!registered && brokerEpoch is not null && brokerEpoch != responseEpoch) { completion = null;completionState = null; }
                     brokerEpoch = responseEpoch;
-                    publishAfterRegister = !registered;
+                    publishAfterRegister = !registered || completionState is not null;
                     if(registered){completion = null;completionState = null;}
                     registered = true;
                     // The framework leases activity while Quick Settings is visible
@@ -99,14 +109,14 @@ internal static class QuickSettingsRegistration
                         return 0;
                     if (response["event"] is JsonObject action)
                     {
-                        var eventId = action["eventId"]!.GetValue<string>();
+                        var eventId = Required<string>(action,"eventId");
                         var accepted = action["id"]?.GetValue<string>() == Id
                             && action["expectedRevision"]?.GetValue<ulong>() == revision
                             && action["providerEpoch"]?.GetValue<string>() == providerEpoch && action["brokerEpoch"]?.GetValue<string>() == brokerEpoch;
                         if (accepted && operation is null && action["kind"]?.GetValue<string>() == "setEnabled")
                         {
                             operationNotice = "操作处理中…"; operationEventId = eventId;
-                            operation = proxy.SetRunningAsync(action["value"]!.GetValue<bool>(), stop.Token);
+                            operation = proxy.SetRunningAsync(Required<bool>(action,"value"), stop.Token);
                         }
                         else if (accepted && operation is null && action["kind"]?.GetValue<string>() == "invoke"
                             && action["componentId"]?.GetValue<string>() == "open-management" && action["action"]?.GetValue<string>() == "open-management")
@@ -131,6 +141,7 @@ internal static class QuickSettingsRegistration
                     // An unknown transport outcome never replays an action.
                     // Re-register only a newly read authoritative state.
                     registered = false;
+                    if(activationNonce is not null && operation is null && Stopwatch.GetElapsedTime(lastBrokerContact)>=unavailableTimeout)return 0;
                 }
                 await Task.Delay(200, stop.Token);
             }
@@ -143,6 +154,12 @@ internal static class QuickSettingsRegistration
     internal static bool Unavailable(Exception e) => e is IOException or HttpRequestException or System.ComponentModel.Win32Exception or ArgumentException
         or UnauthorizedAccessException or System.Security.Cryptography.CryptographicException
         or InvalidOperationException or JsonException or OperationCanceledException;
+    internal static T Required<T>(JsonObject value,string field) where T:notnull
+        => value[field] is { } node ? JsonSerializer.Deserialize<T>(node.ToJsonString()) ?? throw new JsonException("Required status field unavailable.") : throw new JsonException("Required status field unavailable.");
+    internal static IReadOnlyList<JsonObject> Accounts(JsonObject status){
+        if(status["accounts"] is not JsonArray values)throw new JsonException("Account list unavailable.");
+        var result=new List<JsonObject>();foreach(var value in values){if(value is not JsonObject account)throw new JsonException("Invalid account list.");_ = Required<string>(account,"id");result.Add(account);}return result;
+    }
 
     private static JsonObject Message(string type) => new() { ["protocol"] = 2, ["type"] = type };
 
@@ -211,26 +228,23 @@ internal static class QuickSettingsRegistration
     {
         var lines = new JsonArray();
         var rows = new JsonArray();
-        var tileLabel = state.Known && !state.Running ? "代理未启动" : "未选择账户";
+        var tileLabel = !state.Known ? "代理状态暂不可确认" : !state.Running ? "代理未启动" : "未选择账户";
         var tileIcon = new QuotaIconState(null, false);
         if (state.Status is { } status)
         {
-            var accounts = status["accounts"]!.AsArray();
+            var accounts = Accounts(status);
             var usage = status["usage"] as JsonArray;
             var availability = status["accountAvailability"] as JsonArray;
             if(accounts.Count == 0) lines.Add("暂无账户，请先在 Codex Pool 中登录");
-            foreach (var account in accounts.OfType<JsonObject>().Take(32))
+            var activeId=status["activeAccountId"]?.GetValue<string>();
+            var active=accounts.FirstOrDefault(x=>Required<string>(x,"id")==activeId);
+            if(active is not null){tileLabel=active["name"]?.GetValue<string>() ?? "未命名账户";var activeQuota=usage?.OfType<JsonObject>().FirstOrDefault(x=>x["accountId"]?.GetValue<string>()==activeId);var window=QuotaDisplay.TrayWindow(JsonSerializer.SerializeToElement(activeQuota),JsonSerializer.SerializeToElement(status["settings"]));tileIcon=new(window?.Remaining,window?.Remaining is <=0);}
+            var visible=accounts.Take(32).ToList();if(active is not null && !visible.Contains(active)){visible=accounts.Take(31).ToList();visible.Add(active);}
+            foreach (var account in visible)
             {
-                var id = account["id"]!.GetValue<string>();
+                var id = Required<string>(account,"id");
                 var quota = usage?.OfType<JsonObject>().FirstOrDefault(x => x["accountId"]?.GetValue<string>() == id);
                 var routing = availability?.OfType<JsonObject>().FirstOrDefault(x => x["accountId"]?.GetValue<string>() == id);
-                if (status["activeAccountId"]?.GetValue<string>() == id)
-                {
-                    tileLabel = account["name"]?.GetValue<string>() ?? "未命名账户";
-                    var window = QuotaDisplay.TrayWindow(JsonSerializer.SerializeToElement(quota),
-                        JsonSerializer.SerializeToElement(status["settings"]));
-                    tileIcon = new(window?.Remaining, window?.Remaining is <= 0);
-                }
                 rows.Add(new JsonObject {
                     ["id"] = id, ["title"] = account["name"]?.GetValue<string>() ?? "未命名账户",
                     ["subtitle"] = QuotaCaption(quota), ["action"] = "activate-account",

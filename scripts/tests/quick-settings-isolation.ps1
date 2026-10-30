@@ -13,6 +13,11 @@ try{
     [IO.File]::WriteAllText($broker,'');[IO.File]::WriteAllText($control,'')
     [IO.File]::WriteAllText((Join-Path $root 'framework-deployment.json'),(@{brokerPath=$broker} | ConvertTo-Json))
     $runtime=Get-QseRuntime $root
+    $previousData=$env:CODEX_POOL_DATA_DIR
+    try{
+        $env:CODEX_POOL_DATA_DIR=$null;Reject {Resolve-QseDataDirectory $null $null};Reject {Resolve-QseDataDirectory $null 'relative/data'};Reject {Resolve-QseDataDirectory $null '//server/share/data'}
+        Check ((Resolve-QseDataDirectory ([pscustomobject]@{dataDirectory=(Join-Path $root 'data')}) $null) -eq (Join-Path $root 'data')) 'Existing absolute data path was not preserved.'
+    }finally{$env:CODEX_POOL_DATA_DIR=$previousData}
     $record=[pscustomobject]@{kind='codex-pool';providerPath=(Join-Path $root 'CodexPool/provider-fixture/CodexPool.Daemon.exe');servicePath=(Join-Path $root 'application/CodexPool.Daemon.exe');brokerPath=$broker;dataDirectory=(Join-Path $root 'data')}
     Assert-QseRecord $runtime $record
     $record|Add-Member -NotePropertyName managerPath -NotePropertyValue (Join-Path (Split-Path $record.providerPath) 'CodexPool.QseManager.exe');Assert-QseRecord $runtime $record

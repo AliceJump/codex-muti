@@ -106,6 +106,13 @@ function Resolve-QseServicePath([string]$Repository,$Old){
     if(-not $path.StartsWith((Join-Path $Repository '.local')+'\',[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($path) -ne 'CodexPool.Daemon.exe' -or -not(Test-Path -LiteralPath $path)){throw 'The service installation is not trusted.'}
     $path
 }
+function Resolve-QseDataDirectory($Old,[string]$Explicit){
+    $value=if($Explicit){$Explicit}elseif($env:CODEX_POOL_DATA_DIR){$env:CODEX_POOL_DATA_DIR}elseif($Old -and $Old.PSObject.Properties['dataDirectory']){$Old.dataDirectory}else{throw 'The proxy data directory is unknown. Supply -DataDirectory with the running daemon absolute data path.'}
+    if($value -notmatch '^[A-Za-z]:[\\/]'){throw 'The proxy data directory must be an explicit local absolute path; relative and network paths are refused.'}
+    $path=[IO.Path]::GetFullPath($value)
+    if($path.StartsWith('\\',[StringComparison]::Ordinal)){throw 'Network data directories are refused.'}
+    $path
+}
 function Install-QseBinding($Runtime,[string]$Manifest,[string]$Provider,[string]$Expected){
     $arguments=@('install',$Manifest,$Provider,$Expected)
     $declaration=Get-Content -LiteralPath $Manifest -Raw -Encoding utf8 | ConvertFrom-Json
@@ -142,4 +149,4 @@ function Wait-QseOperation($Runtime,$Record,$Operation,[int]$Seconds=2){
     }
     $current
 }
-Export-ModuleMember -Function Get-QseRuntime,Invoke-QseManagement,Assert-QseLifecycle,Get-QsePlugin,Get-QseRecord,Assert-QseRecord,Enter-QsePluginLock,Exit-QsePluginLock,Write-QseRecord,Stop-QseProvider,Start-QseProvider,Wait-QseProvider,Resolve-QseServicePath,Install-QseBinding,Invoke-QseOwnedManagement,Wait-QseOperation
+Export-ModuleMember -Function Get-QseRuntime,Invoke-QseManagement,Assert-QseLifecycle,Get-QsePlugin,Get-QseRecord,Assert-QseRecord,Enter-QsePluginLock,Exit-QsePluginLock,Write-QseRecord,Stop-QseProvider,Start-QseProvider,Wait-QseProvider,Resolve-QseServicePath,Resolve-QseDataDirectory,Install-QseBinding,Invoke-QseOwnedManagement,Wait-QseOperation

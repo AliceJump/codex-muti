@@ -17,13 +17,18 @@ internal sealed class QuickSettingsProxy
     private ProxyIdentity? observed;
     private string lastExecutable;
     private bool inheritedBoundaryProbe;
+    private readonly object startupGate=new();
+    private bool starting;
+    private readonly Func<ProxyIdentity?>? captureOverride;
+    private readonly Func<bool>? lockOverride;
 
-    internal QuickSettingsProxy(string servicePath, string dataDirectory, HttpClient http)
+    internal QuickSettingsProxy(string servicePath, string dataDirectory, HttpClient http,Func<ProxyIdentity?>? captureOverride=null,Func<bool>? lockOverride=null)
     {
         if (!Path.IsPathFullyQualified(servicePath) || !File.Exists(servicePath)
             || !Path.GetFileName(servicePath).Equals("CodexPool.Daemon.exe", StringComparison.OrdinalIgnoreCase))
             throw new IOException("Daemon installation is unavailable.");
         initialPath = Path.GetFullPath(servicePath); directory = dataDirectory; this.http = http;
+        this.captureOverride=captureOverride;this.lockOverride=lockOverride;
         lastExecutable = initialPath;
         var local = new DirectoryInfo(Path.GetDirectoryName(initialPath)!);
         while (local is not null && local.Name != ".local") local = local.Parent;
@@ -36,6 +41,7 @@ internal sealed class QuickSettingsProxy
 
     private ProxyIdentity? Capture()
     {
+        if(captureOverride is not null)return captureOverride();
         var pid = ListenerPid();
         if (pid is null) return null;
         using var process = Process.GetProcessById(pid.Value);
@@ -62,6 +68,7 @@ internal sealed class QuickSettingsProxy
 
     private bool LockAvailable()
     {
+        if(lockOverride is not null)return lockOverride();
         if (!File.Exists(Path.Combine(directory, "daemon.lock"))) return true;
         try { using var file = new FileStream(Path.Combine(directory, "daemon.lock"), FileMode.Open, FileAccess.ReadWrite, FileShare.None); return true; }
         catch (IOException) { return false; }
@@ -74,12 +81,15 @@ internal sealed class QuickSettingsProxy
             var identity = Capture();
             if (identity is null)
             {
-                if (observed is { } previous && Exists(previous) || !LockAvailable())
-                    return new(false, observed is not null, null, "代理正在启动或停止，状态等待确认");
-                observed = null;
-                return new(true, false, null, "代理已停止");
+                lock(startupGate){
+                    if (starting || observed is { } previous && Exists(previous) || !LockAvailable())
+                        return new(false, observed is not null, null, "代理正在启动或停止，状态等待确认");
+                    observed = null;
+                    return new(true, false, null, "代理已停止");
+                }
             }
             var status = await QuickSettingsRegistration.ReadAsync(http, directory, "/status", token);
+            _ = QuickSettingsRegistration.Accounts(status);
             if (Capture() != identity) return new(false, true, null, "代理实例已变化，等待确认");
             observed = identity;
             lastExecutable = identity.Path;
@@ -100,24 +110,26 @@ internal sealed class QuickSettingsProxy
             if (desired)
             {
                 var executable = lastExecutable;
-                if (!Owned(executable) || !File.Exists(executable) || Capture() is not null || !LockAvailable())
+                if (!Owned(executable) || !File.Exists(executable) || Capture() is not null)
                     return new(false, "已有代理实例或安装状态已变化");
-                var start = new ProcessStartInfo(executable) { UseShellExecute = false, CreateNoWindow = true,
-                    WindowStyle = ProcessWindowStyle.Hidden, WorkingDirectory = Path.GetDirectoryName(executable)! };
-                start.ArgumentList.Add("serve");
-                // Preserve a previously authenticated daemon's launch mode;
-                // never add a migration bypass merely to make the tile work.
-                if (inheritedBoundaryProbe) start.ArgumentList.Add("--live-boundary-probe");
-                start.Environment["CODEX_POOL_DATA_DIR"] = directory;
-                using var child = Process.Start(start) ?? throw new IOException("Daemon did not start.");
-                for (var i = 0; i < 50; i++)
-                {
-                    await Task.Delay(200, token);
-                    var state = await ReadAsync(token);
-                    if (state.Known && state.Running) { ProxyServiceIntent.Confirm(directory, true); return new(true, "代理已启动"); }
-                    if (child.HasExited) break;
-                }
-                return new(false, "启动结果尚未确认，未自动重试");
+                return await DuringStartupAsync(async()=>{
+                    var start = new ProcessStartInfo(executable) { UseShellExecute = false, CreateNoWindow = true,
+                        WindowStyle = ProcessWindowStyle.Hidden, WorkingDirectory = Path.GetDirectoryName(executable)! };
+                    start.ArgumentList.Add("serve");
+                    // Preserve the authenticated daemon's launch mode without
+                    // adding a migration bypass merely to make the tile work.
+                    if (inheritedBoundaryProbe) start.ArgumentList.Add("--live-boundary-probe");
+                    start.Environment["CODEX_POOL_DATA_DIR"] = directory;
+                    using var child = Process.Start(start) ?? throw new IOException("Daemon did not start.");
+                    for (var i = 0; i < 50; i++)
+                    {
+                        await Task.Delay(200, token);
+                        var state = await ReadAsync(token);
+                        if (state.Known && state.Running) { ProxyServiceIntent.Confirm(directory, true); return new(true, "代理已启动"); }
+                        if (child.HasExited) break;
+                    }
+                    return new(false, "启动结果尚未确认，未自动重试");
+                });
             }
             var identity = Capture();
             if (identity is null || before.Status is null || !LocalCommands.CanShutdown(System.Text.Json.JsonSerializer.SerializeToElement(before.Status)))
@@ -146,7 +158,7 @@ internal sealed class QuickSettingsProxy
         {
             var before = await ReadAsync(token);
             if (!before.Known || !before.Running || before.Status is null) return new(false, "代理未运行，无法切换账户");
-            var accounts = before.Status["accounts"]!.AsArray();
+            var accounts = QuickSettingsRegistration.Accounts(before.Status);
             var account = accounts.OfType<JsonObject>().FirstOrDefault(x => x["id"]?.GetValue<string>() == id);
             if (account is null || !QuickSettingsRegistration.AccountSelectable(account)) return new(false, "该账户当前不可用");
             var identity = Capture();
@@ -161,6 +173,10 @@ internal sealed class QuickSettingsProxy
         }
         catch (Exception error) when (QuickSettingsRegistration.Unavailable(error))
         { return new(false, "账户切换结果未确认，未自动重试"); }
+    }
+    internal async Task<ProxyOperation> DuringStartupAsync(Func<Task<ProxyOperation>> launch){
+        lock(startupGate){if(starting || !LockAvailable())return new(false,"代理正在启动或已有实例");starting=true;}
+        try{return await launch();}finally{lock(startupGate)starting=false;}
     }
 
     private static int? ListenerPid()

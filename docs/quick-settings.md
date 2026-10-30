@@ -20,10 +20,10 @@ CodexPool.Daemon.exe quick-settings "C:\path\qse-broker.exe" "C:\path\service\Co
 
 `tile.detailLabel` 为“管理账户”，用于磁贴右侧二级入口的原生悬停提示和无障碍名称。右键菜单继续保留系统“编辑快速设置”入口，编辑行为由框架适配器进入原生模式，与提供方业务操作分离。
 
-实验宿主部署入口已迁入本仓库：
+实验宿主部署入口已迁入本仓库。首次安装须提供与正在运行的代理一致的绝对数据目录，以下路径仅为示例；已有记录时可省略：
 
 ```powershell
-.\scripts\Deploy-QuickSettings.ps1 -Force
+.\scripts\Deploy-QuickSettings.ps1 -Force -DataDirectory 'D:\CodexPoolData'
 # 只管理本插件，实际代理始终保留：
 .\scripts\Stop-QuickSettings.ps1
 .\scripts\Start-QuickSettings.ps1
@@ -39,6 +39,8 @@ CodexPool.Daemon.exe quick-settings "C:\path\qse-broker.exe" "C:\path\service\Co
 2026-10-30 起，这些脚本只管理 Codex Pool 的注册 helper 与目录绑定，不再部署、启动或停止共享 QSE。先在 QSE 仓库单独安装/启动框架；必须支持 `plugin-status/provider-enable/provider-disable/install-cas/uninstall/on-demand-v1/owned-management-v1/native-confirmation-v1`。`-RuntimeRoot` 默认 `C:\QSE-Host`；旧 `-FrameworkRoot` 参数仅为调用兼容而保留，不触发框架操作。
 
 Provider 新包位于 `%LOCALAPPDATA%\Programs\CodexPool\QuickSettingsProvider\provider-版本号\`，由应用自己管理，QSE 只保存声明、路径、启动授权及用户固定选择。同目录的 `CodexPool.QseManager.exe` 是复用 Daemon 程序集的轻量管理 apphost，操作结束就退出，避免管理命令被误认为等待注册的 Provider。安装时以 `--owner` 授权该路径；它通过标准 `plugin.*` 管理 API 只管理 Codex Pool。原服务和账户数据目录保持原位。旧 `C:\QSE-Host\CodexPool\provider-*` 保留用于历史恢复，新版管理接口要求更新插件后使用。
+
+数据目录按显式 `-DataDirectory`、绝对的 `CODEX_POOL_DATA_DIR`、已有部署记录顺序选择；无法确定时在变更绑定前拒绝，不静默猜测默认目录。相对路径和规范化后的 UNC 路径拒绝，避免从错误位置读取本地密钥。
 
 Manifest 声明 `activation.mode:on-demand`，安装时显式传入 `--allow-activation`。桌面 Broker 校验 EXE 路径、摘要、所有者和当前用户/会话，再以固定参数 `qse-provider <broker.exe> codex-pool <nonce>` 拉起本应用 EXE。应用从自己目录的 `qse-provider.json` 读取服务路径及数据目录；配置不包含密钥，也不由 QSE 解析。详情入口只唤醒；主开关保留用户启停目标，待新状态校验，目标已满足时只读确认。未知结果不自动重放。
 
@@ -73,3 +75,5 @@ dotnet run --project tests/CodexPool.SecurityTests -c Release -- --quick-setting
 同日按需阶段另通过原生详情箭头唤醒 Codex Pool，两个独立 Provider 收起面板后自行空闲退出，再次通过原生详情箭头创建新的 Codex Pool 进程；示例的冷启动显式启停和重复唤醒单实例也已确认。测试基线内共享进程及实际代理 PID 未变，未切换真实账户；框架维护前后曾观察到 Shell 重建，不据此宣布同进程热升级或完整 M5 通过。
 
 第三阶段实机通过 owner 归属拒绝、两个插件独立固定/取消固定、详情打开时注销并关闭页面、重装新身份和原固定选择恢复，以及收起时等待、展开后四个原生集合确认移除。另一插件及实际代理保持不变，管理操作不需要示例 Provider 常驻。定向安全测试还模拟变更响应丢失，验证只读查询回执、没有重复提交。更新脚本在发出变更前标记事务已开始，未知返回也进入实际状态检查与安全回滚。
+
+补充恢复检查模拟完成结果的 ACK 丢失：重注册补送冻结的同一状态及 revision，回执解决后强制发布更高版本；不会因为重新读取本机状态而让旧 completionState 覆盖新注册版本。Broker 长期不可达且没有正在执行的操作时，按需 helper 使用本地约 60 秒期限退出。启动期间的所有状态读取跳过 `daemon.lock` 探测，避免探测句柄与子进程的独占锁竞争；托盘也在启停确认后保存服务意图。以上故障检查使用隔离数据和模拟传输，没有自动启停现用代理。

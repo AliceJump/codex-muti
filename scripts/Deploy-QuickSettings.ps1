@@ -1,6 +1,6 @@
 ﻿#requires -Version 5.1
 [CmdletBinding()]
-param([switch]$Force,[string]$FrameworkRoot,[string]$RuntimeRoot='C:\QSE-Host',[string]$ProviderPackage)
+param([switch]$Force,[string]$FrameworkRoot,[string]$RuntimeRoot='C:\QSE-Host',[string]$ProviderPackage,[string]$DataDirectory)
 $ErrorActionPreference='Stop'
 Import-Module (Join-Path $PSScriptRoot 'QuickSettingsLifecycle.psm1')
 $repo=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
@@ -12,6 +12,7 @@ try{
     if($before.installed -and (-not $old -or -not [string]::Equals($before.providerPath,$old.providerPath,[StringComparison]::OrdinalIgnoreCase))){throw 'The installed plugin binding does not match the local deployment record.'}
     if($before.installed -and $before.pending){throw 'The provider is processing an operation. Update was refused without stopping it.'}
     $servicePath=Resolve-QseServicePath $repo $old
+    $providerDataDirectory=Resolve-QseDataDirectory $old $DataDirectory
     $version=(Get-Date -Format 'yyyyMMdd-HHmmss')+'-'+[Guid]::NewGuid().ToString('N').Substring(0,6)
     $providerDir=Join-Path $runtime.providerRoot ('provider-'+$version)
     if($ProviderPackage){
@@ -29,9 +30,8 @@ try{
     if($declaration.id -ne 'codex-pool'){throw 'The provider manifest does not declare Codex Pool.'}
     $managerPath=Join-Path $providerDir 'CodexPool.QseManager.exe'
     Copy-Item -LiteralPath (Join-Path $providerDir 'CodexPool.Daemon.exe') -Destination $managerPath -Force
-    $dataDirectory=if($env:CODEX_POOL_DATA_DIR){$env:CODEX_POOL_DATA_DIR}elseif($old){$old.dataDirectory}else{Join-Path $env:LOCALAPPDATA 'CodexPool'}
-    if($declaration.PSObject.Properties['activation']){[IO.File]::WriteAllText((Join-Path $providerDir 'qse-provider.json'),(@{configVersion=1;servicePath=$servicePath;dataDirectory=$dataDirectory} | ConvertTo-Json),[Text.UTF8Encoding]::new($false))}
-    $record=[pscustomobject]@{kind='codex-pool';version=$version;brokerPath=$runtime.broker;providerPath=(Join-Path $providerDir 'CodexPool.Daemon.exe');managerPath=$managerPath;servicePath=$servicePath;dataDirectory=$dataDirectory}
+    if($declaration.PSObject.Properties['activation']){[IO.File]::WriteAllText((Join-Path $providerDir 'qse-provider.json'),(@{configVersion=1;servicePath=$servicePath;dataDirectory=$providerDataDirectory} | ConvertTo-Json),[Text.UTF8Encoding]::new($false))}
+    $record=[pscustomobject]@{kind='codex-pool';version=$version;brokerPath=$runtime.broker;providerPath=(Join-Path $providerDir 'CodexPool.Daemon.exe');managerPath=$managerPath;servicePath=$servicePath;dataDirectory=$providerDataDirectory}
     $changed=$false
     try{
         if($before.installed){$changed=$true;$null=Invoke-QseManagement $runtime @('provider-disable','codex-pool')}

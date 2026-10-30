@@ -15,6 +15,7 @@ internal static class QuickSettingsTests
 {
     internal static async Task RunAsync(string root)
     {
+        await QuickSettingsRecoveryTests.RunAsync(root);
         var captions = new System.Text.Json.Nodes.JsonObject();
         Check(QuickSettingsRegistration.QuotaCaption(captions).Contains("未知"));
         var account = new System.Text.Json.Nodes.JsonObject { ["enabled"] = true, ["paused"] = false, ["drain"] = false, ["state"] = "standby", ["auth"] = "ready" };

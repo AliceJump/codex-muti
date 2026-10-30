@@ -12,11 +12,12 @@ internal static class QuickSettingsProviderEntry
             || value["servicePath"]?.GetValue<string>() is not { } service
             || value["dataDirectory"]?.GetValue<string>() is not { } data
             || !Path.IsPathFullyQualified(service) || !Path.IsPathFullyQualified(data)
-            || service.StartsWith(@"\\", StringComparison.Ordinal) || data.StartsWith(@"\\", StringComparison.Ordinal)
             || !Path.GetFileName(service).Equals("CodexPool.Daemon.exe", StringComparison.OrdinalIgnoreCase)
             || Path.GetFullPath(service).Equals(Path.GetFullPath(providerPath), StringComparison.OrdinalIgnoreCase))
             throw new IOException("Invalid dedicated Quick Settings provider configuration.");
-        return new(Path.GetFullPath(service), Path.GetFullPath(data));
+        var fullService=Path.GetFullPath(service);var fullData=Path.GetFullPath(data);
+        if(fullService.StartsWith(@"\\",StringComparison.Ordinal) || fullData.StartsWith(@"\\",StringComparison.Ordinal))throw new IOException("Network provider paths are not allowed.");
+        return new(fullService,fullData);
     }
 
     internal static async Task<int> RunAsync(string[] args)
