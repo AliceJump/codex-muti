@@ -23,10 +23,21 @@ CodexPool.Daemon.exe quick-settings "C:\path\qse-broker.exe" "C:\path\service\Co
 实验宿主部署入口已迁入本仓库：
 
 ```powershell
-.\scripts\Deploy-QuickSettings.ps1 -Force -FrameworkRoot D:\items\project\github_project\quick-settings-extensions
+.\scripts\Deploy-QuickSettings.ps1 -Force
+# 只管理本插件，实际代理始终保留：
+.\scripts\Stop-QuickSettings.ps1
+.\scripts\Start-QuickSettings.ps1
+# 显式撤销插件目录注册：
+.\scripts\Uninstall-QuickSettings.ps1
 ```
 
-脚本只替换注册 helper，并调用 QSE 的通用框架部署/安装 API；保留现用代理进程。框架停用不终止业务进程。宿主 Shell 挂起时可能需要保持 Win+A 展开以完成适配器卸载；尚未作为无交互正式安装器交付。
+2026-10-30 起，这些脚本只管理 Codex Pool 的注册 helper 与目录绑定，不再部署、启动或停止共享 QSE。先在 QSE 仓库单独安装/启动框架；必须支持 `plugin-status/provider-enable/provider-disable/install-cas/uninstall`。`-RuntimeRoot` 默认 `C:\QSE-Host`；旧 `-FrameworkRoot` 参数仅为调用兼容而保留，不触发框架操作。
+
+Deploy 在插件锁内核对旧绑定和无 pending 状态，停用并停止专用 helper，再比较旧路径安装新版本；保留用户固定选择和停用状态。新 helper 未能注册时恢复旧绑定、部署记录及先前在线的 helper。`-ProviderPackage` 可指定已发布且带有 `qse-manifest.json` 的 helper 目录，否则使用 dotnet publish。实际代理的监听 PID 被排除，不会被停止。
+
+Stop 保留注册和固定选择，持久化停用并撤销旧提供方会话；旧实例无法重新注册。Start 要求插件已安装且路径匹配，只启用并拉起自己的 helper，卸载后不会静默重装。Uninstall 停用/停止 helper、撤销目录注册并删除本插件部署记录，重复执行幂等；保留旧发布包供恢复，返回 `await-shell-snapshot` 表示尚未确认原生 Shell 移除。以上流程均不停止实际代理或其他插件；有业务操作待确认时拒绝停止、更新和卸载。
+
+按需启动、统一固定/取消固定/原生移除确认 API、安装器断电恢复仍未实现。框架自身升级仍可能等待 Shell 恢复执行；插件日常升级已不再要求卸载共享适配器。
 
 `proxy-service-intent.json` 仅保存已确认的服务运行意图，供新版本桌面启动器避免在用户关闭后再次隐式启动。启动继承此前认证服务的启动模式，不为使开关可用而新增迁移门禁绕过。账户切换仍受现有 Daemon 的资格、额度和生产门禁校验；失败保留原账户。
 
@@ -41,6 +52,9 @@ Shell 收到的 `tileLabel` 与 `quotaIcon` 是有长度、数值范围和颜色
 ```powershell
 dotnet run --project tests/CodexPool.Tests -c Release
 dotnet run --project tests/CodexPool.SecurityTests -c Release -- --quick-settings-only
+.\scripts\tests\quick-settings-isolation.ps1
 ```
 
 针对性测试使用隔离数据和随机 loopback 端口，不启动或停止当前端口 3210 的代理；覆盖设置原子更新、门禁、服务意图、未知状态、账户行投影和不可用状态。实际账户切换需用户手动验收，不能把模拟数据测试计为真实切换通过。
+
+2026-10-30 另在真实 QSE Broker 与第二个独立示例提供方并存时验证：插件启停、停用期间更新、在线更新、故意启动失败后的回滚、卸载、卸载后 Start 拒绝及重新安装恢复。各阶段 Broker/引擎/Shell/实际代理与示例 PID 未变，示例持续在线；没有关闭代理或切换真实账户。这是插件运维验收，不代替完整 Shell、安装器与 M5 矩阵。
