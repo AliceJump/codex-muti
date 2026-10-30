@@ -104,6 +104,12 @@ internal static class QuickSettingsRegistration
                             operation = proxy.SetRunningAsync(action["value"]!.GetValue<bool>(), stop.Token);
                         }
                         else if (accepted && operation is null && action["kind"]?.GetValue<string>() == "invoke"
+                            && action["componentId"]?.GetValue<string>() == "open-management" && action["action"]?.GetValue<string>() == "open-management")
+                        {
+                            operationEventId = eventId;
+                            operation = Task.FromResult(OpenManagement(state, () => Process.Start(new ProcessStartInfo("http://127.0.0.1:3210/") { UseShellExecute = true })));
+                        }
+                        else if (accepted && operation is null && action["kind"]?.GetValue<string>() == "invoke"
                             && action["componentId"]?.GetValue<string>() == "accounts" && action["action"]?.GetValue<string>() == "activate-account" && action["argument"]?.GetValue<string>() is { } accountId)
                         {
                             operationNotice = "正在切换账户…"; operationEventId = eventId;
@@ -135,6 +141,14 @@ internal static class QuickSettingsRegistration
 
     private static JsonObject Message(string type) => new() { ["protocol"] = 2, ["type"] = type };
 
+    internal static ProxyOperation OpenManagement(ProxySnapshot state, Action launch)
+    {
+        if (!state.Known || !state.Running) return new(false, "代理未运行，无法打开网页管理");
+        try { launch(); return new(true, ""); }
+        catch (Exception error) when (error is System.ComponentModel.Win32Exception or InvalidOperationException or IOException)
+        { return new(false, "无法打开网页管理，请检查默认浏览器"); }
+    }
+
     internal static JsonObject Manifest()
     {
         using var stream = typeof(QuickSettingsRegistration).Assembly.GetManifestResourceStream("CodexPool.Daemon.QuickSettings.manifest.json")
@@ -147,21 +161,26 @@ internal static class QuickSettingsRegistration
         var components = new JsonArray();
         foreach (var line in projection["lines"]!.AsArray().Select(x => x!.GetValue<string>()).Select((text,index) => (text,index)))
             components.Add(new JsonObject { ["id"] = "notice-" + line.index, ["type"] = "text", ["subtitle"] = line.text });
-        components.Add(new JsonObject { ["id"] = "accounts", ["type"] = "list", ["icon"] = "person", ["action"] = "activate-account",
+        components.Add(new JsonObject { ["id"] = "accounts", ["type"] = "list",["title"] = "账户",["appearance"] = "settings-list", ["icon"] = "person", ["action"] = "activate-account",
             ["items"] = new JsonArray(projection["rows"]!.AsArray().OfType<JsonObject>().Select(row => (JsonNode)new JsonObject {
                 ["id"] = row["id"]!.DeepClone(),["title"] = row["title"]!.DeepClone(),["subtitle"] = row["subtitle"]!.DeepClone(),
                 ["selected"] = row["selected"]!.DeepClone(),["enabled"] = row["enabled"]!.DeepClone()
             }).ToArray()) });
-        var footer = new JsonArray(new JsonObject { ["id"] = "refresh",["type"] = "button",["title"] = "刷新状态",["action"] = "refresh" });
+        if(!projection["enabled"]!.GetValue<bool>() && projection["canToggle"]!.GetValue<bool>()){
+            components.Clear();components.Add(new JsonObject { ["id"] = "service-stopped",["type"] = "text",["appearance"] = "empty-state",["title"] = "代理已关闭",["subtitle"] = "使用上面的切换开关启动代理，查看和管理账户。" });
+        }
+        var footer = new JsonArray(new JsonObject { ["id"] = "refresh",["type"] = "button",["appearance"] = "settings-link",["title"] = "刷新状态",["action"] = "refresh" });
         var icon = projection["quotaIcon"]!.AsObject();
         var tone = icon["accentArgb"]!.GetValue<uint>() switch {0xFF75DBAF => "success",0xFFFFC65F => "warning",0xFFFF7069 => "critical",_ => "neutral"};
         return new JsonObject {
             ["stateVersion"] = 2,["providerEpoch"] = providerEpoch,["revision"] = revision,["observedAt"] = DateTimeOffset.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"),
-            ["tile"] = new JsonObject { ["label"] = projection["tileLabel"]!.DeepClone(),["summary"] = projection["summary"]!.DeepClone(),
+            ["tile"] = new JsonObject { ["label"] = projection["tileLabel"]!.DeepClone(),["detailLabel"] = "管理账户",["summary"] = projection["summary"]!.DeepClone(),
                 ["valueKnown"] = projection["canToggle"]!.DeepClone(),["value"] = projection["enabled"]!.DeepClone(),["canToggle"] = projection["canToggle"]!.DeepClone(),
                 ["unavailableReason"] = projection["canToggle"]!.GetValue<bool>() ? "" : "代理状态暂不可确认",
                 ["indicator"] = new JsonObject { ["kind"] = "ring",["known"] = icon["known"]!.DeepClone(),["value"] = icon["remaining"]!.DeepClone(),["exhausted"] = icon["exhausted"]!.DeepClone(),["tone"] = tone } },
-            ["components"] = components,["footer"] = footer
+            ["components"] = components,["footer"] = footer,
+            ["contextMenu"] = new JsonArray(new JsonObject { ["id"] = "open-management",["type"] = "button",["title"] = "打开网页管理",["action"] = "open-management",
+                ["enabled"] = projection["enabled"]!.GetValue<bool>() && projection["canToggle"]!.GetValue<bool>() })
         };
     }
 

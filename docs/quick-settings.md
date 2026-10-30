@@ -16,6 +16,10 @@ CodexPool.Daemon.exe quick-settings "C:\path\qse-broker.exe" "C:\path\service\Co
 
 当前使用 QSE 协议 v2：应用携带 `qse-manifest.json`，通过通用 install 绑定提供方路径；账户列表由标准 `list` 组件描述，底部操作由 `footer` 的标准 `button` 描述。框架中没有账户或代理分支。进程创建 providerEpoch，请求匹配 Broker/提供方 epoch 和 revision；确认结果的 ACK 丢失可补送同一结果及同一状态，绝不重做业务动作。
 
+`contextMenu` 的第一项为“打开网页管理”，动作仍由本应用提供方执行，使用与托盘/命令行一致的固定地址 `http://127.0.0.1:3210/`，没有令牌或密钥参数。代理未运行或状态未知时禁用该项，不隐式启动代理、不切换账户。此入口目前仍依赖注册提供方在线，按需激活属于后续生命周期改造。
+
+`tile.detailLabel` 为“管理账户”，用于磁贴右侧二级入口的原生悬停提示和无障碍名称。右键菜单继续保留系统“编辑快速设置”入口，编辑行为由框架适配器进入原生模式，与提供方业务操作分离。
+
 实验宿主部署入口已迁入本仓库：
 
 ```powershell

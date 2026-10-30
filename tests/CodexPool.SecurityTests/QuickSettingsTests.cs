@@ -66,8 +66,18 @@ internal static class QuickSettingsTests
         var contract=QuickSettingsRegistration.ContractState(dynamic,"test-provider-epoch",7);
         Check(contract["providerEpoch"]!.GetValue<string>()=="test-provider-epoch" && contract["revision"]!.GetValue<ulong>()==7);
         Check(contract["tile"]!["label"]!.GetValue<string>()=="Account B" && !contract["tile"]!["indicator"]!["known"]!.GetValue<bool>());
+        Check(contract["tile"]!["detailLabel"]!.GetValue<string>()=="管理账户");
+        Check(contract["components"]!.AsArray().Single(x=>x!["id"]!.GetValue<string>()=="accounts")!["appearance"]!.GetValue<string>()=="settings-list");
+        Check(contract["footer"]![0]!["appearance"]!.GetValue<string>()=="settings-link");
+        var stoppedPage=QuickSettingsRegistration.ContractState(stopped,"test-provider-epoch",8);
+        Check(stoppedPage["components"]!.AsArray().Count==1 && stoppedPage["components"]![0]!["appearance"]!.GetValue<string>()=="empty-state" && stoppedPage["components"]![0]!["title"]!.GetValue<string>()=="代理已关闭");
         var components=contract["components"]!.AsArray();Check(components.Single(x=>x!["id"]!.GetValue<string>()=="accounts")!["items"]!.AsArray().Count==2);
         Check(!contract.ContainsKey("rows") && !contract.ContainsKey("quotaIcon"));
+        var menu=contract["contextMenu"]!.AsArray();Check(menu.Count==1 && menu[0]!["id"]!.GetValue<string>()=="open-management" && menu[0]!["title"]!.GetValue<string>()=="打开网页管理");
+        var launches=0;Check(QuickSettingsRegistration.OpenManagement(new(true,true,null,""),()=>++launches).Success && launches==1);
+        Check(!QuickSettingsRegistration.OpenManagement(new(true,false,null,""),()=>++launches).Success && launches==1);
+        Check(!QuickSettingsRegistration.OpenManagement(new(false,true,null,""),()=>++launches).Success && launches==1);
+        Check(!QuickSettingsRegistration.OpenManagement(new(true,true,null,""),()=>throw new InvalidOperationException()).Success);
         var intent = Path.Combine(root,"service-intent");
         Check(ProxyServiceIntent.AllowsAutomaticStart(intent));
         ProxyServiceIntent.Confirm(intent,false);Check(!ProxyServiceIntent.AllowsAutomaticStart(intent));
