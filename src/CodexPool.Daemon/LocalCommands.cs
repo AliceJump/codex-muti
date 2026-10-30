@@ -48,6 +48,7 @@ public static class LocalCommands
     }
     public static async Task<int> RunAsync(string command, string[] args, string directory)
     {
+        if (command == "qse-provider") return await QuickSettingsProviderEntry.RunAsync(args);
         if (command == "quick-settings")
             return await QuickSettingsRegistration.RunAsync(args, directory);
         if (command == "help")

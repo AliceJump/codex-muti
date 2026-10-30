@@ -9,7 +9,7 @@ function Get-QseRuntime([string]$RuntimeRoot){
     $broker=[IO.Path]::GetFullPath((Join-Path $root 'Registered/qse-broker.exe'))
     $control=Join-Path $root 'Registered/qse-control.exe'
     if(-not [string]::Equals([IO.Path]::GetFullPath($framework.brokerPath),$broker,[StringComparison]::OrdinalIgnoreCase) -or -not(Test-Path -LiteralPath $broker) -or -not(Test-Path -LiteralPath $control)){throw 'The installed QSE runtime paths are invalid.'}
-    [pscustomobject]@{root=$root;broker=$broker;control=$control;recordPath=(Join-Path $root 'codex-pool-deployment.json')}
+    [pscustomobject]@{root=$root;broker=$broker;control=$control;recordPath=(Join-Path $root 'codex-pool-deployment.json');providerRoot=(Join-Path $env:LOCALAPPDATA 'Programs/CodexPool/QuickSettingsProvider')}
 }
 function Invoke-QseManagement($Runtime,[string[]]$Arguments){
     $encoding=[Console]::OutputEncoding
@@ -27,7 +27,7 @@ function Invoke-QseManagement($Runtime,[string[]]$Arguments){
 function Assert-QseLifecycle($Runtime){
     $capabilities=Invoke-QseManagement $Runtime @('capabilities')
     if($capabilities.protocol -ne 2 -or -not $capabilities.PSObject.Properties['management']){throw 'The QSE framework needs the plugin-lifecycle update. Update it separately first.'}
-    foreach($feature in @('plugin-status','provider-enable','provider-disable','install-cas','uninstall')){if($feature -notin $capabilities.management){throw 'The installed QSE framework lacks required lifecycle capabilities.'}}
+    foreach($feature in @('plugin-status','provider-enable','provider-disable','install-cas','uninstall','on-demand-v1')){if($feature -notin $capabilities.management){throw 'The installed QSE framework lacks required lifecycle capabilities.'}}
 }
 function Get-QsePlugin($Runtime){Invoke-QseManagement $Runtime @('plugin-status','codex-pool')}
 function Get-QseRecord($Runtime){if(Test-Path -LiteralPath $Runtime.recordPath){Get-Content -LiteralPath $Runtime.recordPath -Raw -Encoding utf8 | ConvertFrom-Json}}
@@ -35,7 +35,8 @@ function Assert-QseRecord($Runtime,$Record){
     if(-not $Record -or $Record.kind -ne 'codex-pool'){throw 'The Codex Pool registration-helper deployment record is missing.'}
     $provider=[IO.Path]::GetFullPath($Record.providerPath)
     $ownedRoot=[IO.Path]::GetFullPath((Join-Path $Runtime.root 'CodexPool'))+'\'
-    if(-not $provider.StartsWith($ownedRoot,[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($provider) -ne 'CodexPool.Daemon.exe' -or [string]::Equals($provider,[IO.Path]::GetFullPath($Record.servicePath),[StringComparison]::OrdinalIgnoreCase) -or -not [string]::Equals([IO.Path]::GetFullPath($Record.brokerPath),$Runtime.broker,[StringComparison]::OrdinalIgnoreCase)){
+    $applicationRoot=[IO.Path]::GetFullPath($Runtime.providerRoot)+'\'
+    if((-not $provider.StartsWith($ownedRoot,[StringComparison]::OrdinalIgnoreCase) -and -not $provider.StartsWith($applicationRoot,[StringComparison]::OrdinalIgnoreCase)) -or [IO.Path]::GetFileName($provider) -ne 'CodexPool.Daemon.exe' -or [string]::Equals($provider,[IO.Path]::GetFullPath($Record.servicePath),[StringComparison]::OrdinalIgnoreCase) -or -not [string]::Equals([IO.Path]::GetFullPath($Record.brokerPath),$Runtime.broker,[StringComparison]::OrdinalIgnoreCase)){
         throw 'The helper deployment record does not identify a dedicated Codex Pool provider.'
     }
 }
@@ -66,7 +67,7 @@ function Stop-QseProvider($Runtime,$Record){
         $details=Get-CimInstance Win32_Process -Filter ('ProcessId='+$process.Id)
         if(-not $details -or $process.HasExited){continue}
         $owner=Invoke-CimMethod -InputObject $details -MethodName GetOwnerSid
-        if($owner.ReturnValue -ne 0 -or $owner.Sid -ne $user -or $details.CommandLine -notmatch '(?:^|\s)quick-settings(?:\s|$)'){throw 'The executable is not the current user dedicated registration helper; stop was refused.'}
+        if($owner.ReturnValue -ne 0 -or $owner.Sid -ne $user -or $details.CommandLine -notmatch '(?:^|\s)(quick-settings|qse-provider)(?:\s|$)'){throw 'The executable is not the current user dedicated registration helper; stop was refused.'}
         $process.Kill();if(-not $process.WaitForExit(5000)){throw 'The registration helper has not exited.'};++$stopped
     }
     $stopped
@@ -79,7 +80,9 @@ function Start-QseProvider($Runtime,$Record){
         try{
             $env:CODEX_POOL_DATA_DIR=$Record.dataDirectory
             $evidence=Join-Path (Split-Path $Record.providerPath) 'logs';New-Item -ItemType Directory -Path $evidence -Force | Out-Null
-            Start-Process $Record.providerPath -ArgumentList @('quick-settings',('"'+$Runtime.broker+'"'),('"'+$Record.servicePath+'"')) -WorkingDirectory (Split-Path $Record.providerPath) -WindowStyle Hidden -RedirectStandardOutput (Join-Path $evidence 'provider-out.txt') -RedirectStandardError (Join-Path $evidence 'provider-error.txt')
+            $declaration=Get-Content -LiteralPath (Join-Path (Split-Path $Record.providerPath) 'qse-manifest.json') -Raw -Encoding utf8 | ConvertFrom-Json
+            $arguments=if($declaration.PSObject.Properties['activation']){@('qse-provider',('"'+$Runtime.broker+'"'),'codex-pool',[Guid]::NewGuid().ToString())}else{@('quick-settings',('"'+$Runtime.broker+'"'),('"'+$Record.servicePath+'"'))}
+            Start-Process $Record.providerPath -ArgumentList $arguments -WorkingDirectory (Split-Path $Record.providerPath) -WindowStyle Hidden -RedirectStandardOutput (Join-Path $evidence 'provider-out.txt') -RedirectStandardError (Join-Path $evidence 'provider-error.txt')
         }finally{$env:CODEX_POOL_DATA_DIR=$previous}
     }
 }
@@ -98,4 +101,10 @@ function Resolve-QseServicePath([string]$Repository,$Old){
     if(-not $path.StartsWith((Join-Path $Repository '.local')+'\',[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($path) -ne 'CodexPool.Daemon.exe' -or -not(Test-Path -LiteralPath $path)){throw 'The service installation is not trusted.'}
     $path
 }
-Export-ModuleMember -Function Get-QseRuntime,Invoke-QseManagement,Assert-QseLifecycle,Get-QsePlugin,Get-QseRecord,Assert-QseRecord,Enter-QsePluginLock,Exit-QsePluginLock,Write-QseRecord,Stop-QseProvider,Start-QseProvider,Wait-QseProvider,Resolve-QseServicePath
+function Install-QseBinding($Runtime,[string]$Manifest,[string]$Provider,[string]$Expected){
+    $arguments=@('install',$Manifest,$Provider,$Expected)
+    $declaration=Get-Content -LiteralPath $Manifest -Raw -Encoding utf8 | ConvertFrom-Json
+    if($declaration.PSObject.Properties['activation']){$arguments+='--allow-activation'}
+    Invoke-QseManagement $Runtime $arguments
+}
+Export-ModuleMember -Function Get-QseRuntime,Invoke-QseManagement,Assert-QseLifecycle,Get-QsePlugin,Get-QseRecord,Assert-QseRecord,Enter-QsePluginLock,Exit-QsePluginLock,Write-QseRecord,Stop-QseProvider,Start-QseProvider,Wait-QseProvider,Resolve-QseServicePath,Install-QseBinding

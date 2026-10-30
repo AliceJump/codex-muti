@@ -1,5 +1,6 @@
 {
   "manifestVersion": 2,
+  "activation": { "mode": "on-demand" },
   "id": "codex-pool",
   "name": "Codex Pool",
   "tile": { "type": "split-toggle", "icon": { "kind": "preset", "value": "bot" } },

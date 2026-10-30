@@ -15,6 +15,7 @@ try{
     $runtime=Get-QseRuntime $root
     $record=[pscustomobject]@{kind='codex-pool';providerPath=(Join-Path $root 'CodexPool/provider-fixture/CodexPool.Daemon.exe');servicePath=(Join-Path $root 'application/CodexPool.Daemon.exe');brokerPath=$broker;dataDirectory=(Join-Path $root 'data')}
     Assert-QseRecord $runtime $record
+    $legacyProvider=$record.providerPath;$record.providerPath=Join-Path $runtime.providerRoot 'provider-fixture/CodexPool.Daemon.exe';Assert-QseRecord $runtime $record;$record.providerPath=$legacyProvider
     $service=$record.servicePath;$record.providerPath=$service;Reject {Assert-QseRecord $runtime $record}
     $record.providerPath=Join-Path $root 'Registered/qse-broker.exe';Reject {Assert-QseRecord $runtime $record}
     $record.providerPath=Join-Path $root 'CodexPool/../Registered/CodexPool.Daemon.exe';Reject {Assert-QseRecord $runtime $record}

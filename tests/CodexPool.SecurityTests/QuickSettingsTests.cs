@@ -63,6 +63,16 @@ internal static class QuickSettingsTests
         Check(new QuotaIconState(30,false).AccentArgb == 0xFF75DBAF && new QuotaIconState(29,false).AccentArgb == 0xFFFFC65F);
         Check(new QuotaIconState(14,false).AccentArgb == 0xFFFF7069 && new QuotaIconState(null,false).AccentArgb == 0xFF96A1B1);
         var manifest=QuickSettingsRegistration.Manifest();Check(manifest["manifestVersion"]!.GetValue<int>()==2 && manifest["id"]!.GetValue<string>()=="codex-pool");
+        Check(manifest["activation"]!["mode"]!.GetValue<string>()=="on-demand");
+        Check(await QuickSettingsProviderEntry.RunAsync([])==2);
+        Check(await QuickSettingsProviderEntry.RunAsync([Path.Combine(root,"missing-broker.exe"),"other-plugin",Guid.NewGuid().ToString()])==2);
+        var providerPath=Path.Combine(root,"helper","CodexPool.Daemon.exe");
+        var entryConfig=new System.Text.Json.Nodes.JsonObject { ["configVersion"]=1,["servicePath"]=Path.Combine(root,"service","CodexPool.Daemon.exe"),["dataDirectory"]=Path.Combine(root,"data") };
+        Check(QuickSettingsProviderEntry.Parse(entryConfig,providerPath).DataDirectory==Path.Combine(root,"data"));
+        entryConfig["servicePath"]=providerPath;
+        var configRejected=false;try{QuickSettingsProviderEntry.Parse(entryConfig,providerPath);}catch(IOException){configRejected=true;}Check(configRejected);
+        entryConfig["servicePath"]=Path.Combine(root,"service","CodexPool.Daemon.exe");entryConfig["command"]="not-allowed";
+        configRejected=false;try{QuickSettingsProviderEntry.Parse(entryConfig,providerPath);}catch(IOException){configRejected=true;}Check(configRejected);
         var contract=QuickSettingsRegistration.ContractState(dynamic,"test-provider-epoch",7);
         Check(contract["providerEpoch"]!.GetValue<string>()=="test-provider-epoch" && contract["revision"]!.GetValue<ulong>()==7);
         Check(contract["tile"]!["label"]!.GetValue<string>()=="Account B" && !contract["tile"]!["indicator"]!["known"]!.GetValue<bool>());

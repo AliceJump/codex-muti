@@ -19,7 +19,7 @@ internal static class QuickSettingsRegistration
     private const int MaxFrame = 32768;
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
-    internal static async Task<int> RunAsync(string[] args, string directory)
+    internal static async Task<int> RunAsync(string[] args, string directory, string? activationNonce = null)
     {
         if (args.Length != 2 || !Path.IsPathFullyQualified(args[0]) || !File.Exists(args[0]))
             return 2;
@@ -72,6 +72,7 @@ internal static class QuickSettingsRegistration
                         if (capabilities["manifestVersion"]?.GetValue<int>() != 2 || capabilities["stateVersion"]?.GetValue<int>() != 2)
                             throw new IOException("Unsupported Quick Settings contract.");
                         request["id"] = Id;request["manifest"] = Manifest();request["state"] = publishedState;
+                        if (activationNonce is not null) request["activationNonce"] = activationNonce;
                     }
                     else
                     {
@@ -92,6 +93,10 @@ internal static class QuickSettingsRegistration
                     publishAfterRegister = !registered;
                     if(registered){completion = null;completionState = null;}
                     registered = true;
+                    // The framework leases activity while Quick Settings is visible
+                    // or an action is pending. Idle helpers exit; the next click wakes them.
+                    if (operation is null && response["idleExitAfterMs"]?.GetValue<long>() == 0 && response["event"] is null)
+                        return 0;
                     if (response["event"] is JsonObject action)
                     {
                         var eventId = action["eventId"]!.GetValue<string>();
