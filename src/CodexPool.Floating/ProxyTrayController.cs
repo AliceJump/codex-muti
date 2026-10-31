@@ -105,6 +105,7 @@ internal sealed class ProxyTrayController : IDisposable
             await ProxyDaemonProcess.StopLegacyAsync(identity, root);
         }
         else { response.EnsureSuccessStatusCode(); await ProxyDaemonProcess.WaitForExitAsync(identity); }
+        ProxyServiceIntent.Confirm(directory,false);
         state = null; tray.ShowBalloon("代理已关闭", "代理托盘保留，可右键重新启动。Codex Desktop 和账户面板未关闭。");
     }
     private async Task StartAsync()
@@ -127,7 +128,8 @@ internal sealed class ProxyTrayController : IDisposable
         for (var i = 0; i < 30; i++)
         {
             await Task.Delay(200, lifetime.Token);
-            try { state = await ReadStatusAsync(); return; } catch { if (child.HasExited) throw; }
+            try { state = await ReadStatusAsync(); } catch { if (child.HasExited) throw;continue; }
+            ProxyServiceIntent.Confirm(directory,true);return;
         }
         throw new TimeoutException();
     }

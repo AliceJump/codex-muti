@@ -40,7 +40,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Reported consumption survives downstream failure without reopening replay", UsageWriteFailure),
     ("Missing, malformed, truncated and oversized usage remain unknown", UnknownUsage),
     ("Large terminal events and multiline framing retain usage within the observer limit", LargeUsage),
-    ("Arbitrary quota durations participate in thresholds, reset and freshness gates", GenericWindows)
+    ("Arbitrary quota durations participate in thresholds, reset and freshness gates", GenericWindows),
+    ("Quota display supports weekly-only accounts and preserves unknown short windows", QuotaDisplayTests.Run)
 };
 var failed = 0;
 foreach (var (name, run) in tests)

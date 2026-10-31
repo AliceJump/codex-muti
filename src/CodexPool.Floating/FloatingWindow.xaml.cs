@@ -13,6 +13,8 @@ using CodexPool.Daemon;
 using Microsoft.Win32;
 using Forms = System.Windows.Forms;
 
+using CodexPool.Core;
+
 namespace CodexPool.Floating;
 
 public sealed record WindowPreferences(int X = 80, int Y = 80, int Mode = 0, int Theme = 0, bool Pinned = false, int PositionVersion = 0);

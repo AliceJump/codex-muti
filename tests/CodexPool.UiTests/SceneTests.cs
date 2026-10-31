@@ -1,4 +1,5 @@
 using CodexPool.Floating;
+using CodexPool.Core;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Windows;

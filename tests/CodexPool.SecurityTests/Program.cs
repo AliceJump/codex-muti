@@ -18,6 +18,12 @@ using Microsoft.Extensions.Logging;
 
 if (args.FirstOrDefault() == "--native-login-helper") return await NativeLoginTests.RunHelperAsync(args.Skip(1).ToArray());
 var root = Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, ".research", "security-" + Guid.NewGuid().ToString("N")));
+if (args.FirstOrDefault() == "--quick-settings-only")
+{
+    await QuickSettingsTests.RunAsync(root);
+    Console.WriteLine("Quick Settings atomic settings and production gate tests passed.");
+    return 0;
+}
 var tests = new (string Name, Func<Task> Run)[]
 {
     ("Lazy preparation serves healthy model and catalog requests without touching expired standbys", () => LazyPreparationTests.Healthy(root)),

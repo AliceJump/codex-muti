@@ -113,6 +113,7 @@ try
     foreach (var asset in new[] { (Path: "/", File: "index.html", Type: "text/html"), (Path: "/dashboard.js", File: "dashboard.js", Type: "text/javascript"), (Path: "/dashboard.css", File: "dashboard.css", Type: "text/css") })
         app.MapGet(asset.Path, () => Results.Stream(typeof(Vault).Assembly.GetManifestResourceStream("CodexPool.Daemon.Dashboard." + asset.File)!, asset.Type));
     app.MapGet("/settings", () => pool.Settings);
+    QuickSettingsEndpoints.Map(app, pool);
     DaemonControlEndpoints.Map(app, vault.LocalKey, app.Lifetime.StopApplication,
         () => !nativeLogin.IsRunning && inFlight.Values.All(x => x == 0) && vault.Accounts.All(x => !auth.IsRefreshing(x.Id)));
     app.MapPost("/settings", async (HttpContext context) =>

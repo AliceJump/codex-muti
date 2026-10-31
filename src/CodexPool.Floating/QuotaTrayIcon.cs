@@ -1,8 +1,8 @@
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Text;
-using System.Globalization;
 using System.Runtime.InteropServices;
+using CodexPool.Core;
 
 namespace CodexPool.Floating;
 
@@ -11,12 +11,10 @@ internal static class QuotaTrayIcon
     // Native tray icons are tiny: number = remaining %; exhausted binding window draws an unmistakable X.
     public static Icon Create(double? remainingPercent, bool exhausted = false)
     {
-        var known = remainingPercent is { } value && double.IsFinite(value);
-        var remaining = known ? Math.Clamp(remainingPercent!.Value, 0, 100) : 0;
-        var accent = exhausted || (known && remaining < 15) ? Color.FromArgb(255, 112, 105)
-            : !known ? Color.FromArgb(150, 161, 177)
-            : remaining < 30 ? Color.FromArgb(255, 198, 95)
-            : Color.FromArgb(117, 219, 175);
+        var state = new QuotaIconState(remainingPercent, exhausted);
+        var known = state.Known;
+        var remaining = state.Amount;
+        var accent = Color.FromArgb(unchecked((int)state.AccentArgb));
         using var bitmap = new Bitmap(32, 32);
         using var graphics = Graphics.FromImage(bitmap);
         graphics.SmoothingMode = SmoothingMode.AntiAlias;
@@ -39,7 +37,7 @@ internal static class QuotaTrayIcon
         {
             using var stroke = new Pen(accent, 2.5f) { StartCap = LineCap.Round, EndCap = LineCap.Round };
             if (known && remaining > 0) graphics.DrawArc(stroke, 2.5f, 2.5f, 27, 27, -90, (float)(3.6 * remaining));
-            var label = known ? remaining.ToString("0", CultureInfo.InvariantCulture) : "—";
+            var label = state.Label;
             using var font = new Font("Segoe UI", label.Length >= 3 ? 11.5f : 14f, FontStyle.Bold, GraphicsUnit.Pixel);
             using var foreground = new SolidBrush(known ? Color.White : accent);
             using var format = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };

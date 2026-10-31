@@ -1,0 +1,13 @@
+{
+  "manifestVersion": 2,
+  "activation": { "mode": "on-demand" },
+  "id": "codex-pool",
+  "name": "Codex Pool",
+  "tile": { "type": "split-toggle", "icon": { "kind": "preset", "value": "bot" } },
+  "permissions": ["tile:register", "state:publish", "actions:receive"],
+  "actions": [
+    { "id": "open-management", "label": "打开网页管理", "parameter": "none" },
+    { "id": "activate-account", "label": "切换账户", "parameter": "item" },
+    { "id": "refresh", "label": "刷新状态", "parameter": "none" }
+  ]
+}

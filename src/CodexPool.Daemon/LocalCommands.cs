@@ -48,9 +48,13 @@ public static class LocalCommands
     }
     public static async Task<int> RunAsync(string command, string[] args, string directory)
     {
+        if (command == "qse-provider") return await QuickSettingsProviderEntry.RunAsync(args);
+        if (command == "qse-manage") return await QuickSettingsManagement.RunAsync(args);
+        if (command == "quick-settings")
+            return await QuickSettingsRegistration.RunAsync(args, directory);
         if (command == "help")
         {
-            Console.WriteLine("serve [--live-boundary-probe] | login/native-login <label> | native-login-cancel <attempt-id> | dashboard | status | usage | statistics/requests [yyyy-MM-dd [yyyy-MM-dd]] | models | settings [on/off threshold] | rename <account-id> <name> | activate/pause/resume/drain/undrain/enable/disable/refresh/delete <account-id> | codex [official arguments]"); return 0;
+            Console.WriteLine("serve [--live-boundary-probe] | quick-settings <absolute-broker.exe> <absolute-daemon.exe> | login/native-login <label> | native-login-cancel <attempt-id> | dashboard | status | usage | statistics/requests [yyyy-MM-dd [yyyy-MM-dd]] | models | settings [on/off threshold] | rename <account-id> <name> | activate/pause/resume/drain/undrain/enable/disable/refresh/delete <account-id> | codex [official arguments]"); return 0;
         }
         var key = Vault.ReadLocalKey(directory);
         if (command == "model-credential")
