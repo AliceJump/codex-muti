@@ -57,6 +57,7 @@ jobs:
           }
           ./scripts/tests/linked-clients.ps1
           ./scripts/tests/deployment-targets.ps1
+          ./scripts/tests/quick-settings-isolation.ps1
       - name: Dashboard incremental updates
         shell: pwsh
         run: |

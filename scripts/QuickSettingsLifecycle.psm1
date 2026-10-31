@@ -126,19 +126,30 @@ function Invoke-QseOwnedManagement($Runtime,$Record,[string]$Action,[string]$Ope
     if(-not $Record.PSObject.Properties['managerPath']){throw 'Update this plugin before using its owned management client.'}
     if($Action -notin @('status','pin','unpin','unregister','operation-status')){throw 'Unknown registration management operation.'}
     $encoding=[Console]::OutputEncoding
+    # Nonzero exits can still carry the operation ID needed for receipt recovery.
+    $PSNativeCommandUseErrorActionPreference=$false
     try{
         [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
         $arguments=@('qse-manage',$Runtime.broker,$Action);if($OperationId){$arguments+=$OperationId}
         $text=& $Record.managerPath @arguments;$code=$LASTEXITCODE
     }finally{[Console]::OutputEncoding=$encoding}
-    $result=($text -join "`n") | ConvertFrom-Json
-    if($result.PSObject.Properties['operationId'] -and $result.operationId){
+    $result=$null
+    try{$result=($text -join "`n") | ConvertFrom-Json -ErrorAction Stop}
+    catch{if($code -eq 0){throw 'The management client returned invalid JSON; no mutation was replayed.'}}
+    if($result -isnot [pscustomobject]){$result=$null}
+    $savedOperationId=$null
+    if($null -ne $result -and $result.PSObject.Properties['operationId'] -and $result.operationId){
         New-Item -ItemType Directory -Path $Runtime.providerRoot -Force | Out-Null
         $temporary=$Runtime.operationPath+'.'+[Guid]::NewGuid().ToString('N')+'.tmp'
         [IO.File]::WriteAllText($temporary,(@{record=$Record;operationId=$result.operationId} | ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))
         if(Test-Path -LiteralPath $Runtime.operationPath){[IO.File]::Replace($temporary,$Runtime.operationPath,[NullString]::Value)}else{[IO.File]::Move($temporary,$Runtime.operationPath)}
+        $savedOperationId=$result.operationId
     }
-    if($code -ne 0){throw 'The management result is unknown. Query the saved operation before taking further action; no mutation was replayed.'}
+    if($code -ne 0){
+        if($savedOperationId){throw 'The management result is unknown. Query the saved operation before taking further action; no mutation was replayed.'}
+        throw 'The management result is unknown and no operation ID was returned. Inspect the registration state before taking further action; do not replay the mutation.'
+    }
+    if($null -eq $result){throw 'The management client returned no result object; no mutation was replayed.'}
     $result
 }
 function Wait-QseOperation($Runtime,$Record,$Operation,[int]$Seconds=2){
