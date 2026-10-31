@@ -71,7 +71,7 @@ internal static class QuickSettingsRegistration
                     if (changed && completionState is null) ++revision;
                     previous = (JsonObject)current.DeepClone();
                     current["revision"] = revision;
-                    var publishedState = ContractState(current, providerEpoch, revision);
+                    var publishedState = ContractState(current, providerEpoch, revision, activationNonce, completion);
                     if (completion is not null) completionState ??= (JsonObject)publishedState.DeepClone();
                     JsonObject request;
                     if (!registered)
@@ -178,7 +178,8 @@ internal static class QuickSettingsRegistration
         return JsonNode.Parse(stream)!.AsObject();
     }
 
-    internal static JsonObject ContractState(JsonObject projection,string providerEpoch,ulong revision)
+    internal static JsonObject ContractState(JsonObject projection,string providerEpoch,ulong revision,
+        string? activationNonce = null, JsonObject? completion = null)
     {
         var components = new JsonArray();
         foreach (var line in projection["lines"]!.AsArray().Select(x => x!.GetValue<string>()).Select((text,index) => (text,index)))
@@ -194,7 +195,7 @@ internal static class QuickSettingsRegistration
         var footer = new JsonArray(new JsonObject { ["id"] = "refresh",["type"] = "button",["appearance"] = "settings-link",["title"] = "刷新状态",["action"] = "refresh" });
         var icon = projection["quotaIcon"]!.AsObject();
         var tone = icon["accentArgb"]!.GetValue<uint>() switch {0xFF75DBAF => "success",0xFFFFC65F => "warning",0xFFFF7069 => "critical",_ => "neutral"};
-        return new JsonObject {
+        var state = new JsonObject {
             ["stateVersion"] = 2,["providerEpoch"] = providerEpoch,["revision"] = revision,["observedAt"] = DateTimeOffset.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"),
             ["tile"] = new JsonObject { ["label"] = projection["tileLabel"]!.DeepClone(),["detailLabel"] = "管理账户",["summary"] = projection["summary"]!.DeepClone(),
                 ["valueKnown"] = projection["canToggle"]!.DeepClone(),["value"] = projection["enabled"]!.DeepClone(),["canToggle"] = projection["canToggle"]!.DeepClone(),
@@ -204,6 +205,19 @@ internal static class QuickSettingsRegistration
             ["contextMenu"] = new JsonArray(new JsonObject { ["id"] = "open-management",["type"] = "button",["title"] = "打开网页管理",["action"] = "open-management",
                 ["enabled"] = projection["enabled"]!.GetValue<bool>() && projection["canToggle"]!.GetValue<bool>() })
         };
+        // Bound both wire envelopes before capturing an immutable result state.
+        // JSON escaping and manifest/receipt overhead count toward the byte limit.
+        var registration = new { protocol = 2, type = "plugin.register", id = Id, manifest = Manifest(), state, activationNonce };
+        var poll = new { protocol = 2, type = "plugin.poll", id = Id, providerEpoch, state, result = completion };
+        var items = components.OfType<JsonObject>().SingleOrDefault(value => value["id"]?.GetValue<string>() == "accounts")?["items"]?.AsArray();
+        while (JsonSerializer.SerializeToUtf8Bytes(registration, Json).Length > MaxFrame
+            || JsonSerializer.SerializeToUtf8Bytes(poll, Json).Length > MaxFrame)
+        {
+            var removable = items?.OfType<JsonObject>().LastOrDefault(row => row["selected"]?.GetValue<bool>() != true);
+            if (removable is null) throw new IOException("Quick Settings state exceeds the frame budget.");
+            items!.Remove(removable);
+        }
+        return state;
     }
 
     internal static async Task<JsonObject> ReadAsync(HttpClient http, string directory, string path, CancellationToken token)
@@ -292,7 +306,8 @@ internal static class QuickSettingsRegistration
                 && DateTimeOffset.TryParse(value["resetAt"]?.GetValue<string>(), out var reset) && reset > DateTimeOffset.UtcNow;
             return $"{label}：{number:0.#}%" + (current ? "" : "（缓存）");
         }
-        return string.Join("    ", reported.Select(Window));
+        var caption = string.Join("    ", reported.Select(Window));
+        return caption.Length > 128 ? caption[..127] + "…" : caption;
     }
 
     internal static async Task<JsonObject> ExchangeAsync(JsonObject request, string broker, CancellationToken token)

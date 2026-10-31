@@ -16,6 +16,7 @@ internal static class QuickSettingsTests
     internal static async Task RunAsync(string root)
     {
         CheckQuotaCaptions();
+        CheckFrameBudget();
         await QuickSettingsRecoveryTests.RunAsync(root);
         var captions = new System.Text.Json.Nodes.JsonObject();
         Check(QuickSettingsRegistration.QuotaCaption(captions).Contains("未知"));
@@ -183,6 +184,49 @@ internal static class QuickSettingsTests
             quota["windows"]!.AsArray().RemoveAt(0);
             Check(QuickSettingsRegistration.QuotaCaption(quota) == "额度：未知");
         }
+    }
+
+    private static void CheckFrameBudget()
+    {
+        var json = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        var limits = new System.Text.Json.Nodes.JsonObject();
+        for (var index = 0; index < 64; ++index)
+            limits[$"quota{index}_window"] = new System.Text.Json.Nodes.JsonObject {
+                ["used_percent"] = 60, ["reset_at"] = DateTimeOffset.UtcNow.AddHours(1).ToUnixTimeSeconds()
+            };
+        var payload = JsonSerializer.SerializeToUtf8Bytes(new { rate_limit = limits }, json);
+        var accounts = new System.Text.Json.Nodes.JsonArray();
+        var usage = new System.Text.Json.Nodes.JsonArray();
+        for (var index = 0; index < 40; ++index)
+        {
+            var id = index.ToString("x32");
+            accounts.Add(new System.Text.Json.Nodes.JsonObject {
+                ["id"] = id, ["name"] = new string('账', 80), ["enabled"] = true, ["auth"] = "ready"
+            });
+            var quota = Quota.Parse(id, payload) with { UpdatedAt = DateTimeOffset.UtcNow.AddMinutes(-10) };
+            Check(quota.Windows.Count == 64);
+            usage.Add(JsonSerializer.SerializeToNode(quota, json));
+        }
+        var activeId = 39.ToString("x32");
+        var status = new System.Text.Json.Nodes.JsonObject { ["activeAccountId"] = activeId, ["accounts"] = accounts, ["usage"] = usage };
+        Check(JsonSerializer.SerializeToUtf8Bytes(status, json).Length < 1024 * 1024);
+        var projection = QuickSettingsRegistration.Presentation(new(true, true, status, "代理运行中"), true, "");
+        var epoch = Guid.NewGuid().ToString("N");
+        var nonce = Guid.NewGuid().ToString("N");
+        var result = new System.Text.Json.Nodes.JsonObject { ["eventId"] = Guid.NewGuid().ToString(), ["outcome"] = "confirmed" };
+        var state = QuickSettingsRegistration.ContractState(projection, epoch, ulong.MaxValue, nonce, result);
+        var register = JsonSerializer.SerializeToUtf8Bytes(new {
+            protocol = 2, type = "plugin.register", id = "codex-pool", manifest = QuickSettingsRegistration.Manifest(), state, activationNonce = nonce
+        }, json);
+        var poll = JsonSerializer.SerializeToUtf8Bytes(new {
+            protocol = 2, type = "plugin.poll", id = "codex-pool", providerEpoch = epoch, state, result
+        }, json);
+        if (register.Length > 32768 || poll.Length > 32768)
+            throw new InvalidOperationException($"Quick Settings frame exceeds the byte budget: register={register.Length}, poll={poll.Length}.");
+        var visible = state["components"]!.AsArray().Single(x => x!["id"]!.GetValue<string>() == "accounts")!["items"]!.AsArray();
+        Check(visible.Count is > 0 and < 32);
+        Check(visible.Single(x => x!["selected"]!.GetValue<bool>())!["id"]!.GetValue<string>() == activeId);
+        Check(visible.All(x => x!["subtitle"]!.GetValue<string>().EndsWith('…')));
     }
 
     private static void Check(bool value)
