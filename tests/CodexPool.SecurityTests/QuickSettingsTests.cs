@@ -15,6 +15,7 @@ internal static class QuickSettingsTests
 {
     internal static async Task RunAsync(string root)
     {
+        CheckQuotaCaptions();
         await QuickSettingsRecoveryTests.RunAsync(root);
         var captions = new System.Text.Json.Nodes.JsonObject();
         Check(QuickSettingsRegistration.QuotaCaption(captions).Contains("未知"));
@@ -152,6 +153,36 @@ internal static class QuickSettingsTests
             Check(production.UpdateAutomaticSwitching(false) == newer with { AutoSwitch = false });
         }
         finally { await app.StopAsync(); }
+    }
+
+    private static void CheckQuotaCaptions()
+    {
+        foreach (var seconds in new[] { 18000, 25200, 32400 })
+        {
+            var now = DateTimeOffset.UtcNow;
+            var quota = JsonSerializer.SerializeToNode(new {
+                cacheState = "current", windows = new[] {
+                    new { limitId = "codex", windowSeconds = seconds, remainingPercent = 40d, resetAt = now.AddHours(1) },
+                    new { limitId = "codex", windowSeconds = 604800, remainingPercent = 70d, resetAt = now.AddDays(1) },
+                    new { limitId = "extra", windowSeconds = 18000, remainingPercent = 99d, resetAt = now.AddHours(1) }
+                }
+            })!.AsObject();
+            var shortLabel = QuotaLabels.Duration(seconds);
+            Check(QuickSettingsRegistration.QuotaCaption(quota) == $"{shortLabel}：40%    每周：70%");
+            quota["windows"]![0]!.AsObject().Remove("limitId");
+            Check(QuickSettingsRegistration.QuotaCaption(quota) == $"{shortLabel}：40%    每周：70%");
+            quota["cacheState"] = "historical";
+            Check(QuickSettingsRegistration.QuotaCaption(quota) == $"{shortLabel}：40%（缓存）    每周：70%（缓存）");
+            quota["cacheState"] = "current";
+            quota["windows"]![0]!["resetAt"] = now.AddMinutes(-1).ToString("O");
+            Check(QuickSettingsRegistration.QuotaCaption(quota) == $"{shortLabel}：40%（缓存）    每周：70%");
+            quota["windows"]![0]!["remainingPercent"] = 101d;
+            Check(QuickSettingsRegistration.QuotaCaption(quota) == $"{shortLabel}：未知    每周：70%");
+            quota["windows"]!.AsArray().RemoveAt(0);
+            Check(QuickSettingsRegistration.QuotaCaption(quota) == "每周：70%");
+            quota["windows"]!.AsArray().RemoveAt(0);
+            Check(QuickSettingsRegistration.QuotaCaption(quota) == "额度：未知");
+        }
     }
 
     private static void Check(bool value)

@@ -277,18 +277,22 @@ internal static class QuickSettingsRegistration
 
     internal static string QuotaCaption(JsonObject? quota)
     {
-        if (quota?["windows"] is not JsonArray windows) return "5 小时：未知    每周：未知";
-        string Window(int seconds, string label)
+        if (quota?["windows"] is not JsonArray windows) return "额度：未知";
+        var reported = windows.OfType<JsonObject>()
+            .Where(value => (value["limitId"]?.GetValue<string>() ?? "codex") == "codex").ToArray();
+        if (reported.Length == 0) return "额度：未知";
+        string Window(JsonObject value)
         {
-            var value = windows.OfType<JsonObject>().FirstOrDefault(x => x["windowSeconds"]?.GetValue<int>() == seconds
-                && (x["limitId"]?.GetValue<string>() ?? "codex") == "codex");
-            if (value?["remainingPercent"] is not JsonValue remaining || !remaining.TryGetValue<double>(out var number)
+            int? seconds = value["windowSeconds"] is JsonValue duration && duration.TryGetValue<int>(out var length)
+                ? length : null;
+            var label = seconds == 604800 ? "每周" : QuotaLabels.Duration(seconds);
+            if (value["remainingPercent"] is not JsonValue remaining || !remaining.TryGetValue<double>(out var number)
                 || !double.IsFinite(number) || number is < 0 or > 100) return label + "：未知";
             var current = quota["cacheState"]?.GetValue<string>() == "current"
                 && DateTimeOffset.TryParse(value["resetAt"]?.GetValue<string>(), out var reset) && reset > DateTimeOffset.UtcNow;
             return $"{label}：{number:0.#}%" + (current ? "" : "（缓存）");
         }
-        return Window(18000, "5 小时") + "    " + Window(604800, "每周");
+        return string.Join("    ", reported.Select(Window));
     }
 
     internal static async Task<JsonObject> ExchangeAsync(JsonObject request, string broker, CancellationToken token)
