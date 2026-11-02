@@ -93,12 +93,13 @@ public sealed class Quota(HttpClient http, OAuth auth, Vault vault, TimeSpan? re
                 || account.RefreshToken != beforeReady.RefreshToken;
             var now = DateTimeOffset.UtcNow;
             var subscription = SubscriptionExpiry.Inspect(account.IdToken, account.IdTokenMetadataStale, now);
-            // Manual refresh also synchronizes expired/retained ID-token metadata.
+            // Background quota refresh also synchronizes expired/retained ID-token
+            // metadata, independently of the access token's longer lifetime.
             // A newly issued token still reporting a past date is upstream lag;
             // rotating it again immediately cannot provide fresher evidence.
             // Unknown/missing metadata alone never triggers a rotation.
-            if (force && !preparedRefresh && subscription.State == "stale"
-                && (!subscription.TokenCurrent || subscription.ObservedAt <= now.AddMinutes(-15))
+            if (!preparedRefresh && subscription.State == "stale"
+                && (!subscription.TokenCurrent || force && subscription.ObservedAt <= now.AddMinutes(-15))
                 && (!renewalSyncAt.TryGetValue(id, out var lastSync) || lastSync.AuthorizationVersion != account.AuthorizationVersion || now - lastSync.At >= TimeSpan.FromMinutes(15)))
             {
                 renewalSyncAt[id] = (now, account.AuthorizationVersion);

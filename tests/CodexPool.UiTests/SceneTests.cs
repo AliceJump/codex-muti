@@ -67,11 +67,13 @@ internal static class SceneTests
             Check(PoolPresentation.Accounts(JsonSerializer.SerializeToElement(state), true)[0].SubscriptionDeadline.Contains("上游未提供"));
             state["accounts"]![0]!["subscriptionState"] = "stale";
             state["accounts"]![0]!["subscriptionActiveUntil"] = until.ToString("O");
-            Check(PoolPresentation.Accounts(JsonSerializer.SerializeToElement(state), true)[0].SubscriptionDeadline.Contains("旧授权资料"));
+            Check(PoolPresentation.Accounts(JsonSerializer.SerializeToElement(state), true)[0].SubscriptionDeadline.Contains("旧订阅资料"));
             state["accounts"]![0]!["subscriptionSyncReason"] = "deadline_in_past";
             Check(PoolPresentation.Accounts(JsonSerializer.SerializeToElement(state), true)[0].SubscriptionDeadline.Contains("上游仍返回旧日期"));
             state["accounts"]![0]!["subscriptionSyncReason"] = "id_token_expired";
-            Check(PoolPresentation.Accounts(JsonSerializer.SerializeToElement(state), true)[0].SubscriptionDeadline.Contains("授权资料已过期"));
+            Check(PoolPresentation.Accounts(JsonSerializer.SerializeToElement(state), true)[0].SubscriptionDeadline.Contains("订阅资料待更新"));
+            state["accounts"]![0]!["subscriptionSyncReason"] = "id_token_not_refreshed";
+            Check(PoolPresentation.Accounts(JsonSerializer.SerializeToElement(state), true)[0].SubscriptionDeadline.Contains("订阅资料未更新"));
         });
         run("Quota refresh failure immediately hides current percentages and preserves account selection", () =>
         {
