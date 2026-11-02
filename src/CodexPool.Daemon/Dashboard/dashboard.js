@@ -68,7 +68,7 @@ function patchChildren(parent, children) {
 function notice(message) { setText('notice-message',message); $('notice').hidden=!message; }
 function reset(at) { const minutes=Math.max(0,Math.ceil((Date.parse(at)-Date.now())/60000)); return minutes>=1440?`${Math.floor(minutes/1440)}d ${Math.floor(minutes%1440/60)}h`:minutes>=60?`${Math.floor(minutes/60)}h ${minutes%60}m`:`${minutes}m`; }
 function subscriptionDeadline(value, status, reason) {
-  if(status==='stale')return `订阅截止时间待同步（${({deadline_in_past:'上游仍返回旧日期',id_token_expired:'授权资料已过期',id_token_not_refreshed:'授权资料未更新'})[reason]||'旧授权资料'}）`;
+  if(status==='stale')return `订阅截止时间待同步（${({deadline_in_past:'上游仍返回旧日期',id_token_expired:'订阅资料待更新',id_token_not_refreshed:'订阅资料未更新'})[reason]||'旧订阅资料'}）`;
   if(status==='not_reported')return '订阅截止时间未知（上游未提供）';
   const at=typeof value==='string'?new Date(value):null;
   return at&&Number.isFinite(at.getTime())?`订阅截止 ${at.toLocaleString('zh-CN',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23',timeZoneName:'longOffset'})}`:'订阅截止时间未知';
