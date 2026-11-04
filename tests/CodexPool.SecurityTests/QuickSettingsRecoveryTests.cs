@@ -12,6 +12,26 @@ internal static class QuickSettingsRecoveryTests
         var probes=0;using var http=new HttpClient();var proxy=new QuickSettingsProxy(service,folder,http,()=>null,()=>{probes++;return true;});
         await proxy.DuringStartupAsync(async()=>{var state=await proxy.ReadAsync(CancellationToken.None);Check(!state.Known && probes==1);return new(true,"Synthetic startup");});
         Check((await proxy.ReadAsync(CancellationToken.None)).Known && probes==2);
+        var stopFolder=Path.Combine(folder,"stop-response");Directory.CreateDirectory(stopFolder);
+        _=new Vault(stopFolder);
+        var stalled=new System.IO.Pipelines.Pipe();
+        using(var stalledHttp=new HttpClient(new StalledStatusHandler(stalled.Reader.AsStream())){BaseAddress=new("http://127.0.0.1:1")})
+        {
+            var canceled=false;
+            try { await QuickSettingsRegistration.ReadAsync(stalledHttp,stopFolder,"/status",CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(4)); }
+            catch(OperationCanceledException) { canceled=true; }
+            finally { await stalled.Writer.CompleteAsync(); }
+            Check(canceled);
+        }
+        var released=false;
+        using(var controlHttp=new HttpClient(new StopResponseHandler(()=>released=true)){BaseAddress=new("http://127.0.0.1:1")})
+        {
+            var stopProxy=new QuickSettingsProxy(service,stopFolder,controlHttp,
+                ()=>released ? null : new ProxyIdentity(int.MaxValue,0,service),()=>true);
+            using var deadline=new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            var outcome=await stopProxy.SetRunningAsync(false,deadline.Token);
+            Check(outcome.Success && released);
+        }
         var malformed=false;try{QuickSettingsRegistration.Required<bool>(new JsonObject(),"value");}catch(JsonException){malformed=true;}Check(malformed);
         malformed=false;try{QuickSettingsRegistration.Presentation(new(true,true,new JsonObject(),""),true,"");}catch(JsonException){malformed=true;}Check(malformed);
         var accounts=new JsonArray();for(var i=0;i<33;i++)accounts.Add(new JsonObject{["id"]="account-"+i,["name"]="Account "+i,["enabled"]=true,["paused"]=false,["drain"]=false,["state"]="standby",["auth"]="ready"});
@@ -51,5 +71,25 @@ internal static class QuickSettingsRecoveryTests
         Check(await QuickSettingsRegistration.RunAsync([broker,service],folder,Guid.NewGuid().ToString(),_=>Task.FromResult(new ProxySnapshot(true,false,null,"")),Offline,unavailableExitAfter:TimeSpan.FromMilliseconds(50))==0 && attempts<=3);
         var configuration=new JsonObject{["configVersion"]=1,["servicePath"]="//untrusted/share/CodexPool.Daemon.exe",["dataDirectory"]=folder};
         var rejected=false;try{QuickSettingsProviderEntry.Parse(configuration,Path.Combine(folder,"provider","CodexPool.Daemon.exe"));}catch(IOException){rejected=true;}Check(rejected);
+    }
+    private sealed class StalledStatusHandler(Stream body) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken token)
+            => Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK){Content=new StreamContent(body)});
+    }
+    private sealed class StopResponseHandler(Action released) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken token)
+        {
+            if(request.RequestUri!.AbsolutePath=="/status")return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK){Content=new StringContent("{\"accounts\":[],\"inFlightRequests\":[],\"nativeLoginAttempts\":[]}")});
+            Check(request.RequestUri.AbsolutePath=="/control/shutdown" && request.Method==HttpMethod.Post);
+            return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.Accepted){Content=new ReleaseContent(released)});
+        }
+    }
+    private sealed class ReleaseContent(Action released) : HttpContent
+    {
+        protected override bool TryComputeLength(out long length){length=2;return true;}
+        protected override Task SerializeToStreamAsync(Stream stream,System.Net.TransportContext? context)=>stream.WriteAsync(new byte[]{(byte)'{',(byte)'}'}).AsTask();
+        protected override void Dispose(bool disposing){if(disposing)released();base.Dispose(disposing);}
     }
 }
