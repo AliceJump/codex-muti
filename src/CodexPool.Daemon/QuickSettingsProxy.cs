@@ -140,6 +140,9 @@ internal sealed class QuickSettingsProxy
             using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token);
             if (response.StatusCode == HttpStatusCode.Conflict) return new(false, "代理正忙，未关闭");
             if (response.StatusCode != HttpStatusCode.Accepted) return new(false, "代理未接受安全关闭");
+            // Release the control stream before waiting for the server's drain.
+            await response.Content.LoadIntoBufferAsync(4096, token);
+            response.Dispose();
             for (var i = 0; i < 60; i++)
             {
                 await Task.Delay(200, token);

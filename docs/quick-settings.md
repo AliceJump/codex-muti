@@ -62,6 +62,10 @@ Shell 收到的 `tileLabel` 与 `quotaIcon` 是有长度、数值范围和颜色
 
 测试：
 
+2026-11-05 隔离 VM 增量：Provider 支持 `endpoint-discovery-v1`，从 Broker 发布的有界记录发现地址，发送消息前核对内核服务端身份和 PID/创建时间，不包含 Windows build 或私有 ABI 判断。缺失记录兼容旧 Broker；现存无效记录拒绝回退。部署可接受框架根目录中同级的 `qse-broker.exe/qse-control.exe` 或原有 `Registered` 布局。
+
+真实 26H2 来宾中已验证隔离服务的启停、两个账户的真实缓存额度及独立 Provider 升级。修复停止控制响应仍占用连接、导致服务退出确认超时的问题：先有界缓冲并释放响应，再等待服务退出。停止修复在真实来宾确认；另有跨 C++ Broker/C# 客户端的真实管道检查及响应释放回归。账户凭据副本仅含尚有效的 access/ID token，未复制 refresh token；宿主服务与账户未切换。第二账户周额度为 0，因此真实跨账户成功切换仍待可用账户，不能标记通过。这些检查不代表完整 24H2/26H2 或长期稳定性已验收。
+
 ```powershell
 dotnet run --project tests/CodexPool.Tests -c Release
 dotnet run --project tests/CodexPool.SecurityTests -c Release -- --quick-settings-only

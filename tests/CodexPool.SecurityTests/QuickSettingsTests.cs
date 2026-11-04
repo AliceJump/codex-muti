@@ -15,6 +15,8 @@ internal static class QuickSettingsTests
 {
     internal static async Task RunAsync(string root)
     {
+        CheckEndpointDiscovery(root);
+        await CheckCppDiscoveryAsync();
         CheckQuotaCaptions();
         CheckFrameBudget();
         await QuickSettingsRecoveryTests.RunAsync(root);
@@ -154,6 +156,83 @@ internal static class QuickSettingsTests
             Check(production.UpdateAutomaticSwitching(false) == newer with { AutoSwitch = false });
         }
         finally { await app.StopAsync(); }
+    }
+    private static void CheckEndpointDiscovery(string root)
+    {
+        const string user = "S-1-5-21-1-2-3-1001", logon = "S-1-5-5-10-20";
+        const int session = 7;
+        var broker = Path.Combine(root, "discovery", "qse-broker.exe");
+        var legacy = $"Sessions\\{session}\\AppContainerNamedObjects\\S-1-15-2-1\\QuickSettingsExtensions.v1.{user}.{session}";
+        var pipe = $@"\\.\pipe\QuickSettingsExtensions.v1.{user}.{session}.FutureDesktop.{logon}";
+        System.Text.Json.Nodes.JsonObject Record() => new()
+        {
+            ["discoveryVersion"] = 1, ["brokerPath"] = broker, ["userSid"] = user, ["logonSid"] = logon,
+            ["session"] = session, ["processId"] = 123u, ["processCreation"] = "134382677782555277", ["pipeName"] = pipe
+        };
+        var record = Record();
+        var discovered = QuickSettingsEndpoint.Parse(record, broker, user, logon, session, legacy);
+        Check(discovered.PipeName == pipe[@"\\.\pipe\".Length..] && discovered.ProcessId == 123);
+        void Reject(System.Text.Json.Nodes.JsonObject value)
+        {
+            var rejected = false;
+            try { QuickSettingsEndpoint.Parse(value, broker, user, logon, session, legacy); }
+            catch (Exception error) when (error is IOException or InvalidOperationException or FormatException) { rejected = true; }
+            Check(rejected);
+        }
+        var bad = Record(); bad["brokerPath"] = Path.Combine(root, "other.exe"); Reject(bad);
+        bad = Record(); bad["userSid"] = user + "-1"; Reject(bad);
+        bad = Record(); bad["logonSid"] = logon + "-1"; Reject(bad);
+        bad = Record(); bad["session"] = session + 1; Reject(bad);
+        bad = Record(); bad["pipeName"] = @"\\remote\pipe\untrusted"; Reject(bad);
+        bad = Record(); bad["processId"] = 1.5; Reject(bad);
+        bad = Record(); bad["extra"] = true; Reject(bad);
+        Directory.CreateDirectory(Path.GetDirectoryName(broker)!);
+        Check(QuickSettingsEndpoint.Read(broker, user, logon, session, legacy) is null);
+        var file = QuickSettingsEndpoint.FileName(broker, user, session);
+        File.WriteAllText(file, Record().ToJsonString());
+        Check(QuickSettingsEndpoint.Read(broker, user, logon, session, legacy)?.ProcessId == 123);
+        File.WriteAllText(file, "{");
+        var malformedRejected = false;
+        try { QuickSettingsEndpoint.Read(broker, user, logon, session, legacy); }
+        catch (IOException) { malformedRejected = true; }
+        Check(malformedRejected);
+        File.WriteAllText(file, new string('x', 16385));
+        var oversizedRejected = false;
+        try { QuickSettingsEndpoint.Read(broker, user, logon, session, legacy); }
+        catch (IOException) { oversizedRejected = true; }
+        Check(oversizedRejected);
+    }
+    private static async Task CheckCppDiscoveryAsync()
+    {
+        // Optional cross-repository fixture; no production broker or account is used.
+        var fixture = Environment.GetEnvironmentVariable("QSE_ENDPOINT_FIXTURE");
+        if (string.IsNullOrEmpty(fixture)) return;
+        fixture = Path.GetFullPath(fixture);
+        using var child = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(fixture, "--serve-once")
+        {
+            UseShellExecute = false, CreateNoWindow = true,
+            RedirectStandardOutput = true, RedirectStandardError = true
+        }) ?? throw new IOException("Cannot start discovery fixture.");
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+        var output = child.StandardOutput.ReadToEndAsync(timeout.Token);
+        var error = child.StandardError.ReadToEndAsync(timeout.Token);
+        try
+        {
+            using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
+            var file = QuickSettingsEndpoint.FileName(fixture, identity.User!.Value,
+                System.Diagnostics.Process.GetCurrentProcess().SessionId);
+            while (!File.Exists(file) && !child.HasExited) await Task.Delay(25, timeout.Token);
+            var response = await QuickSettingsRegistration.ExchangeAsync(
+                new System.Text.Json.Nodes.JsonObject { ["protocol"] = 2, ["type"] = "framework.hello" }, fixture, timeout.Token);
+            Check(response["type"]?.GetValue<string>() == "framework.capabilities");
+            await child.WaitForExitAsync(timeout.Token);
+            Check(child.ExitCode == 0 && (await output).Contains("QSE_DISCOVERY_FIXTURE_READY") && string.IsNullOrWhiteSpace(await error));
+            Check(!File.Exists(file));
+        }
+        finally
+        {
+            if (!child.HasExited) { child.Kill(); await child.WaitForExitAsync(); }
+        }
     }
 
     private static void CheckQuotaCaptions()

@@ -316,7 +316,10 @@ internal static class QuickSettingsRegistration
         using var self = Process.GetCurrentProcess();
         var user = currentIdentity.User?.Value ?? throw new IOException("User unavailable.");
         var session = self.SessionId;
-        var name = $"Sessions\\{session}\\AppContainerNamedObjects\\{ShellPackageSid()}\\QuickSettingsExtensions.v1.{user}.{session}";
+        var logon = QuickSettingsEndpoint.LogonSid(currentIdentity);
+        var legacyName = $"Sessions\\{session}\\AppContainerNamedObjects\\{ShellPackageSid()}\\QuickSettingsExtensions.v1.{user}.{session}";
+        var endpoint = QuickSettingsEndpoint.Read(broker, user, logon, session, legacyName);
+        var name = endpoint?.PipeName ?? legacyName;
         using var pipe = new NamedPipeClientStream(".", name, PipeDirection.InOut, PipeOptions.Asynchronous,
             TokenImpersonationLevel.Identification);
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
@@ -324,12 +327,14 @@ internal static class QuickSettingsRegistration
         await pipe.ConnectAsync(deadline.Token);
         if (!GetNamedPipeServerProcessId(pipe.SafePipeHandle, out var pid)) throw new IOException("Server unavailable.");
         using var server = Process.GetProcessById((int)pid);
+        endpoint?.Check(server);
         if (server.SessionId != self.SessionId || !string.Equals(server.MainModule?.FileName, broker, StringComparison.OrdinalIgnoreCase))
             throw new IOException("Unexpected broker.");
         if (!OpenProcessToken(server.Handle, 8, out var serverToken)) throw new IOException("Server identity unavailable.");
         using (serverToken)
         using (var identity = new WindowsIdentity(serverToken.DangerousGetHandle()))
-            if (identity.User?.Value != user) throw new IOException("Unexpected server identity.");
+            if (identity.User?.Value != user || QuickSettingsEndpoint.LogonSid(identity) != logon)
+                throw new IOException("Unexpected server identity.");
         var bytes = JsonSerializer.SerializeToUtf8Bytes(request, Json);
         if (bytes.Length is 0 or > MaxFrame) throw new IOException("Invalid frame.");
         var size = new byte[4]; BinaryPrimitives.WriteInt32LittleEndian(size, bytes.Length);
