@@ -14,6 +14,15 @@ internal static class QuickSettingsRecoveryTests
         Check((await proxy.ReadAsync(CancellationToken.None)).Known && probes==2);
         var stopFolder=Path.Combine(folder,"stop-response");Directory.CreateDirectory(stopFolder);
         _=new Vault(stopFolder);
+        var stalled=new System.IO.Pipelines.Pipe();
+        using(var stalledHttp=new HttpClient(new StalledStatusHandler(stalled.Reader.AsStream())){BaseAddress=new("http://127.0.0.1:1")})
+        {
+            var canceled=false;
+            try { await QuickSettingsRegistration.ReadAsync(stalledHttp,stopFolder,"/status",CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(4)); }
+            catch(OperationCanceledException) { canceled=true; }
+            finally { await stalled.Writer.CompleteAsync(); }
+            Check(canceled);
+        }
         var released=false;
         using(var controlHttp=new HttpClient(new StopResponseHandler(()=>released=true)){BaseAddress=new("http://127.0.0.1:1")})
         {
@@ -62,6 +71,11 @@ internal static class QuickSettingsRecoveryTests
         Check(await QuickSettingsRegistration.RunAsync([broker,service],folder,Guid.NewGuid().ToString(),_=>Task.FromResult(new ProxySnapshot(true,false,null,"")),Offline,unavailableExitAfter:TimeSpan.FromMilliseconds(50))==0 && attempts<=3);
         var configuration=new JsonObject{["configVersion"]=1,["servicePath"]="//untrusted/share/CodexPool.Daemon.exe",["dataDirectory"]=folder};
         var rejected=false;try{QuickSettingsProviderEntry.Parse(configuration,Path.Combine(folder,"provider","CodexPool.Daemon.exe"));}catch(IOException){rejected=true;}Check(rejected);
+    }
+    private sealed class StalledStatusHandler(Stream body) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken token)
+            => Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK){Content=new StreamContent(body)});
     }
     private sealed class StopResponseHandler(Action released) : HttpMessageHandler
     {

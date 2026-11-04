@@ -222,15 +222,19 @@ internal static class QuickSettingsRegistration
 
     internal static async Task<JsonObject> ReadAsync(HttpClient http, string directory, string path, CancellationToken token)
     {
+        // ResponseHeadersRead ends HttpClient.Timeout at the headers. Bound the
+        // body as well, so a partial local response cannot strand this Provider.
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        deadline.CancelAfter(TimeSpan.FromSeconds(2));
         using var request = new HttpRequestMessage(HttpMethod.Get, path);
         request.Headers.Authorization = new("Bearer", Vault.ReadLocalKey(directory));
-        using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token);
+        using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
         response.EnsureSuccessStatusCode();
         if (response.Content.Headers.ContentLength > 1024 * 1024) throw new IOException("Status is too large.");
-        await using var body = await response.Content.ReadAsStreamAsync(token);
+        await using var body = await response.Content.ReadAsStreamAsync(deadline.Token);
         using var bounded = new MemoryStream();
         var buffer = new byte[4096]; int read;
-        while ((read = await body.ReadAsync(buffer, token)) != 0)
+        while ((read = await body.ReadAsync(buffer, deadline.Token)) != 0)
         {
             if (bounded.Length + read > 1024 * 1024) throw new IOException("Status is too large.");
             bounded.Write(buffer, 0, read);
