@@ -98,8 +98,10 @@ public sealed class Quota(HttpClient http, OAuth auth, Vault vault, TimeSpan? re
             // A newly issued token still reporting a past date is upstream lag;
             // rotating it again immediately cannot provide fresher evidence.
             // Unknown/missing metadata alone never triggers a rotation.
+            var deadlinePassedSinceIssue = subscription.Reason == "deadline_in_past"
+                && subscription.ObservedAt < SubscriptionExpiry.FromIdToken(account.IdToken);
             if (!preparedRefresh && subscription.State == "stale"
-                && (!subscription.TokenCurrent || force && subscription.ObservedAt <= now.AddMinutes(-15))
+                && (!subscription.TokenCurrent || deadlinePassedSinceIssue || force && subscription.ObservedAt <= now.AddMinutes(-15))
                 && (!renewalSyncAt.TryGetValue(id, out var lastSync) || lastSync.AuthorizationVersion != account.AuthorizationVersion || now - lastSync.At >= TimeSpan.FromMinutes(15)))
             {
                 renewalSyncAt[id] = (now, account.AuthorizationVersion);

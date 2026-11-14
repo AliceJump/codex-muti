@@ -143,7 +143,12 @@ public sealed class OAuth(HttpClient http, Vault vault)
             }
             catch (Exception ex) when (ex is OperationCanceledException or HttpRequestException)
             {
-                if (!requestStarted)
+                // HttpClient enters SendAsync before DNS, TLS and proxy tunnel
+                // setup. These runtime classifications prove the token request
+                // was not delivered; an unclassified connection/reset/timeout
+                // still leaves the rotation outcome unknown.
+                if (!requestStarted || ex is HttpRequestException { StatusCode: null,
+                    HttpRequestError: HttpRequestError.NameResolutionError or HttpRequestError.SecureConnectionError or HttpRequestError.ProxyTunnelError })
                 {
                     health[id] = "auth_temporarily_unavailable"; vault.SetAuthStatus(id, "ready");
                     refreshBackoff[id] = DateTimeOffset.UtcNow.AddSeconds(30);

@@ -89,6 +89,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Renewal quota cancellation retains rejected history while persisting the accepted rotation", () => RenewalQuotaTests.Cancellation(root)),
     ("Renewal background refresh updates expired subscription metadata and avoids repeating fresh upstream dates", () => RenewalQuotaTests.ExpiredMetadata(root)),
     ("Renewal automatic metadata sync preserves quota and auth with retry backoff when metadata is omitted or temporarily unavailable", () => RenewalQuotaTests.AutomaticMetadataBackoff(root)),
+    ("Renewal background metadata sync distinguishes pre-send failures from unknown token rotation outcomes", () => RenewalQuotaTests.AutomaticMetadataTransportFailures(root)),
+    ("Renewal background metadata sync refreshes a deadline crossed after issuance but retains newly issued upstream dates", () => RenewalQuotaTests.DeadlinePassedSinceIssue(root)),
     ("Quota selection survives persistence faults without changing the owner", QuotaSelectionFailure),
     ("Quota recovery requires a new successful query and preserves independent restrictions", QuotaRecovery),
     ("Quota queries started before rejection cannot clear a newer cooldown", QuotaRecoveryRace),
