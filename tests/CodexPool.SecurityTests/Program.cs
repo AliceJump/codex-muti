@@ -32,6 +32,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Upstream deadline bounds quota bodies, releases the account lock and continues the batch", () => UpstreamDeadlineTests.QuotaBody(root)),
     ("Upstream deadline bounds catalog bodies and preserves caller cancellation", () => UpstreamDeadlineTests.CatalogBody(root)),
     ("Upstream deadline records quota lock wait timeout without releasing another caller's lock", () => UpstreamDeadlineTests.QuotaLock(root)),
+    ("Quick Settings shutdown bounds stalled bodies, releases the response and never replays the request", () => QuickSettingsRecoveryTests.ShutdownBodyDeadline(root)),
     ("Native login host shutdown awaits helper cleanup and rejects new starts", () => NativeLoginTests.Shutdown(root)),
     ("Native login coalesces duplicate starts and cancels only the requested helper before retry", () => NativeLoginTests.Lifecycle(root)),
     ("Native login releases its slot after timeout, failed launch, invalid path or missing credentials", () => NativeLoginTests.Failures(root)),

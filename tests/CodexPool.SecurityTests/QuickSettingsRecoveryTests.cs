@@ -7,6 +7,7 @@ internal static class QuickSettingsRecoveryTests
     private static void Check(bool value){if(!value)throw new InvalidOperationException("Quick Settings recovery contract failed.");}
     internal static async Task RunAsync(string root)
     {
+        await ShutdownBodyDeadline(root);
         var folder=Path.Combine(root,"qse-recovery");Directory.CreateDirectory(folder);
         var broker=Path.Combine(folder,"broker.exe");var service=Path.Combine(folder,"CodexPool.Daemon.exe");File.WriteAllText(broker,"");File.WriteAllText(service,"");
         var probes=0;using var http=new HttpClient();var proxy=new QuickSettingsProxy(service,folder,http,()=>null,()=>{probes++;return true;});
@@ -71,6 +72,63 @@ internal static class QuickSettingsRecoveryTests
         Check(await QuickSettingsRegistration.RunAsync([broker,service],folder,Guid.NewGuid().ToString(),_=>Task.FromResult(new ProxySnapshot(true,false,null,"")),Offline,unavailableExitAfter:TimeSpan.FromMilliseconds(50))==0 && attempts<=3);
         var configuration=new JsonObject{["configVersion"]=1,["servicePath"]="//untrusted/share/CodexPool.Daemon.exe",["dataDirectory"]=folder};
         var rejected=false;try{QuickSettingsProviderEntry.Parse(configuration,Path.Combine(folder,"provider","CodexPool.Daemon.exe"));}catch(IOException){rejected=true;}Check(rejected);
+    }
+    internal static async Task ShutdownBodyDeadline(string root)
+    {
+        foreach (var cancelCaller in new[] { false, true })
+        {
+            var folder = Path.Combine(root, "qse-shutdown-body-" + cancelCaller);
+            Directory.CreateDirectory(folder);
+            var service = Path.Combine(folder, "CodexPool.Daemon.exe"); File.WriteAllText(service, "");
+            _ = new Vault(folder);
+            ProxyServiceIntent.Confirm(folder, true);
+            using var content = new StalledShutdownContent();
+            using var handler = new StalledShutdownHandler(content);
+            using var http = new HttpClient(handler) { BaseAddress = new("http://127.0.0.1:1"), Timeout = Timeout.InfiniteTimeSpan };
+            var proxy = new QuickSettingsProxy(service, folder, http,
+                () => new ProxyIdentity(int.MaxValue, 0, service), () => true);
+            using var caller = new CancellationTokenSource();
+            // The first case supplies no caller deadline at all. Content ignores
+            // cancellation until disposed, so signalling a token alone is not enough.
+            var operation = proxy.SetRunningAsync(false, cancelCaller ? caller.Token : CancellationToken.None);
+            await content.Started.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            if (cancelCaller) caller.Cancel();
+            var outcome = await operation.WaitAsync(TimeSpan.FromSeconds(6));
+            Check(!outcome.Success && content.Released && handler.StopRequests == 1);
+            Check(ProxyServiceIntent.AllowsAutomaticStart(folder));
+            Check((await proxy.SetRunningAsync(true, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(3))).Success);
+            Check(handler.StopRequests == 1);
+        }
+    }
+    private sealed class StalledShutdownHandler(HttpContent content) : HttpMessageHandler
+    {
+        internal int StopRequests { get; private set; }
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
+        {
+            if (request.RequestUri!.AbsolutePath == "/status") return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                { Content = new StringContent("{\"accounts\":[],\"inFlightRequests\":[],\"nativeLoginAttempts\":[]}") });
+            Check(request.RequestUri.AbsolutePath == "/control/shutdown" && request.Method == HttpMethod.Post);
+            StopRequests++;
+            return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.Accepted) { Content = content });
+        }
+    }
+    private sealed class StalledShutdownContent : HttpContent
+    {
+        internal TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource released = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal bool Released { get; private set; }
+        protected override bool TryComputeLength(out long length) { length = 0; return false; }
+        protected override async Task SerializeToStreamAsync(Stream stream, System.Net.TransportContext? context)
+        {
+            await stream.WriteAsync(new byte[] { (byte)'{' });
+            Started.TrySetResult();
+            await released.Task;
+        }
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) { Released = true; released.TrySetCanceled(); }
+            base.Dispose(disposing);
+        }
     }
     private sealed class StalledStatusHandler(Stream body) : HttpMessageHandler
     {
