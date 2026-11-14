@@ -203,7 +203,7 @@ internal static class RenewalQuotaTests
         issuer.NativeResponseBody = JsonSerializer.Serialize(new { access_token = issuer.Token("native-access", "sub-A", null), id_token = IdToken(until) });
         using var http = new HttpClient(new AsyncHandler((_, _) => Task.FromResult(Reply(HttpStatusCode.OK, Payload()))));
         var quota = new Quota(http, new OAuth(authHttp, vault), vault);
-        await quota.RefreshAsync("A", default, force: true);
+        await quota.RefreshAsync("A", default);
         Check(issuer.RefreshCalls == 1 && SubscriptionExpiry.Inspect(vault.Find("A")!.IdToken).State == "current");
         await quota.RefreshAsync("A", default, force: true);
         Check(issuer.RefreshCalls == 1 && JsonSerializer.Serialize(vault.Find("B")) == beforeB);
@@ -217,5 +217,122 @@ internal static class RenewalQuotaTests
         Check(issuer.RefreshCalls == 1 && freshQuota.Snapshot("A")!.Fresh(DateTimeOffset.UtcNow));
         var view = JsonSerializer.SerializeToElement(freshVault.Find("A")!.PublicView(true));
         Check(view.GetProperty("subscriptionSyncReason").GetString() == "deadline_in_past" && view.GetProperty("subscriptionActiveUntil").ValueKind == JsonValueKind.Null);
+    }
+
+    public static async Task AutomaticMetadataBackoff(string root)
+    {
+        foreach (var temporaryFailure in new[] { false, true })
+        {
+            using var issuer = new FakeIssuer(); using var authHttp = new HttpClient(issuer);
+            var vault = Store(root, "renewal-automatic-metadata-" + temporaryFailure);
+            var until = DateTimeOffset.UtcNow.AddDays(20).ToUnixTimeSeconds();
+            // Retained metadata is also stale when a previous access-token refresh
+            // omitted a replacement ID token, even before its original expiry.
+            var idToken = issuer.Token(NativeLogin.NativeClientId, "sub-A", null,
+                nativeMetadata: new Dictionary<string, object> { ["chatgpt_account_id"] = "backend-A", ["chatgpt_subscription_active_until"] = until });
+            vault.ReplaceTokens("A", "old-refresh-A", new() { AccessToken = "old-access-A", RefreshToken = "old-refresh-A", IdToken = idToken, ExpiresIn = 86400 });
+            vault.ReplaceTokens("A", "old-refresh-A", new() { AccessToken = "old-access-A", RefreshToken = "old-refresh-A", ExpiresIn = 86400 });
+            Check(SubscriptionExpiry.Inspect(vault.Find("A")!.IdToken, vault.Find("A")!.IdTokenMetadataStale).Reason == "id_token_not_refreshed");
+            var beforeB = JsonSerializer.Serialize(vault.Find("B"));
+            issuer.NativeResponseStatus = temporaryFailure ? HttpStatusCode.ServiceUnavailable : HttpStatusCode.OK;
+            issuer.NativeResponseBody = JsonSerializer.Serialize(new { access_token = issuer.Token("native-access", "sub-A", null) });
+            using var http = new HttpClient(new AsyncHandler((_, _) => Task.FromResult(Reply(HttpStatusCode.OK, Payload()))));
+            var auth = new OAuth(authHttp, vault);
+            var quota = new Quota(http, auth, vault);
+            await quota.RefreshAsync("A", default);
+            Check(issuer.RefreshCalls == 1 && quota.RefreshErrors.Length == 0);
+            Check(quota.Snapshot("A")!.Fresh(DateTimeOffset.UtcNow));
+            var view = JsonSerializer.SerializeToElement(vault.Find("A")!.PublicView(true));
+            Check(view.GetProperty("subscriptionState").GetString() == "stale" && view.GetProperty("subscriptionActiveUntil").ValueKind == JsonValueKind.Null);
+            Check(vault.Find("A")!.AuthStatus == "ready" && JsonSerializer.Serialize(vault.Find("B")) == beforeB);
+            await quota.RefreshAsync("B", default);
+            Check(quota.Snapshot("B")!.Fresh(DateTimeOffset.UtcNow) && issuer.RefreshCalls == 1);
+            // Bypass the quota cache: both automatic and manual calls share the
+            // metadata retry interval, including a successful refresh without ID metadata.
+            await quota.RefreshAsync("A", default, force: true);
+            await auth.ReadyAsync("A", default);
+            Check(issuer.RefreshCalls == 1 && quota.RefreshErrors.Length == 0 && vault.Find("A")!.AuthStatus == "ready");
+        }
+    }
+
+    public static async Task AutomaticMetadataTransportFailures(string root)
+    {
+        foreach (var (error, statusCode, notSent) in new (HttpRequestError, HttpStatusCode?, bool)[]
+        {
+            (HttpRequestError.NameResolutionError, null, true), (HttpRequestError.SecureConnectionError, null, true),
+            (HttpRequestError.ProxyTunnelError, null, true),
+            (HttpRequestError.ProxyTunnelError, HttpStatusCode.BadGateway, true),
+            (HttpRequestError.ProxyTunnelError, HttpStatusCode.ProxyAuthenticationRequired, true),
+            (HttpRequestError.ConnectionError, null, false), (HttpRequestError.ConnectionError, HttpStatusCode.BadGateway, false),
+            (HttpRequestError.Unknown, null, false), (HttpRequestError.ResponseEnded, null, false),
+            (HttpRequestError.InvalidResponse, null, false), (HttpRequestError.HttpProtocolError, null, false)
+        })
+        {
+            var directory = "renewal-metadata-transport-" + error + "-" + statusCode;
+            var vault = Store(root, directory);
+            using var issuer = new FakeIssuer();
+            var expiredId = issuer.Token(NativeLogin.NativeClientId, "sub-A", null, expired: true,
+                nativeMetadata: new Dictionary<string, object> { ["chatgpt_account_id"] = "backend-A",
+                    ["chatgpt_subscription_active_until"] = DateTimeOffset.UtcNow.AddDays(20).ToUnixTimeSeconds() });
+            vault.ReplaceTokens("A", "old-refresh-A", new() { AccessToken = "old-access-A", RefreshToken = "old-refresh-A",
+                IdToken = expiredId, ExpiresIn = 86400 });
+            var beforeB = JsonSerializer.Serialize(vault.Find("B"));
+            var attempts = 0;
+            issuer.Barrier = _ => { attempts++; throw new HttpRequestException(error, "TRANSPORT-CANARY", statusCode: statusCode); };
+            using var authHttp = new HttpClient(issuer);
+            var auth = new OAuth(authHttp, vault);
+            var usageCalls = 0;
+            using var http = new HttpClient(new AsyncHandler((_, _) =>
+            { usageCalls++; return Task.FromResult(Reply(HttpStatusCode.OK, Payload("free"))); }));
+            var quota = new Quota(http, auth, vault);
+            await quota.RefreshAllAsync(["A"], default);
+            Check(attempts == 1 && usageCalls == (notSent ? 1 : 0));
+            Check(vault.Find("A")!.AuthStatus == (notSent ? "ready" : "reauth_required"));
+            Check(auth.RoutingStatus("A") == (notSent ? "ready" : "reauth_required"));
+            Check(auth.Health("A") == (notSent ? "auth_temporarily_unavailable" : "reauth_required"));
+            Check(new Vault(Path.Combine(root, directory)).Find("A")!.AuthStatus == vault.Find("A")!.AuthStatus);
+            Check(vault.Find("A")!.AccessToken == "old-access-A" && vault.Find("A")!.RefreshToken == "old-refresh-A");
+            Check(JsonSerializer.Serialize(vault.Find("B")) == beforeB);
+            Check((quota.Snapshot("A") is not null) == notSent && quota.RefreshErrors.Length == (notSent ? 0 : 1));
+            Check(!JsonSerializer.Serialize(quota.Views).Contains("CANARY"));
+            await quota.RefreshAsync("B", default);
+            Check(quota.Snapshot("B")!.Fresh(DateTimeOffset.UtcNow) && usageCalls == (notSent ? 2 : 1));
+            // Bypass the usage cache: a manual retry cannot immediately rotate
+            // again after either a known pre-send failure or an unknown outcome.
+            await quota.RefreshAllAsync(["A"], default, force: true);
+            Check(attempts == 1);
+        }
+    }
+
+    public static async Task DeadlinePassedSinceIssue(string root)
+    {
+        var vault = Store(root, "renewal-deadline-crossed");
+        using var issuer = new FakeIssuer(); using var authHttp = new HttpClient(issuer);
+        var now = DateTimeOffset.UtcNow; var deadline = now.AddMinutes(-10);
+        string IdToken(DateTimeOffset issuedAt) => issuer.Token(NativeLogin.NativeClientId, "sub-A", null, issuedAt: issuedAt,
+            nativeMetadata: new Dictionary<string, object> { ["chatgpt_account_id"] = "backend-A",
+                ["chatgpt_subscription_active_until"] = deadline.ToUnixTimeSeconds() });
+        vault.ReplaceTokens("A", "old-refresh-A", new() { AccessToken = "old-access-A", RefreshToken = "old-refresh-A",
+            IdToken = IdToken(now.AddHours(-1)), ExpiresIn = 86400 });
+        var subscription = SubscriptionExpiry.Inspect(vault.Find("A")!.IdToken);
+        Check(subscription.TokenCurrent && subscription.Reason == "deadline_in_past" && subscription.ObservedAt < deadline);
+        var beforeB = JsonSerializer.Serialize(vault.Find("B"));
+        // Upstream may still return the previous period after the first sync.
+        issuer.NativeResponseBody = JsonSerializer.Serialize(new { access_token = issuer.Token("native-access", "sub-A", null),
+            id_token = IdToken(now) });
+        using var http = new HttpClient(new AsyncHandler((_, _) => Task.FromResult(Reply(HttpStatusCode.OK, Payload()))));
+        var auth = new OAuth(authHttp, vault); var quota = new Quota(http, auth, vault);
+        await quota.RefreshAsync("A", default);
+        Check(issuer.RefreshCalls == 1 && quota.Snapshot("A")!.Fresh(DateTimeOffset.UtcNow));
+        Check(vault.Find("A")!.AuthStatus == "ready" && JsonSerializer.Serialize(vault.Find("B")) == beforeB);
+        Check(SubscriptionExpiry.Inspect(vault.Find("A")!.IdToken).ActiveUntil is null);
+        await quota.RefreshAsync("A", default, force: true);
+        Check(issuer.RefreshCalls == 1);
+        // A new polling instance has no metadata backoff/cache. The new token's
+        // issuance after the old deadline must itself prevent automatic rotation.
+        var restartedQuota = new Quota(http, auth, vault);
+        restartedQuota.Forget("A");
+        await restartedQuota.RefreshAsync("A", default);
+        Check(issuer.RefreshCalls == 1 && restartedQuota.Snapshot("A")!.Fresh(DateTimeOffset.UtcNow));
     }
 }

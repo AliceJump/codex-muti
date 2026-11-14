@@ -83,7 +83,7 @@ internal static class PoolPresentation
         && element.TryGetProperty(field, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
     internal static string SubscriptionDeadline(JsonElement account) => String(account, "subscriptionState") == "stale"
         ? "订阅截止时间待同步（" + (String(account, "subscriptionSyncReason") switch
-            { "deadline_in_past" => "上游仍返回旧日期", "id_token_expired" => "授权资料已过期", "id_token_not_refreshed" => "授权资料未更新", _ => "旧授权资料" }) + "）"
+            { "deadline_in_past" => "上游仍返回旧日期", "id_token_expired" => "订阅资料待更新", "id_token_not_refreshed" => "订阅资料未更新", _ => "旧订阅资料" }) + "）"
         : String(account, "subscriptionState") == "not_reported"
         ? "订阅截止时间未知（上游未提供）" : account.TryGetProperty("subscriptionActiveUntil", out var value)
         && value.ValueKind == JsonValueKind.String && value.TryGetDateTimeOffset(out var until)

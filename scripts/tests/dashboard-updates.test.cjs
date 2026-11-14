@@ -131,7 +131,7 @@ test('renewal separates fresh plan from unavailable subscription dates and faile
         s.accounts[0].subscriptionState = 'stale';
         s.accounts[0].subscriptionActiveUntil = '2030-01-01T00:00:00Z';
         api.render(s);
-        assert.match(cards[0].textContent, /旧授权资料/);
+        assert.match(cards[0].textContent, /旧订阅资料/);
         assert.doesNotMatch(cards[0].textContent, /2030/);
         s.accounts[0].subscriptionSyncReason = 'deadline_in_past';
         api.render(s);
@@ -218,6 +218,14 @@ test('subscription cutoff follows browser time zone including DST and unknown me
             s.accounts[0].subscriptionActiveUntil = value; api.render(s);
             assert.equal(deadline.textContent, '订阅截止时间未知');
         }
+        s.accounts[0].subscriptionState = 'stale';
+        s.accounts[0].subscriptionActiveUntil = '2030-07-02T03:04:05Z';
+        for (const [reason, message] of [['id_token_expired', '订阅资料待更新'], ['id_token_not_refreshed', '订阅资料未更新'], ['deadline_in_past', '上游仍返回旧日期']]) {
+            s.accounts[0].subscriptionSyncReason = reason; api.render(s);
+            assert.equal(deadline.textContent, `订阅截止时间待同步（${message}）`);
+        }
+        s.accounts[0].subscriptionState = 'current'; s.accounts[0].subscriptionSyncReason = null; api.render(s);
+        assert.match(deadline.textContent, /2030\/07\/02/);
     } finally { h.dom.window.close(); }
 });
 
