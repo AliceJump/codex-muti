@@ -257,15 +257,18 @@ internal static class RenewalQuotaTests
 
     public static async Task AutomaticMetadataTransportFailures(string root)
     {
-        foreach (var (error, notSent) in new[]
+        foreach (var (error, statusCode, notSent) in new (HttpRequestError, HttpStatusCode?, bool)[]
         {
-            (HttpRequestError.NameResolutionError, true), (HttpRequestError.SecureConnectionError, true),
-            (HttpRequestError.ProxyTunnelError, true), (HttpRequestError.ConnectionError, false),
-            (HttpRequestError.Unknown, false), (HttpRequestError.ResponseEnded, false),
-            (HttpRequestError.InvalidResponse, false), (HttpRequestError.HttpProtocolError, false)
+            (HttpRequestError.NameResolutionError, null, true), (HttpRequestError.SecureConnectionError, null, true),
+            (HttpRequestError.ProxyTunnelError, null, true),
+            (HttpRequestError.ProxyTunnelError, HttpStatusCode.BadGateway, true),
+            (HttpRequestError.ProxyTunnelError, HttpStatusCode.ProxyAuthenticationRequired, true),
+            (HttpRequestError.ConnectionError, null, false), (HttpRequestError.ConnectionError, HttpStatusCode.BadGateway, false),
+            (HttpRequestError.Unknown, null, false), (HttpRequestError.ResponseEnded, null, false),
+            (HttpRequestError.InvalidResponse, null, false), (HttpRequestError.HttpProtocolError, null, false)
         })
         {
-            var directory = "renewal-metadata-transport-" + error;
+            var directory = "renewal-metadata-transport-" + error + "-" + statusCode;
             var vault = Store(root, directory);
             using var issuer = new FakeIssuer();
             var expiredId = issuer.Token(NativeLogin.NativeClientId, "sub-A", null, expired: true,
@@ -275,7 +278,7 @@ internal static class RenewalQuotaTests
                 IdToken = expiredId, ExpiresIn = 86400 });
             var beforeB = JsonSerializer.Serialize(vault.Find("B"));
             var attempts = 0;
-            issuer.Barrier = _ => { attempts++; throw new HttpRequestException(error, "TRANSPORT-CANARY"); };
+            issuer.Barrier = _ => { attempts++; throw new HttpRequestException(error, "TRANSPORT-CANARY", statusCode: statusCode); };
             using var authHttp = new HttpClient(issuer);
             var auth = new OAuth(authHttp, vault);
             var usageCalls = 0;
