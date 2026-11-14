@@ -6,9 +6,11 @@ function Get-QseRuntime([string]$RuntimeRoot){
     $config=Join-Path $root 'framework-deployment.json'
     if(-not(Test-Path -LiteralPath $config)){throw 'QSE is not installed. Deploy/start the framework separately first.'}
     $framework=Get-Content -LiteralPath $config -Raw -Encoding utf8 | ConvertFrom-Json
-    $broker=[IO.Path]::GetFullPath((Join-Path $root 'Registered/qse-broker.exe'))
-    $control=Join-Path $root 'Registered/qse-control.exe'
-    if(-not [string]::Equals([IO.Path]::GetFullPath($framework.brokerPath),$broker,[StringComparison]::OrdinalIgnoreCase) -or -not(Test-Path -LiteralPath $broker) -or -not(Test-Path -LiteralPath $control)){throw 'The installed QSE runtime paths are invalid.'}
+    $broker=[IO.Path]::GetFullPath($framework.brokerPath)
+    $allowed=@((Join-Path $root 'Registered/qse-broker.exe'),(Join-Path $root 'bin/qse-broker.exe'))
+    if(-not @($allowed|Where-Object {[string]::Equals([IO.Path]::GetFullPath($_),$broker,[StringComparison]::OrdinalIgnoreCase)}).Count){throw 'The installed QSE runtime path is outside the supported framework directories.'}
+    $control=Join-Path (Split-Path $broker) 'qse-control.exe'
+    if(-not(Test-Path -LiteralPath $broker) -or -not(Test-Path -LiteralPath $control)){throw 'The installed QSE runtime paths are invalid.'}
     $providerRoot=Join-Path $env:LOCALAPPDATA 'Programs/CodexPool/QuickSettingsProvider'
     [pscustomobject]@{root=$root;broker=$broker;control=$control;recordPath=(Join-Path $root 'codex-pool-deployment.json');providerRoot=$providerRoot;operationPath=(Join-Path $providerRoot 'last-operation.json')}
 }

@@ -222,15 +222,19 @@ internal static class QuickSettingsRegistration
 
     internal static async Task<JsonObject> ReadAsync(HttpClient http, string directory, string path, CancellationToken token)
     {
+        // ResponseHeadersRead ends HttpClient.Timeout at the headers. Bound the
+        // body as well, so a partial local response cannot strand this Provider.
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        deadline.CancelAfter(TimeSpan.FromSeconds(2));
         using var request = new HttpRequestMessage(HttpMethod.Get, path);
         request.Headers.Authorization = new("Bearer", Vault.ReadLocalKey(directory));
-        using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token);
+        using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
         response.EnsureSuccessStatusCode();
         if (response.Content.Headers.ContentLength > 1024 * 1024) throw new IOException("Status is too large.");
-        await using var body = await response.Content.ReadAsStreamAsync(token);
+        await using var body = await response.Content.ReadAsStreamAsync(deadline.Token);
         using var bounded = new MemoryStream();
         var buffer = new byte[4096]; int read;
-        while ((read = await body.ReadAsync(buffer, token)) != 0)
+        while ((read = await body.ReadAsync(buffer, deadline.Token)) != 0)
         {
             if (bounded.Length + read > 1024 * 1024) throw new IOException("Status is too large.");
             bounded.Write(buffer, 0, read);
@@ -316,7 +320,10 @@ internal static class QuickSettingsRegistration
         using var self = Process.GetCurrentProcess();
         var user = currentIdentity.User?.Value ?? throw new IOException("User unavailable.");
         var session = self.SessionId;
-        var name = $"Sessions\\{session}\\AppContainerNamedObjects\\{ShellPackageSid()}\\QuickSettingsExtensions.v1.{user}.{session}";
+        var logon = QuickSettingsEndpoint.LogonSid(currentIdentity);
+        var legacyName = $"Sessions\\{session}\\AppContainerNamedObjects\\{ShellPackageSid()}\\QuickSettingsExtensions.v1.{user}.{session}";
+        var endpoint = QuickSettingsEndpoint.Read(broker, user, logon, session, legacyName);
+        var name = endpoint?.PipeName ?? legacyName;
         using var pipe = new NamedPipeClientStream(".", name, PipeDirection.InOut, PipeOptions.Asynchronous,
             TokenImpersonationLevel.Identification);
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
@@ -324,12 +331,14 @@ internal static class QuickSettingsRegistration
         await pipe.ConnectAsync(deadline.Token);
         if (!GetNamedPipeServerProcessId(pipe.SafePipeHandle, out var pid)) throw new IOException("Server unavailable.");
         using var server = Process.GetProcessById((int)pid);
+        endpoint?.Check(server);
         if (server.SessionId != self.SessionId || !string.Equals(server.MainModule?.FileName, broker, StringComparison.OrdinalIgnoreCase))
             throw new IOException("Unexpected broker.");
         if (!OpenProcessToken(server.Handle, 8, out var serverToken)) throw new IOException("Server identity unavailable.");
         using (serverToken)
         using (var identity = new WindowsIdentity(serverToken.DangerousGetHandle()))
-            if (identity.User?.Value != user) throw new IOException("Unexpected server identity.");
+            if (identity.User?.Value != user || QuickSettingsEndpoint.LogonSid(identity) != logon)
+                throw new IOException("Unexpected server identity.");
         var bytes = JsonSerializer.SerializeToUtf8Bytes(request, Json);
         if (bytes.Length is 0 or > MaxFrame) throw new IOException("Invalid frame.");
         var size = new byte[4]; BinaryPrimitives.WriteInt32LittleEndian(size, bytes.Length);
