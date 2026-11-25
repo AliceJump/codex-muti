@@ -16,10 +16,19 @@ $taskTools = Join-Path $taskApp 'QuickSettings'
 foreach ($script in @('Deploy-QuickSettings','Start-QuickSettings','Stop-QuickSettings','Set-QuickSettingsPinned','Get-QuickSettingsOperation','Uninstall-QuickSettings')) {
     if (!(Test-Path -LiteralPath (Join-Path $taskTools ($script+'.ps1')) -PathType Leaf)) { throw "发行包缺少磁贴管理脚本 $script" }
 }
-Import-Module (Join-Path $taskTools 'QuickSettingsLifecycle.psm1') -Force -DisableNameChecking
+# Load the packaged module in the child process below.
 $taskProvider = Join-Path $taskSandbox 'staged provider'
 Set-Content -LiteralPath (Join-Path $taskApp 'Daemon/unlisted-test-file') -Value 'test'
-Copy-QsePortableProvider $taskApp $taskProvider
+# Windows PowerShell 5.1 is the packaged installer's minimum supported host.
+$taskStageProvider = Join-Path $taskSandbox 'stage-provider.ps1'
+@'
+param([string]$Application, [string]$Destination)
+$ErrorActionPreference = 'Stop'
+Import-Module (Join-Path $Application 'QuickSettings/QuickSettingsLifecycle.psm1') -DisableNameChecking
+Copy-QsePortableProvider $Application $Destination
+'@ | Set-Content -LiteralPath $taskStageProvider -Encoding utf8
+& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $taskStageProvider $taskApp $taskProvider
+if ($LASTEXITCODE) { throw 'Windows PowerShell 无法从发行包准备 Provider。' }
 if (Test-Path -LiteralPath (Join-Path $taskProvider 'unlisted-test-file')) { throw 'Provider 意外复制了非发布文件。' }
 if ((Get-Content (Join-Path $taskProvider 'qse-manifest.json') -Raw | ConvertFrom-Json).id -ne 'codex-pool') { throw '磁贴声明无效。' }
 $taskData = Join-Path $taskSandbox 'must-not-be-created'

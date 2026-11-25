@@ -105,7 +105,7 @@ function Wait-QseProvider($Runtime,$Record){
 function Copy-QsePortableProvider([string]$Root,[string]$Destination){
     $source = (Get-Item -LiteralPath (Join-Path $Root 'Daemon')).FullName
     $index = Join-Path $Root 'QuickSettings/provider-files.json'
-    $files = @(Get-Content -LiteralPath $index -Raw -Encoding UTF8 | ConvertFrom-Json)
+    $files = Get-Content -LiteralPath $index -Raw -Encoding UTF8 | ConvertFrom-Json
     foreach ($required in @('CodexPool.Daemon.exe','CodexPool.Daemon.dll','qse-manifest.json')) {
         if ($files -notcontains $required) { throw 'Incomplete portable provider inventory.' }
     }
