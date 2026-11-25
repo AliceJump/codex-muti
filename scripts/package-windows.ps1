@@ -18,6 +18,19 @@ foreach ($taskProject in @('Floating','Daemon')) {
         "-p:Version=$Version" -p:DebugType=None -p:DebugSymbols=false -o $taskDestination --nologo
     if ($LASTEXITCODE -ne 0) { throw "自包含构建失败：$taskProject" }
 }
+# Ship the opt-in registration tools alongside the portable daemon.
+$taskTools = New-Item -ItemType Directory -Path (Join-Path $taskApplication 'QuickSettings')
+foreach ($script in @('Deploy-QuickSettings.ps1','Start-QuickSettings.ps1','Stop-QuickSettings.ps1',
+        'Set-QuickSettingsPinned.ps1','Get-QuickSettingsOperation.ps1','Uninstall-QuickSettings.ps1','QuickSettingsLifecycle.psm1')) {
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot $script) -Destination $taskTools.FullName
+}
+# Install only build outputs, even if a user subsequently adds files to Daemon.
+$taskDaemon = Join-Path $taskApplication 'Daemon'
+$taskPayload = @(Get-ChildItem -LiteralPath $taskDaemon -File -Recurse -Force | ForEach-Object {
+    [IO.Path]::GetRelativePath($taskDaemon, $_.FullName)
+})
+$taskPayload | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $taskTools.FullName 'provider-files.json') -Encoding utf8
+
 # A renamed .NET apphost still loads its embedded original DLL and runtimeconfig names.
 Move-Item -LiteralPath (Join-Path $taskApplication 'CodexPool.Floating.exe') -Destination (Join-Path $taskApplication 'CodexPool.exe')
 [IO.File]::WriteAllText((Join-Path $taskApplication 'codex-pool.json'), (@{format=1;version=$Version;runtime='win-x64'} | ConvertTo-Json -Compress))

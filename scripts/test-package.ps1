@@ -12,6 +12,16 @@ foreach ($taskFile in @('CodexPool.exe','CodexPool.Floating.dll','CodexPool.Floa
 $taskManifest = Get-Content -LiteralPath (Join-Path $taskApp 'codex-pool.json') -Raw | ConvertFrom-Json
 if ($taskManifest.version -cne $ExpectedVersion -or $taskManifest.runtime -ne 'win-x64') { throw '发行包版本或架构错误。' }
 if (Get-ChildItem -LiteralPath $taskApp -Recurse -File | Where-Object { $_.Name -match '^(?:auth\.json|vault\.dpapi|usage\.(?:dpapi|sqlite)|widget\.json)$' }) { throw '发行包含有运行期用户数据。' }
+$taskTools = Join-Path $taskApp 'QuickSettings'
+foreach ($script in @('Deploy-QuickSettings','Start-QuickSettings','Stop-QuickSettings','Set-QuickSettingsPinned','Get-QuickSettingsOperation','Uninstall-QuickSettings')) {
+    if (!(Test-Path -LiteralPath (Join-Path $taskTools ($script+'.ps1')) -PathType Leaf)) { throw "发行包缺少磁贴管理脚本 $script" }
+}
+Import-Module (Join-Path $taskTools 'QuickSettingsLifecycle.psm1') -Force -DisableNameChecking
+$taskProvider = Join-Path $taskSandbox 'staged provider'
+Set-Content -LiteralPath (Join-Path $taskApp 'Daemon/unlisted-test-file') -Value 'test'
+Copy-QsePortableProvider $taskApp $taskProvider
+if (Test-Path -LiteralPath (Join-Path $taskProvider 'unlisted-test-file')) { throw 'Provider 意外复制了非发布文件。' }
+if ((Get-Content (Join-Path $taskProvider 'qse-manifest.json') -Raw | ConvertFrom-Json).id -ne 'codex-pool') { throw '磁贴声明无效。' }
 $taskData = Join-Path $taskSandbox 'must-not-be-created'
 $taskResult = Join-Path $taskSandbox 'check.json'
 $taskStart = [Diagnostics.ProcessStartInfo]::new((Join-Path $taskApp 'CodexPool.exe'))
@@ -31,6 +41,12 @@ $taskProcess = [Diagnostics.Process]::Start($taskStart)
 try {
     $taskHelp = $taskProcess.StandardOutput.ReadToEndAsync()
     if (-not $taskProcess.WaitForExit(30000) -or $taskProcess.ExitCode -ne 0 -or $taskHelp.GetAwaiter().GetResult() -notmatch 'serve') { throw '自包含 Daemon 离线检查失败。' }
+} finally { $taskProcess.Dispose() }
+$taskStart.FileName = Join-Path $taskProvider 'CodexPool.Daemon.exe'
+$taskProcess = [Diagnostics.Process]::Start($taskStart)
+try {
+    $taskHelp = $taskProcess.StandardOutput.ReadToEndAsync()
+    if (!$taskProcess.WaitForExit(30000) -or $taskProcess.ExitCode -ne 0 -or $taskHelp.GetAwaiter().GetResult() -notmatch 'serve') { throw '磁贴 Provider 缺少自包含运行文件。' }
 } finally { $taskProcess.Dispose() }
 if (Test-Path -LiteralPath $taskData) { throw '离线检查意外创建用户数据。' }
 Write-Output 'PASS 自包含 GUI / Daemon、完整文件、版本、架构、无用户数据；没有启动托盘、代理服务或模型请求。'

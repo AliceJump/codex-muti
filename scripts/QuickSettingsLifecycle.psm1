@@ -102,10 +102,45 @@ function Wait-QseProvider($Runtime,$Record){
     }while([DateTime]::UtcNow -lt $deadline)
     throw 'The registration helper has not registered. The framework and proxy service were not restarted.'
 }
+function Copy-QsePortableProvider([string]$Root,[string]$Destination){
+    $source = (Get-Item -LiteralPath (Join-Path $Root 'Daemon')).FullName
+    $index = Join-Path $Root 'QuickSettings/provider-files.json'
+    $files = @(Get-Content -LiteralPath $index -Raw -Encoding UTF8 | ConvertFrom-Json)
+    foreach ($required in @('CodexPool.Daemon.exe','CodexPool.Daemon.dll','qse-manifest.json')) {
+        if ($files -notcontains $required) { throw 'Incomplete portable provider inventory.' }
+    }
+    foreach ($relative in $files) {
+        if ($relative -isnot [string] -or $relative -match '[:*?"<>|]' -or
+            @($relative -split '[\\/]' | Where-Object { !$_.Length -or $_ -match '[. ]$' }).Count) {
+            throw 'Invalid portable provider path.'
+        }
+        $file = Get-Item -LiteralPath (Join-Path $source $relative) -ErrorAction Stop
+        if ($file.PSIsContainer) { throw 'Expected a provider file.' }
+        for ($item = $file; $item; ) {
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Linked provider payload refused.' }
+            if ($item.FullName -eq $source) { break }
+            $item = if ($item.PSIsContainer) { $item.Parent } else { $item.Directory }
+        }
+        $output = Join-Path $Destination $relative
+        [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($output)) | Out-Null
+        [IO.File]::Copy($file.FullName, $output, $false)
+    }
+}
 function Resolve-QseServicePath([string]$Repository,$Old){
     $listeners=@(Get-NetTCPConnection -LocalPort 3210 -State Listen -ErrorAction SilentlyContinue | Where-Object LocalAddress -eq '127.0.0.1')
-    if($listeners.Count -eq 1){$path=(Get-Process -Id $listeners[0].OwningProcess).Path}elseif($listeners.Count -eq 0 -and $Old){$path=$Old.servicePath}else{throw 'Cannot identify the installed proxy service.'}
-    if(-not $path.StartsWith((Join-Path $Repository '.local')+'\',[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($path) -ne 'CodexPool.Daemon.exe' -or -not(Test-Path -LiteralPath $path)){throw 'The service installation is not trusted.'}
+    $portable = Test-Path -LiteralPath (Join-Path $Repository 'codex-pool.json') -PathType Leaf
+    $bundledService = Join-Path $Repository 'Daemon/CodexPool.Daemon.exe'
+    if ($listeners.Count -eq 1) { $path = (Get-Process -Id $listeners[0].OwningProcess).Path }
+    elseif ($listeners.Count -eq 0 -and $portable) { $path = $bundledService }
+    elseif ($listeners.Count -eq 0 -and $Old) { $path = $Old.servicePath }
+    else { throw 'Cannot identify the installed proxy service.' }
+    $path = [IO.Path]::GetFullPath($path)
+    $trusted = if ($portable) {
+        $path.Equals([IO.Path]::GetFullPath($bundledService), [StringComparison]::OrdinalIgnoreCase)
+    } else {
+        $path.StartsWith((Join-Path $Repository '.local')+'\',[StringComparison]::OrdinalIgnoreCase)
+    }
+    if (!$trusted -or [IO.Path]::GetFileName($path) -ne 'CodexPool.Daemon.exe' -or !(Test-Path -LiteralPath $path -PathType Leaf)) { throw 'The service installation is not trusted.' }
     $path
 }
 function Resolve-QseDataDirectory($Old,[string]$Explicit){
@@ -162,4 +197,4 @@ function Wait-QseOperation($Runtime,$Record,$Operation,[int]$Seconds=2){
     }
     $current
 }
-Export-ModuleMember -Function Get-QseRuntime,Invoke-QseManagement,Assert-QseLifecycle,Get-QsePlugin,Get-QseRecord,Assert-QseRecord,Enter-QsePluginLock,Exit-QsePluginLock,Write-QseRecord,Stop-QseProvider,Start-QseProvider,Wait-QseProvider,Resolve-QseServicePath,Resolve-QseDataDirectory,Install-QseBinding,Invoke-QseOwnedManagement,Wait-QseOperation
+Export-ModuleMember -Function Get-QseRuntime,Invoke-QseManagement,Assert-QseLifecycle,Get-QsePlugin,Get-QseRecord,Assert-QseRecord,Enter-QsePluginLock,Exit-QsePluginLock,Write-QseRecord,Stop-QseProvider,Start-QseProvider,Wait-QseProvider,Resolve-QseServicePath,Resolve-QseDataDirectory,Install-QseBinding,Invoke-QseOwnedManagement,Wait-QseOperation,Copy-QsePortableProvider
