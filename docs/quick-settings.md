@@ -50,6 +50,8 @@ Stop 保留注册和固定选择，持久化停用并撤销旧提供方会话；
 
 管理命令返回 `operationId/state/catalogCommitted/nativeConfirmed`。`awaiting-shell` 只表示目录已提交，`complete` 才表示原生完成；`superseded` 表示被后续意图覆盖。Shell 收起或挂起时不会强行展开它，后台清理等待恢复。默认最多等 2 秒，可用 `-WaitSeconds 0` 立即返回。最近操作保存在 Provider 根目录的 `last-operation.json`，注销后仍可查询；这里没有密钥。未知传输结果只按保存的操作 ID 读回，不重新提交变更。注册实例和固定版本的 CAS 防止旧请求覆盖新选择或删除重装后的磁贴。
 
+新版管理客户端在部署时通过 `clientOperationIds` 声明支持调用方提供操作 ID。固定、取消固定和注销会先把 ID 写入本地文件，再把同一个 ID 交给管理进程。即使进程在 Broker 提交后、响应输出前退出，仍可运行 `Get-QuickSettingsOperation.ps1` 查询该次操作。读取旧回执会保留最近一次变更的 ID。已部署的旧管理客户端继续使用其响应中返回的 ID；重新部署新版插件后启用提前记录。
+
 提供方遵守 QSE 活动租约：面板可见或正在处理操作时继续运行，无活动约 60 秒后自行退出；注册与固定选择保留，下次点击再唤醒。空闲退出不同于 Stop 的显式停用，后者不会被点击重新拉起。统一管理 API 和原生结果确认已实现；完整安装器文件删除、断电恢复仍待验收。框架自身升级仍可能等待 Shell 恢复执行；插件日常升级不再要求卸载共享适配器。
 
 `proxy-service-intent.json` 仅保存已确认的服务运行意图，供新版本桌面启动器避免在用户关闭后再次隐式启动。启动继承此前认证服务的启动模式，不为使开关可用而新增迁移门禁绕过。账户切换仍受现有 Daemon 的资格、额度和生产门禁校验；失败保留原账户。
@@ -61,6 +63,22 @@ Stop 保留注册和固定选择，持久化停用并撤销旧提供方会话；
 Shell 收到的 `tileLabel` 与 `quotaIcon` 是有长度、数值范围和颜色白名单限制的声明数据；注册名称和动作声明仍保持稳定。图标使用 Windows XAML 内置形状绘制，不传文件路径、远程地址或可执行 UI。
 
 测试：
+
+需要账户占位数据时，在仓库根目录运行下列命令。它生成两份可复用的 QSE v2 页面状态，每份都有相同的两个账户，分别选中主账户和备用账户：
+
+```powershell
+dotnet run --project tests/CodexPool.SecurityTests -c Release -- --quick-settings-placeholders .research/quick-settings/placeholder-preview
+```
+
+示例主账户的 5 小时和周额度为 82% 和 66%，示例备用账户为 37% 和 24%。命令经过 Provider 的切换请求、状态读回和页面生成逻辑，在内存中模拟服务响应；两次切换后回到主账户。输出文件 `demo-main.json` 和 `demo-backup.json` 供测试使用，实际代理的账户列表由实际服务提供。
+
+24H2 26100.1742 的隔离实例也已读到真实账户/额度，完成原生页头代理停止和启动、一次真实上游完成事件，以及 Provider 独立升级；升级前后 Broker、Shell、实际代理与另一个示例 Provider 的 PID 均保持不变。初期登记和请求超时保留为失败记录，分项诊断与正常 Broker 复测后通过，尚未单独确定早期超时原因。没有绕过耗尽账户的资格校验。
+
+状态读取另增加包含响应体的 2 秒期限：`ResponseHeadersRead` 自身的 HttpClient 超时只覆盖响应头。模拟“响应头成功、响应体一直不结束”的回归验证会取消；此防护修复不被用作早期来宾超时的已证实归因。
+
+2026-11-05 隔离 VM 增量：Provider 支持 `endpoint-discovery-v1`，从 Broker 发布的有界记录发现地址，发送消息前核对内核服务端身份和 PID/创建时间，不包含 Windows build 或私有 ABI 判断。缺失记录兼容旧 Broker；现存无效记录拒绝回退。部署可接受框架根目录中同级的 `qse-broker.exe/qse-control.exe` 或原有 `Registered` 布局。
+
+真实 26H2 来宾中已验证隔离服务的启停、两个账户的真实缓存额度及独立 Provider 升级。修复停止控制响应仍占用连接、导致服务退出确认超时的问题：先有界缓冲并释放响应，再等待服务退出。停止修复在真实来宾确认；另有跨 C++ Broker/C# 客户端的真实管道检查及响应释放回归。账户凭据副本仅含尚有效的 access/ID token，未复制 refresh token；宿主服务与账户未切换。第二账户周额度为 0，因此真实跨账户成功切换仍待可用账户，不能标记通过。这些检查不代表完整 24H2/26H2 或长期稳定性已验收。
 
 ```powershell
 dotnet run --project tests/CodexPool.Tests -c Release

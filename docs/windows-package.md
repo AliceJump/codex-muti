@@ -1,4 +1,12 @@
-# Codex Pool Windows 0.1.4
+# Codex Pool Windows 发行包
+
+已安装并启动 QSE 实验框架的用户，可以在解压目录打开 PowerShell，用下面的命令注册 Codex Pool 磁贴。将数据目录替换为当前代理实际使用的路径。首次注册后，在快速设置中固定磁贴即可。
+
+```powershell
+.\QuickSettings\Deploy-QuickSettings.ps1 -RuntimeRoot 'C:\QSE-Host' -DataDirectory "$env:LOCALAPPDATA\CodexPool"
+```
+
+更新已有绑定时加 `-Force`。取消固定使用同目录的 `Set-QuickSettingsPinned.ps1 -Pinned $false`。删除或移动应用目录前先运行 `Uninstall-QuickSettings.ps1`，使用自定义 `-RuntimeRoot` 时给这些命令传入同一路径。
 
 将整个 ZIP 解压到固定文件夹，双击 **CodexPool.exe**。软件会打开 Dashboard，并添加数字额度和代理控制两个托盘图标，不会自动展开账户卡片或右键菜单。单击数字图标可显示账户浮窗。不需要安装 .NET、PowerShell 7 或以管理员身份运行，支持 Windows 11 x64。
 

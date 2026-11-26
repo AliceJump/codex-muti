@@ -140,6 +140,13 @@ internal sealed class QuickSettingsProxy
             using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token);
             if (response.StatusCode == HttpStatusCode.Conflict) return new(false, "代理正忙，未关闭");
             if (response.StatusCode != HttpStatusCode.Accepted) return new(false, "代理未接受安全关闭");
+            // Release the control stream before waiting for the server's drain.
+            // Headers end HttpClient.Timeout; bound the body independently even
+            // when the caller lives for the Provider's entire lifetime.
+            using var bodyDeadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+            bodyDeadline.CancelAfter(TimeSpan.FromSeconds(2));
+            await response.Content.LoadIntoBufferAsync(4096, bodyDeadline.Token).WaitAsync(bodyDeadline.Token);
+            response.Dispose();
             for (var i = 0; i < 60; i++)
             {
                 await Task.Delay(200, token);

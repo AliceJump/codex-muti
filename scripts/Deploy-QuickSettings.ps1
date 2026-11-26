@@ -21,6 +21,8 @@ try{
         if(-not(Test-Path -LiteralPath (Join-Path $package 'CodexPool.Daemon.exe')) -or -not(Test-Path -LiteralPath (Join-Path $package 'qse-manifest.json'))){throw 'The provider package is incomplete.'}
         New-Item -ItemType Directory -Path $providerDir -Force | Out-Null
         foreach($file in Get-ChildItem -LiteralPath $package){Copy-Item -LiteralPath $file.FullName -Destination $providerDir -Recurse}
+    }elseif(Test-Path -LiteralPath (Join-Path $repo 'codex-pool.json') -PathType Leaf){
+        Copy-QsePortableProvider $repo $providerDir
     }else{
         & dotnet publish "$repo/src/CodexPool.Daemon/CodexPool.Daemon.csproj" -c Release -r win-x64 --self-contained true -o $providerDir --verbosity quiet
         if($LASTEXITCODE -ne 0){throw 'Registration helper publish failed; the existing provider is unchanged.'}
@@ -43,7 +45,11 @@ try{
         else{$null=Invoke-QseManagement $runtime @('provider-enable','codex-pool');Start-QseProvider $runtime $record;$state=Wait-QseProvider $runtime $record}
         $owner=Invoke-QseOwnedManagement $runtime $record 'status'
         if($owner.registrationId -ne $state.registrationId){throw 'The dedicated management client is not bound to this registration.'}
-        $registration=Invoke-QseOwnedManagement $runtime $record 'operation-status' $owner.registerOperation
+        if($owner.PSObject.Properties['clientOperationIds'] -and $owner.clientOperationIds -eq $true){
+            $record | Add-Member -NotePropertyName clientOperationIds -NotePropertyValue $true
+            Write-QseRecord $runtime $record
+        }
+        $registration=Invoke-QseOwnedManagement $runtime $record 'operation-status' $owner.registerOperation -RememberRegistration
         $registration=Wait-QseOperation $runtime $record $registration 2
         [pscustomobject]@{plugin='codex-pool';version=$version;contractVersion=2;registered=$state.online;disabled=$state.disabled;added=$state.added;operationId=$registration.operationId;nativeState=$registration.state;nativeConfirmed=$registration.nativeConfirmed;frameworkUntouched=$true;proxyServiceUntouched=$true}
     }catch{

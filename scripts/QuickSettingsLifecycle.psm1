@@ -6,9 +6,11 @@ function Get-QseRuntime([string]$RuntimeRoot){
     $config=Join-Path $root 'framework-deployment.json'
     if(-not(Test-Path -LiteralPath $config)){throw 'QSE is not installed. Deploy/start the framework separately first.'}
     $framework=Get-Content -LiteralPath $config -Raw -Encoding utf8 | ConvertFrom-Json
-    $broker=[IO.Path]::GetFullPath((Join-Path $root 'Registered/qse-broker.exe'))
-    $control=Join-Path $root 'Registered/qse-control.exe'
-    if(-not [string]::Equals([IO.Path]::GetFullPath($framework.brokerPath),$broker,[StringComparison]::OrdinalIgnoreCase) -or -not(Test-Path -LiteralPath $broker) -or -not(Test-Path -LiteralPath $control)){throw 'The installed QSE runtime paths are invalid.'}
+    $broker=[IO.Path]::GetFullPath($framework.brokerPath)
+    $allowed=@((Join-Path $root 'Registered/qse-broker.exe'),(Join-Path $root 'bin/qse-broker.exe'))
+    if(-not @($allowed|Where-Object {[string]::Equals([IO.Path]::GetFullPath($_),$broker,[StringComparison]::OrdinalIgnoreCase)}).Count){throw 'The installed QSE runtime path is outside the supported framework directories.'}
+    $control=Join-Path (Split-Path $broker) 'qse-control.exe'
+    if(-not(Test-Path -LiteralPath $broker) -or -not(Test-Path -LiteralPath $control)){throw 'The installed QSE runtime paths are invalid.'}
     $providerRoot=Join-Path $env:LOCALAPPDATA 'Programs/CodexPool/QuickSettingsProvider'
     [pscustomobject]@{root=$root;broker=$broker;control=$control;recordPath=(Join-Path $root 'codex-pool-deployment.json');providerRoot=$providerRoot;operationPath=(Join-Path $providerRoot 'last-operation.json')}
 }
@@ -100,10 +102,45 @@ function Wait-QseProvider($Runtime,$Record){
     }while([DateTime]::UtcNow -lt $deadline)
     throw 'The registration helper has not registered. The framework and proxy service were not restarted.'
 }
+function Copy-QsePortableProvider([string]$Root,[string]$Destination){
+    $source = (Get-Item -LiteralPath (Join-Path $Root 'Daemon')).FullName
+    $index = Join-Path $Root 'QuickSettings/provider-files.json'
+    $files = Get-Content -LiteralPath $index -Raw -Encoding UTF8 | ConvertFrom-Json
+    foreach ($required in @('CodexPool.Daemon.exe','CodexPool.Daemon.dll','qse-manifest.json')) {
+        if ($files -notcontains $required) { throw 'Incomplete portable provider inventory.' }
+    }
+    foreach ($relative in $files) {
+        if ($relative -isnot [string] -or $relative -match '[:*?"<>|]' -or
+            @($relative -split '[\\/]' | Where-Object { !$_.Length -or $_ -match '[. ]$' }).Count) {
+            throw 'Invalid portable provider path.'
+        }
+        $file = Get-Item -LiteralPath (Join-Path $source $relative) -ErrorAction Stop
+        if ($file.PSIsContainer) { throw 'Expected a provider file.' }
+        for ($item = $file; $item; ) {
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Linked provider payload refused.' }
+            if ($item.FullName -eq $source) { break }
+            $item = if ($item.PSIsContainer) { $item.Parent } else { $item.Directory }
+        }
+        $output = Join-Path $Destination $relative
+        [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($output)) | Out-Null
+        [IO.File]::Copy($file.FullName, $output, $false)
+    }
+}
 function Resolve-QseServicePath([string]$Repository,$Old){
     $listeners=@(Get-NetTCPConnection -LocalPort 3210 -State Listen -ErrorAction SilentlyContinue | Where-Object LocalAddress -eq '127.0.0.1')
-    if($listeners.Count -eq 1){$path=(Get-Process -Id $listeners[0].OwningProcess).Path}elseif($listeners.Count -eq 0 -and $Old){$path=$Old.servicePath}else{throw 'Cannot identify the installed proxy service.'}
-    if(-not $path.StartsWith((Join-Path $Repository '.local')+'\',[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($path) -ne 'CodexPool.Daemon.exe' -or -not(Test-Path -LiteralPath $path)){throw 'The service installation is not trusted.'}
+    $portable = Test-Path -LiteralPath (Join-Path $Repository 'codex-pool.json') -PathType Leaf
+    $bundledService = Join-Path $Repository 'Daemon/CodexPool.Daemon.exe'
+    if ($listeners.Count -eq 1) { $path = (Get-Process -Id $listeners[0].OwningProcess).Path }
+    elseif ($listeners.Count -eq 0 -and $portable) { $path = $bundledService }
+    elseif ($listeners.Count -eq 0 -and $Old) { $path = $Old.servicePath }
+    else { throw 'Cannot identify the installed proxy service.' }
+    $path = [IO.Path]::GetFullPath($path)
+    $trusted = if ($portable) {
+        $path.Equals([IO.Path]::GetFullPath($bundledService), [StringComparison]::OrdinalIgnoreCase)
+    } else {
+        $path.StartsWith((Join-Path $Repository '.local')+'\',[StringComparison]::OrdinalIgnoreCase)
+    }
+    if (!$trusted -or [IO.Path]::GetFileName($path) -ne 'CodexPool.Daemon.exe' -or !(Test-Path -LiteralPath $path -PathType Leaf)) { throw 'The service installation is not trusted.' }
     $path
 }
 function Resolve-QseDataDirectory($Old,[string]$Explicit){
@@ -121,10 +158,27 @@ function Install-QseBinding($Runtime,[string]$Manifest,[string]$Provider,[string
     if(Test-Path -LiteralPath $manager){$arguments+=@('--owner',$manager)}
     Invoke-QseManagement $Runtime $arguments
 }
-function Invoke-QseOwnedManagement($Runtime,$Record,[string]$Action,[string]$OperationId){
+function Write-QseOperationRecord($Runtime,$Record,[string]$OperationId){
+    $null=New-Item -ItemType Directory -Path $Runtime.providerRoot -Force
+    $temporary=$Runtime.operationPath+'.'+[Guid]::NewGuid().ToString('N')+'.tmp'
+    try{
+        [IO.File]::WriteAllText($temporary,(@{record=$Record;operationId=$OperationId} | ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))
+        if(Test-Path -LiteralPath $Runtime.operationPath){[IO.File]::Replace($temporary,$Runtime.operationPath,[NullString]::Value)}else{[IO.File]::Move($temporary,$Runtime.operationPath)}
+    }finally{if(Test-Path -LiteralPath $temporary){Remove-Item -LiteralPath $temporary}}
+}
+function Invoke-QseOwnedManagement($Runtime,$Record,[string]$Action,[string]$OperationId,[switch]$RememberRegistration){
     Assert-QseRecord $Runtime $Record
     if(-not $Record.PSObject.Properties['managerPath']){throw 'Update this plugin before using its owned management client.'}
     if($Action -notin @('status','pin','unpin','unregister','operation-status')){throw 'Unknown registration management operation.'}
+    $mutation=$Action -in @('pin','unpin','unregister')
+    $savedOperationId=$null
+    if($mutation -and $Record.PSObject.Properties['clientOperationIds'] -and $Record.clientOperationIds -eq $true){
+        $OperationId=[Guid]::NewGuid().ToString()
+        Write-QseOperationRecord $Runtime $Record $OperationId
+        $savedOperationId=$OperationId
+    }elseif($RememberRegistration -and $Action -eq 'operation-status'){
+        Write-QseOperationRecord $Runtime $Record $OperationId
+    }
     $encoding=[Console]::OutputEncoding
     # Nonzero exits can still carry the operation ID needed for receipt recovery.
     $PSNativeCommandUseErrorActionPreference=$false
@@ -135,15 +189,14 @@ function Invoke-QseOwnedManagement($Runtime,$Record,[string]$Action,[string]$Ope
     }finally{[Console]::OutputEncoding=$encoding}
     $result=$null
     try{$result=($text -join "`n") | ConvertFrom-Json -ErrorAction Stop}
-    catch{if($code -eq 0){throw 'The management client returned invalid JSON; no mutation was replayed.'}}
+    catch{if($code -eq 0 -and !$savedOperationId){throw 'The management client returned invalid JSON; no mutation was replayed.'}}
     if($result -isnot [pscustomobject]){$result=$null}
-    $savedOperationId=$null
     if($null -ne $result -and $result.PSObject.Properties['operationId'] -and $result.operationId){
-        New-Item -ItemType Directory -Path $Runtime.providerRoot -Force | Out-Null
-        $temporary=$Runtime.operationPath+'.'+[Guid]::NewGuid().ToString('N')+'.tmp'
-        [IO.File]::WriteAllText($temporary,(@{record=$Record;operationId=$result.operationId} | ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))
-        if(Test-Path -LiteralPath $Runtime.operationPath){[IO.File]::Replace($temporary,$Runtime.operationPath,[NullString]::Value)}else{[IO.File]::Move($temporary,$Runtime.operationPath)}
+        if($OperationId -and $result.operationId -ne $OperationId){throw 'The management client returned a different operation ID.'}
+        if($mutation -and !$savedOperationId){Write-QseOperationRecord $Runtime $Record $result.operationId}
         $savedOperationId=$result.operationId
+    }elseif($savedOperationId){
+        throw 'The management result is unknown. Query the saved operation before taking further action; no mutation was replayed.'
     }
     if($code -ne 0){
         if($savedOperationId){throw 'The management result is unknown. Query the saved operation before taking further action; no mutation was replayed.'}
@@ -160,4 +213,4 @@ function Wait-QseOperation($Runtime,$Record,$Operation,[int]$Seconds=2){
     }
     $current
 }
-Export-ModuleMember -Function Get-QseRuntime,Invoke-QseManagement,Assert-QseLifecycle,Get-QsePlugin,Get-QseRecord,Assert-QseRecord,Enter-QsePluginLock,Exit-QsePluginLock,Write-QseRecord,Stop-QseProvider,Start-QseProvider,Wait-QseProvider,Resolve-QseServicePath,Resolve-QseDataDirectory,Install-QseBinding,Invoke-QseOwnedManagement,Wait-QseOperation
+Export-ModuleMember -Function Get-QseRuntime,Invoke-QseManagement,Assert-QseLifecycle,Get-QsePlugin,Get-QseRecord,Assert-QseRecord,Enter-QsePluginLock,Exit-QsePluginLock,Write-QseRecord,Stop-QseProvider,Start-QseProvider,Wait-QseProvider,Resolve-QseServicePath,Resolve-QseDataDirectory,Install-QseBinding,Invoke-QseOwnedManagement,Wait-QseOperation,Copy-QsePortableProvider
