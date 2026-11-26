@@ -158,10 +158,27 @@ function Install-QseBinding($Runtime,[string]$Manifest,[string]$Provider,[string
     if(Test-Path -LiteralPath $manager){$arguments+=@('--owner',$manager)}
     Invoke-QseManagement $Runtime $arguments
 }
-function Invoke-QseOwnedManagement($Runtime,$Record,[string]$Action,[string]$OperationId){
+function Write-QseOperationRecord($Runtime,$Record,[string]$OperationId){
+    $null=New-Item -ItemType Directory -Path $Runtime.providerRoot -Force
+    $temporary=$Runtime.operationPath+'.'+[Guid]::NewGuid().ToString('N')+'.tmp'
+    try{
+        [IO.File]::WriteAllText($temporary,(@{record=$Record;operationId=$OperationId} | ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))
+        if(Test-Path -LiteralPath $Runtime.operationPath){[IO.File]::Replace($temporary,$Runtime.operationPath,[NullString]::Value)}else{[IO.File]::Move($temporary,$Runtime.operationPath)}
+    }finally{if(Test-Path -LiteralPath $temporary){Remove-Item -LiteralPath $temporary}}
+}
+function Invoke-QseOwnedManagement($Runtime,$Record,[string]$Action,[string]$OperationId,[switch]$RememberRegistration){
     Assert-QseRecord $Runtime $Record
     if(-not $Record.PSObject.Properties['managerPath']){throw 'Update this plugin before using its owned management client.'}
     if($Action -notin @('status','pin','unpin','unregister','operation-status')){throw 'Unknown registration management operation.'}
+    $mutation=$Action -in @('pin','unpin','unregister')
+    $savedOperationId=$null
+    if($mutation -and $Record.PSObject.Properties['clientOperationIds'] -and $Record.clientOperationIds -eq $true){
+        $OperationId=[Guid]::NewGuid().ToString()
+        Write-QseOperationRecord $Runtime $Record $OperationId
+        $savedOperationId=$OperationId
+    }elseif($RememberRegistration -and $Action -eq 'operation-status'){
+        Write-QseOperationRecord $Runtime $Record $OperationId
+    }
     $encoding=[Console]::OutputEncoding
     # Nonzero exits can still carry the operation ID needed for receipt recovery.
     $PSNativeCommandUseErrorActionPreference=$false
@@ -172,15 +189,14 @@ function Invoke-QseOwnedManagement($Runtime,$Record,[string]$Action,[string]$Ope
     }finally{[Console]::OutputEncoding=$encoding}
     $result=$null
     try{$result=($text -join "`n") | ConvertFrom-Json -ErrorAction Stop}
-    catch{if($code -eq 0){throw 'The management client returned invalid JSON; no mutation was replayed.'}}
+    catch{if($code -eq 0 -and !$savedOperationId){throw 'The management client returned invalid JSON; no mutation was replayed.'}}
     if($result -isnot [pscustomobject]){$result=$null}
-    $savedOperationId=$null
     if($null -ne $result -and $result.PSObject.Properties['operationId'] -and $result.operationId){
-        New-Item -ItemType Directory -Path $Runtime.providerRoot -Force | Out-Null
-        $temporary=$Runtime.operationPath+'.'+[Guid]::NewGuid().ToString('N')+'.tmp'
-        [IO.File]::WriteAllText($temporary,(@{record=$Record;operationId=$result.operationId} | ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))
-        if(Test-Path -LiteralPath $Runtime.operationPath){[IO.File]::Replace($temporary,$Runtime.operationPath,[NullString]::Value)}else{[IO.File]::Move($temporary,$Runtime.operationPath)}
+        if($OperationId -and $result.operationId -ne $OperationId){throw 'The management client returned a different operation ID.'}
+        if($mutation -and !$savedOperationId){Write-QseOperationRecord $Runtime $Record $result.operationId}
         $savedOperationId=$result.operationId
+    }elseif($savedOperationId){
+        throw 'The management result is unknown. Query the saved operation before taking further action; no mutation was replayed.'
     }
     if($code -ne 0){
         if($savedOperationId){throw 'The management result is unknown. Query the saved operation before taking further action; no mutation was replayed.'}

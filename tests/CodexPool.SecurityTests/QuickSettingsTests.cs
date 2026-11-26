@@ -85,6 +85,21 @@ internal static class QuickSettingsTests
         });
         Check(unknownManagement.Exit==2 && unknownManagement.Response["state"]!.GetValue<string>()=="unknown" && unknownManagement.Response["catalogCommitted"] is null && !unknownManagement.Response["nativeConfirmed"]!.GetValue<bool>());
         Check(sent.Count(x=>x=="plugin.unregister")==1);
+        var intentId = Guid.NewGuid().ToString();
+        var mutationCount = 0;
+        var mismatched = await QuickSettingsManagement.ExecuteAsync("unregister", intentId, request =>
+        {
+            var type = request["type"]!.GetValue<string>();
+            if (type == "plugin.status") return Task.FromResult((System.Text.Json.Nodes.JsonObject)registration.DeepClone());
+            Check(request["operationId"]!.GetValue<string>() == intentId);
+            if (type == "plugin.unregister") mutationCount++;
+            return Task.FromResult(new System.Text.Json.Nodes.JsonObject
+            {
+                ["protocol"] = 2, ["type"] = "framework.operation", ["operationId"] = Guid.NewGuid().ToString(),
+                ["target"] = new System.Text.Json.Nodes.JsonObject { ["id"] = "codex-pool" }
+            });
+        });
+        Check(mismatched.Exit == 2 && mismatched.Response["operationId"]!.GetValue<string>() == intentId && mutationCount == 1);
         registration["id"]="other-plugin";var foreignRejected=false;try{QuickSettingsManagement.Request(registration,"pin",Guid.NewGuid().ToString());}catch(IOException){foreignRejected=true;}Check(foreignRejected);
         Check(manifest["activation"]!["mode"]!.GetValue<string>()=="on-demand");
         Check(await QuickSettingsProviderEntry.RunAsync([])==2);

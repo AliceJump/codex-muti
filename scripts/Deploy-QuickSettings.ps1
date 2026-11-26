@@ -45,7 +45,11 @@ try{
         else{$null=Invoke-QseManagement $runtime @('provider-enable','codex-pool');Start-QseProvider $runtime $record;$state=Wait-QseProvider $runtime $record}
         $owner=Invoke-QseOwnedManagement $runtime $record 'status'
         if($owner.registrationId -ne $state.registrationId){throw 'The dedicated management client is not bound to this registration.'}
-        $registration=Invoke-QseOwnedManagement $runtime $record 'operation-status' $owner.registerOperation
+        if($owner.PSObject.Properties['clientOperationIds'] -and $owner.clientOperationIds -eq $true){
+            $record | Add-Member -NotePropertyName clientOperationIds -NotePropertyValue $true
+            Write-QseRecord $runtime $record
+        }
+        $registration=Invoke-QseOwnedManagement $runtime $record 'operation-status' $owner.registerOperation -RememberRegistration
         $registration=Wait-QseOperation $runtime $record $registration 2
         [pscustomobject]@{plugin='codex-pool';version=$version;contractVersion=2;registered=$state.online;disabled=$state.disabled;added=$state.added;operationId=$registration.operationId;nativeState=$registration.state;nativeConfirmed=$registration.nativeConfirmed;frameworkUntouched=$true;proxyServiceUntouched=$true}
     }catch{

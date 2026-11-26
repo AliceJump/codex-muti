@@ -37,6 +37,14 @@ try{
 using System.Text.Json;
 using var fixture = JsonDocument.Parse(File.ReadAllText(args[1]));
 File.AppendAllText(Path.Combine(AppContext.BaseDirectory, "invocations.txt"), "call\n");
+if (fixture.RootElement.TryGetProperty("receiptPath", out var receiptPath))
+{
+    using var intent = JsonDocument.Parse(File.ReadAllText(receiptPath.GetString()!));
+    if (args.Length != 4 || args[2] != "unregister" || !Guid.TryParse(args[3], out _) ||
+        args[3] != intent.RootElement.GetProperty("operationId").GetString()) return 91;
+    File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "accepted-id.txt"), args[3]);
+    return 2; // The process exits after accepting the operation, without writing its response.
+}
 Console.Write(fixture.RootElement.GetProperty("stdout").GetString());
 return fixture.RootElement.GetProperty("code").GetInt32();
 '@)
@@ -67,6 +75,20 @@ return fixture.RootElement.GetProperty("code").GetInt32();
         ++$calls
         Check ((Get-Content -LiteralPath (Join-Path (Split-Path $manager) 'invocations.txt')).Count -eq $calls) 'A management mutation was replayed.'
     }
+    $record | Add-Member -NotePropertyName clientOperationIds -NotePropertyValue $true
+    [IO.File]::WriteAllText($broker,(@{receiptPath=$runtime.operationPath}|ConvertTo-Json))
+    $message=$null
+    try{$null=Invoke-QseOwnedManagement $runtime $record 'unregister'}catch{$message=$_.Exception.Message}
+    Check ($message -like '*Query the saved operation*') 'Interrupted management did not retain its intent.'
+    $accepted=Get-Content -Raw -LiteralPath (Join-Path (Split-Path $manager) 'accepted-id.txt')
+    $saved=Get-Content -Raw -LiteralPath $runtime.operationPath|ConvertFrom-Json
+    Check ($saved.operationId -eq $accepted) 'The saved ID must exist before dispatch and survive a lost response.'
+    $older=[Guid]::NewGuid().ToString()
+    $query=@{code=0;stdout=(@{operationId=$older;state='complete'}|ConvertTo-Json)}
+    [IO.File]::WriteAllText($broker,($query|ConvertTo-Json))
+    $null=Invoke-QseOwnedManagement $runtime $record 'operation-status' $older
+    $saved=Get-Content -Raw -LiteralPath $runtime.operationPath|ConvertFrom-Json
+    Check ($saved.operationId -eq $accepted) 'A read of an older receipt replaced the current intent.'
     foreach($relative in @('scripts/Deploy-QuickSettings.ps1','scripts/Start-QuickSettings.ps1','scripts/Stop-QuickSettings.ps1','scripts/Uninstall-QuickSettings.ps1','scripts/Set-QuickSettingsPinned.ps1','scripts/Get-QuickSettingsOperation.ps1','scripts/QuickSettingsLifecycle.psm1')){
         $path=Join-Path $repo $relative;$tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($path,[ref]$tokens,[ref]$errors);Check ($errors.Count -eq 0) ('Parse failed: '+$relative)
         $source=[IO.File]::ReadAllText($path)
