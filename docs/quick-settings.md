@@ -62,6 +62,14 @@ Shell 收到的 `tileLabel` 与 `quotaIcon` 是有长度、数值范围和颜色
 
 测试：
 
+需要账户占位数据时，在仓库根目录运行下列命令。它生成两份可复用的 QSE v2 页面状态，每份都有相同的两个账户，分别选中主账户和备用账户：
+
+```powershell
+dotnet run --project tests/CodexPool.SecurityTests -c Release -- --quick-settings-placeholders .research/quick-settings/placeholder-preview
+```
+
+示例主账户的 5 小时和周额度为 82% 和 66%，示例备用账户为 37% 和 24%。命令经过 Provider 的切换请求、状态读回和页面生成逻辑，在内存中模拟服务响应；两次切换后回到主账户。输出文件 `demo-main.json` 和 `demo-backup.json` 供测试使用，实际代理的账户列表由实际服务提供。
+
 24H2 26100.1742 的隔离实例也已读到真实账户/额度，完成原生页头代理停止和启动、一次真实上游完成事件，以及 Provider 独立升级；升级前后 Broker、Shell、实际代理与另一个示例 Provider 的 PID 均保持不变。初期登记和请求超时保留为失败记录，分项诊断与正常 Broker 复测后通过，尚未单独确定早期超时原因。没有绕过耗尽账户的资格校验。
 
 状态读取另增加包含响应体的 2 秒期限：`ResponseHeadersRead` 自身的 HttpClient 超时只覆盖响应头。模拟“响应头成功、响应体一直不结束”的回归验证会取消；此防护修复不被用作早期来宾超时的已证实归因。

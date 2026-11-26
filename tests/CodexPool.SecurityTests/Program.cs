@@ -20,12 +20,20 @@ if (args.FirstOrDefault() == "--native-login-helper") return await NativeLoginTe
 var root = Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, ".research", "security-" + Guid.NewGuid().ToString("N")));
 if (args.FirstOrDefault() == "--quick-settings-only")
 {
+    await QuickSettingsPlaceholderAccounts.RunAsync(root);
     await QuickSettingsTests.RunAsync(root);
     Console.WriteLine("Quick Settings atomic settings and production gate tests passed.");
     return 0;
 }
+if (args is ["--quick-settings-placeholders", var previewDirectory])
+{
+    await QuickSettingsPlaceholderAccounts.RunAsync(root, Path.GetFullPath(previewDirectory));
+    Console.WriteLine("PASS demo-main -> demo-backup -> demo-main");
+    return 0;
+}
 var tests = new (string Name, Func<Task> Run)[]
 {
+    ("Quick Settings placeholder accounts switch labels, quota rings and selected rows", () => QuickSettingsPlaceholderAccounts.RunAsync(root)),
     ("Lazy preparation serves healthy model and catalog requests without touching expired standbys", () => LazyPreparationTests.Healthy(root)),
     ("Lazy preparation refreshes the next account only after an explicit rejection", () => LazyPreparationTests.Failover(root)),
     ("Lazy preparation stops on an uncertain standby refresh without trying another account", () => LazyPreparationTests.Unknown(root)),
